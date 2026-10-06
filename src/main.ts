@@ -6,6 +6,7 @@ import { getCurrentWindow } from '@tauri-apps/api/window'
 import { isTauri } from '@tauri-apps/api/core'
 import i18n from './i18n'
 import { initTheme } from './utils/theme'
+import { preloadUserData } from './modules/persistence/userData'
 import './styles/global.scss'
 
 // 在 DOM 挂载前应用主题（class 已在 index.html 内联脚本中预设）
@@ -54,6 +55,9 @@ async function mountWindow() {
   window.addEventListener('unhandledrejection', (event) => {
     crashLog.error('unhandled rejection:', event.reason instanceof Error ? `${event.reason.message}\n${event.reason.stack ?? ''}` : String(event.reason))
   })
+
+  // 播放队列、历史与歌词偏移在 store 创建前取回，恢复仍是同步的，不会与首个操作竞争
+  await preloadUserData()
 
   const app = createApp(App)
   app.use(createPinia())

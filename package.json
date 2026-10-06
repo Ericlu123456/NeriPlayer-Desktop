@@ -54,6 +54,7 @@
     "test:youtube-challenge": "node scripts/test-youtube-challenge.mjs",
     "test:sync-protocol-upgrade": "node scripts/test-sync-protocol-upgrade.mjs",
     "test:history-sync": "node scripts/test-history-sync.mjs",
+    "test:user-data-persistence": "node scripts/test-user-data-persistence.mjs",
     "test:home-continue": "node scripts/test-home-continue.mjs",
     "test:home-feed": "node scripts/test-home-feed.mjs",
     "test:youtube-home-layout": "node scripts/test-youtube-home-layout.mjs",

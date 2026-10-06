@@ -6,7 +6,7 @@ use neri_player_desktop::auth;
 use neri_player_desktop::commands::{
     auth_cmd, debug_cmd, desktop_lyrics_cmd, download_cmd, image_cmd, library_cmd, local_files_cmd,
     listen_together_cmd, lyrics_cmd, player_cmd, playback_fallback_cmd, recommend_cmd, search_cmd, settings_cmd,
-    stats_cmd, storage_cmd, sync_cmd,
+    stats_cmd, storage_cmd, sync_cmd, user_data_cmd,
 };
 use neri_player_desktop::state::AppState;
 use std::sync::mpsc;
@@ -563,6 +563,15 @@ fn main() {
             stats_cmd::clear_playback_stats,
             stats_cmd::remove_playback_stats,
             stats_cmd::playback_stats_identity_key,
+            user_data_cmd::load_user_data_snapshot,
+            user_data_cmd::import_legacy_user_data,
+            user_data_cmd::save_playback_state,
+            user_data_cmd::record_play_history,
+            user_data_cmd::remove_play_history,
+            user_data_cmd::clear_play_history,
+            user_data_cmd::replace_play_history,
+            user_data_cmd::set_lyric_offset,
+            user_data_cmd::replace_lyric_offsets,
             ]);
             move |invoke: tauri::ipc::Invoke<tauri::Wry>| {
                 let label = invoke.message.webview().label().to_string();

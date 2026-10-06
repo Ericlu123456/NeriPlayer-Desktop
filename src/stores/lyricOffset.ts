@@ -21,8 +21,15 @@ import {
 } from '@/modules/lyrics/lyricOffset'
 import { persistTrackSyncPayload } from '@/modules/lyrics/syncTrackPayload'
 import { usePlayerStore } from '@/stores/player'
+import {
+  LEGACY_LYRIC_OFFSETS_KEY,
+  persistUserData,
+  preloadedUserData,
+} from '@/modules/persistence/userData'
+import { createLogger } from '@/utils/logger'
 
-const STORAGE_KEY = 'neri.lyric-user-offsets'
+const STORAGE_KEY = LEGACY_LYRIC_OFFSETS_KEY
+const log = createLogger('lyric-offset')
 
 type OffsetTrack =
   | {
@@ -40,22 +47,41 @@ function sourceFromKey(key: string): string {
   return idx > 0 ? key.slice(0, idx) : 'local'
 }
 
+function sanitizeOffsets(parsed: unknown): Record<string, number> {
+  if (!parsed || typeof parsed !== 'object') return {}
+  const result: Record<string, number> = {}
+  for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
+    const num = clampLyricOffsetMs(typeof value === 'number' ? value : Number(value))
+    if (key && num !== 0) result[key] = num
+  }
+  return result
+}
+
 function readStored(): Record<string, number> {
+  const preloaded = preloadedUserData()
+  if (preloaded) return sanitizeOffsets(preloaded.lyricOffsets)
   try {
     const raw = localStorage.getItem(STORAGE_KEY)
-    if (!raw) return {}
-    const parsed = JSON.parse(raw) as unknown
-    if (!parsed || typeof parsed !== 'object') return {}
-    const result: Record<string, number> = {}
-    for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
-      const num = clampLyricOffsetMs(typeof value === 'number' ? value : Number(value))
-      if (key && num !== 0) result[key] = num
-    }
-    return result
+    return raw ? sanitizeOffsets(JSON.parse(raw)) : {}
   } catch {
     // 本地缓存损坏时降级为空表, 不阻断偏移功能
     return {}
   }
+}
+
+/** 后端按整数毫秒存储，clamp 之后的值可能带小数 */
+function roundedOffsets(map: Record<string, number>): Record<string, number> {
+  return Object.fromEntries(Object.entries(map).map(([key, value]) => [key, Math.round(value)]))
+}
+
+function persistOffsets(command: string, args: Record<string, unknown>, map: Record<string, number>) {
+  if (preloadedUserData()) {
+    void persistUserData(command, args).catch((error) => {
+      log.error(`${command} failed:`, error)
+    })
+    return
+  }
+  writeStored(map)
 }
 
 function writeStored(map: Record<string, number>) {
@@ -73,10 +99,6 @@ function writeStored(map: Record<string, number>) {
 export const useLyricOffsetStore = defineStore('lyricOffset', () => {
   const settings = useSettingsStore()
   const offsets = ref<Record<string, number>>(readStored())
-
-  function persist() {
-    writeStored(offsets.value)
-  }
 
   // 逐曲用户偏移(delta): 本地覆盖优先, 其次同步载荷里的 Android 值, 否则 0
   function getUserOffsetMs(track: OffsetTrack): number {
@@ -96,7 +118,7 @@ export const useLyricOffsetStore = defineStore('lyricOffset', () => {
     if (delta === 0) delete next[key]
     else next[key] = delta
     offsets.value = next
-    persist()
+    persistOffsets('set_lyric_offset', { trackKey: key, offsetMs: Math.round(delta) }, next)
 
     // 写回 syncPayload.userLyricOffsetMs, 对齐 Android SongItem 字段, 供同步上传
     try {
@@ -141,7 +163,7 @@ export const useLyricOffsetStore = defineStore('lyricOffset', () => {
     }
     if (changed) {
       offsets.value = next
-      persist()
+      persistOffsets('replace_lyric_offsets', { offsets: roundedOffsets(next) }, next)
     }
   }
 

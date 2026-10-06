@@ -15,3 +15,4 @@ pub mod settings_cmd;
 pub mod stats_cmd;
 pub mod storage_cmd;
 pub mod sync_cmd;
+pub mod user_data_cmd;

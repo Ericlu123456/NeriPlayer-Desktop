@@ -1,6 +1,15 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import type { TrackInfo } from './player'
+import {
+  LEGACY_HISTORY_DELETIONS_KEY,
+  LEGACY_HISTORY_KEY,
+  persistUserData,
+  preloadedUserData,
+} from '@/modules/persistence/userData'
+import { createLogger } from '@/utils/logger'
+
+const log = createLogger('history')
 
 export interface PlayedEntry {
   track: TrackInfo
@@ -26,8 +35,8 @@ interface BackendHistoryDeletion {
   deleted_at?: number
 }
 
-const STORAGE_KEY = 'neri:play-history'
-const DELETIONS_STORAGE_KEY = 'neri:play-history-deletions'
+const STORAGE_KEY = LEGACY_HISTORY_KEY
+const DELETIONS_STORAGE_KEY = LEGACY_HISTORY_DELETIONS_KEY
 const MAX_ENTRIES = 1000
 const MAX_DELETIONS = 2000
 export const HISTORY_CHANGED_EVENT = 'neri:history-changed'
@@ -126,22 +135,42 @@ export const useHistoryStore = defineStore('history', () => {
   const entries = ref<PlayedEntry[]>([])
   const deletions = ref<HistoryDeletion[]>([])
   let mutationEpoch = 0
+  const database = preloadedUserData() !== null
 
-  function save() {
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(entries.value))
-      localStorage.setItem(DELETIONS_STORAGE_KEY, JSON.stringify(deletions.value))
-    } catch {
-      // 存储失败忽略
+  /** 数据库模式下每次修改只发出对应命令；浏览器开发模式退回整表写 localStorage */
+  function persist(command: string, args: Record<string, unknown>) {
+    if (!database) {
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(entries.value))
+        localStorage.setItem(DELETIONS_STORAGE_KEY, JSON.stringify(deletions.value))
+      } catch {
+        // 存储失败忽略
+      }
+      return
     }
+    void persistUserData(command, args).catch((error) => {
+      log.error(`${command} failed:`, error)
+    })
   }
 
   function load() {
+    const preloaded = preloadedUserData()
+    if (preloaded) {
+      applyStored(preloaded.history.entries, preloaded.history.deletions)
+      return
+    }
     try {
       const rawEntries = localStorage.getItem(STORAGE_KEY)
       const rawDeletions = localStorage.getItem(DELETIONS_STORAGE_KEY)
-      const parsedEntries = rawEntries ? JSON.parse(rawEntries) : []
-      const parsedDeletions = rawDeletions ? JSON.parse(rawDeletions) : []
+      applyStored(rawEntries ? JSON.parse(rawEntries) : [], rawDeletions ? JSON.parse(rawDeletions) : [])
+    } catch {
+      entries.value = []
+      deletions.value = []
+    }
+  }
+
+  function applyStored(parsedEntries: unknown, parsedDeletions: unknown) {
+    try {
       entries.value = Array.isArray(parsedEntries)
         ? parsedEntries
           .map((entry: any) => ({
@@ -168,27 +197,29 @@ export const useHistoryStore = defineStore('history', () => {
 
   function record(track: TrackInfo) {
     mutationEpoch++
+    const playedAt = Date.now()
     const idx = entries.value.findIndex(entry => entry.track.id === track.id)
     if (idx >= 0) entries.value.splice(idx, 1)
     deletions.value = deletions.value.filter(deletion => deletion.track.id !== track.id)
-    entries.value.unshift({ track, playedAt: Date.now() })
+    entries.value.unshift({ track, playedAt })
     if (entries.value.length > MAX_ENTRIES) entries.value = entries.value.slice(0, MAX_ENTRIES)
-    save()
+    persist('record_play_history', { track, playedAt })
     emitHistoryChanged('record')
   }
 
   function remove(trackId: string) {
     mutationEpoch++
+    const deletedAt = Date.now()
     const removed = entries.value.find(entry => entry.track.id === trackId)?.track
     const before = entries.value.length
     entries.value = entries.value.filter(entry => entry.track.id !== trackId)
     if (removed) {
       deletions.value = [
-        { track: removed, deletedAt: Date.now() },
+        { track: removed, deletedAt },
         ...deletions.value.filter(deletion => deletion.track.id !== trackId),
       ].slice(0, MAX_DELETIONS)
     }
-    save()
+    persist('remove_play_history', { trackId, deletedAt })
     if (entries.value.length !== before || Boolean(removed)) emitHistoryChanged('remove')
   }
 
@@ -201,7 +232,7 @@ export const useHistoryStore = defineStore('history', () => {
     deletions.value = [...current, ...deletions.value.filter(deletion => !currentIds.has(deletion.track.id))]
       .slice(0, MAX_DELETIONS)
     entries.value = []
-    save()
+    persist('clear_play_history', { deletedAt })
     emitHistoryChanged('clear')
   }
 
@@ -256,7 +287,15 @@ export const useHistoryStore = defineStore('history', () => {
       .filter(deletion => deletion.track.id && deletion.deletedAt > 0)
       .sort((left, right) => right.deletedAt - left.deletedAt)
       .slice(0, MAX_DELETIONS)
-    save()
+    persist('replace_play_history', {
+      history: {
+        entries: entries.value.map(entry => ({ track: entry.track, playedAt: Math.round(entry.playedAt) })),
+        deletions: deletions.value.map(deletion => ({
+          track: deletion.track,
+          deletedAt: Math.round(deletion.deletedAt),
+        })),
+      },
+    })
     emitHistoryChanged('sync')
   }
 

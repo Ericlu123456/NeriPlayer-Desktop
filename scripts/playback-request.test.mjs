@@ -107,6 +107,16 @@ assert.match(
 )
 assert.match(
   playerStoreSource,
+  /async function flushPlayerState\(\): Promise<void> \{[\s\S]*if \(preloadedUserData\(\)\) \{\s*await persistPlayerStateToDatabase\(\)/,
+  'the close-time flush must be awaitable and write the user database first',
+)
+assert.match(
+  playerStoreSource,
+  /state: queueUnchanged \? \{ \.\.\.state, queue: null \} : state/,
+  'progress saves must not resend an unchanged queue',
+)
+assert.match(
+  playerStoreSource,
   /const compactState = persistedPlayerState\(true\)[\s\S]*localStorage\.setItem\(PLAYER_STATE_KEY, JSON\.stringify\(compactState\)\)/,
   'an oversized queue must fall back to a compact current-track state',
 )

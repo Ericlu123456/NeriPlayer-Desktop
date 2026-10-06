@@ -52,6 +52,12 @@ import {
   restorePersistedPlaybackQueue,
 } from '@/modules/playback/playerState'
 import { summarizeLogError } from '@/utils/logSanitizer'
+import {
+  finishLegacyPlayerStateCleanup,
+  LEGACY_PLAYER_STATE_KEY,
+  persistUserData,
+  preloadedUserData,
+} from '@/modules/persistence/userData'
 import { loadLocalAudioInfo } from '@/modules/playback/localAudioInfo'
 import { loadPlaybackAudioInfo, type PlaybackAudioProperties } from '@/modules/playback/playbackAudioInfo'
 
@@ -303,9 +309,11 @@ const MAX_STARTUP_RECOVERY_ATTEMPTS = 2
 const STARTUP_WATCHDOG_REMOTE_MS = 8_000
 const STARTUP_WATCHDOG_YOUTUBE_MS = 12_000
 
-// 状态持久化
-const PLAYER_STATE_KEY = 'neri:player-state'
+// 状态持久化：正常运行写用户数据库，浏览器开发模式退回 localStorage
+const PLAYER_STATE_KEY = LEGACY_PLAYER_STATE_KEY
 let _persistDebounceTimer: ReturnType<typeof setTimeout> | null = null
+// 上次成功落库的队列序列化结果；队列不变时只更新播放状态行
+let _lastPersistedQueueJson: string | null = null
 let _progressPersistTime = 0
 const PERSIST_DEBOUNCE_MS = 250
 const PROGRESS_PERSIST_INTERVAL_MS = 15000
@@ -500,11 +508,36 @@ export const usePlayerStore = defineStore('player', () => {
     return state
   }
 
+  async function persistPlayerStateToDatabase() {
+    const state = persistedPlayerState()
+    const queueJson = JSON.stringify(state.queue)
+    const queueUnchanged = queueJson === _lastPersistedQueueJson
+    try {
+      await persistUserData('save_playback_state', {
+        state: queueUnchanged ? { ...state, queue: null } : state,
+      })
+      _lastPersistedQueueJson = queueJson
+      finishLegacyPlayerStateCleanup()
+      uiLog.info('state persisted', {
+        queueSize: queue.value.length,
+        queueIndex: queueIndex.value,
+        trackId: currentTrack.value?.id,
+        queueWritten: !queueUnchanged,
+      })
+    } catch (error) {
+      uiLog.error('state persistence failed:', error)
+    }
+  }
+
   /** 退出前立即落盘，避免防抖定时器尚未执行 */
-  function flushPlayerState() {
+  async function flushPlayerState(): Promise<void> {
     if (_persistDebounceTimer) {
       clearTimeout(_persistDebounceTimer)
       _persistDebounceTimer = null
+    }
+    if (preloadedUserData()) {
+      await persistPlayerStateToDatabase()
+      return
     }
     try {
       localStorage.setItem(PLAYER_STATE_KEY, JSON.stringify(persistedPlayerState()))
@@ -532,21 +565,28 @@ export const usePlayerStore = defineStore('player', () => {
     }
   }
 
-  /** 保存播放器状态到 localStorage（250ms debounce） */
+  /** 保存播放器状态（250ms debounce） */
   function savePlayerState() {
     if (_persistDebounceTimer) clearTimeout(_persistDebounceTimer)
     _persistDebounceTimer = setTimeout(() => {
-      flushPlayerState()
+      void flushPlayerState()
     }, PERSIST_DEBOUNCE_MS)
   }
 
-  /** 从 localStorage 恢复播放器状态（store 初始化时调用，不自动播放） */
+  /** 启动前预取的数据库快照；没有后端时读取 localStorage */
+  function readPersistedPlayerState(): any | null {
+    const preloaded = preloadedUserData()
+    if (preloaded) return preloaded.playbackState
+    const raw = localStorage.getItem(PLAYER_STATE_KEY)
+    return raw ? JSON.parse(raw) : null
+  }
+
+  /** 恢复播放器状态（store 初始化时调用，不自动播放） */
   function loadPlayerState() {
     try {
       hasPlaybackSession.value = false
-      const raw = localStorage.getItem(PLAYER_STATE_KEY)
-      if (!raw) return
-      const state = JSON.parse(raw)
+      const state = readPersistedPlayerState()
+      if (!state) return
       const settings = useSettingsStore()
 
       const restored = restorePersistedPlaybackQueue(

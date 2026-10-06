@@ -117,6 +117,12 @@ async function runtime(options = {}) {
     '@/modules/playback/localAudioInfo': localInfo,
     '@/modules/playback/playbackAudioInfo': playbackInfo,
     '@/modules/library/albumDisplay': { displayAlbum: album => album },
+    '@/modules/persistence/userData': {
+      LEGACY_PLAYER_STATE_KEY: 'neri:player-state',
+      preloadedUserData: () => null,
+      persistUserData: async () => undefined,
+      finishLegacyPlayerStateCleanup: () => {},
+    },
   })
   pinia.setActivePinia(pinia.createPinia())
   return { store: loaded.usePlayerStore(), calls, metadata, events }

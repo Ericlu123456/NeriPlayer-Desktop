@@ -194,7 +194,7 @@ let unlistenPlaylistChanged: UnlistenFn | null = null
 let unlistenCloseRequested: UnlistenFn | null = null
 
 function handleBeforeUnload() {
-  player.flushPlayerState()
+  void player.flushPlayerState()
   // 结算最后一段收听，否则关窗前听的时长会丢
   void usePlaybackStatsStore().flushFinal()
 }
@@ -207,9 +207,8 @@ async function handleCloseRequested(event: { preventDefault: () => void }) {
   event.preventDefault()
   closeFlushDone = true
   try {
-    // 同步保存播放器状态 + 等待统计落盘后再真正关窗
-    player.flushPlayerState()
-    await usePlaybackStatsStore().flushFinal()
+    // 等待播放器状态与统计都落库后再真正关窗
+    await Promise.allSettled([player.flushPlayerState(), usePlaybackStatsStore().flushFinal()])
   } catch {
     // 落盘失败不阻塞退出
   }
@@ -419,7 +418,7 @@ onMounted(async () => {
 onUnmounted(() => {
   uninstallDesktopLyrics?.()
   uninstallDesktopLyrics = null
-  player.flushPlayerState()
+  void player.flushPlayerState()
   uninstallShortcuts?.()
   uninstallShortcuts = null
   window.removeEventListener('beforeunload', handleBeforeUnload)

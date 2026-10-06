@@ -9,10 +9,21 @@ const source = await readFile(new URL('../src/stores/history.ts', import.meta.ur
 const compiled = ts.transpileModule(source, {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
 }).outputText
+const persisted = []
+let preloaded = null
+const userData = {
+  LEGACY_HISTORY_KEY: 'neri:play-history',
+  LEGACY_HISTORY_DELETIONS_KEY: 'neri:play-history-deletions',
+  preloadedUserData: () => preloaded,
+  // Tauri invoke 以 JSON 序列化参数，响应式代理同样能序列化
+  persistUserData: async (command, args) => { persisted.push([command, JSON.parse(JSON.stringify(args))]) },
+}
 const exports = {}
 new Function('require', 'exports', compiled)(name => {
   if (name === 'pinia') return pinia
   if (name === 'vue') return vue
+  if (name === '@/modules/persistence/userData') return userData
+  if (name === '@/utils/logger') return { createLogger: () => ({ info() {}, warn() {}, error() {}, debug() {} }) }
   throw new Error(`Unexpected history dependency: ${name}`)
 }, exports)
 
@@ -212,6 +223,57 @@ await regression('normal payload resolves real hashed identity and saves both se
   assert.deepEqual(storedIds('neri:play-history-deletions'), [candidate.id])
   assert.equal(writes, 4)
   assert.deepEqual(events, ['record', 'sync'])
+})
+
+async function databaseRegression(name, run) {
+  cases++
+  storage.clear()
+  writes = 0
+  events.length = 0
+  persisted.length = 0
+  digestQueue.length = 0
+  now = 1_000
+  preloaded = {
+    history: { entries: [{ track: track('netease:stored'), playedAt: 500 }], deletions: [] },
+  }
+  pinia.setActivePinia(pinia.createPinia())
+  const store = exports.useHistoryStore()
+  try {
+    await run(store)
+  } catch (error) {
+    failures.push(name)
+    console.error(`FAIL ${name}: ${error.message}`)
+  } finally {
+    store.$dispose()
+    preloaded = null
+  }
+}
+
+await databaseRegression('database mode restores the preloaded history and persists each mutation', async store => {
+  assert.deepEqual(store.entries.map(item => item.track.id), ['netease:stored'])
+  store.record(candidate)
+  now = 2_000
+  store.remove('netease:stored')
+  now = 3_000
+  store.clear()
+  assert.equal(writes, 0, 'database mode must not write localStorage')
+  assert.deepEqual(persisted.map(([command]) => command), [
+    'record_play_history', 'remove_play_history', 'clear_play_history',
+  ])
+  assert.equal(persisted[0][1].track.id, candidate.id)
+  assert.equal(persisted[0][1].playedAt, 1_000)
+  assert.deepEqual(persisted[1][1], { trackId: 'netease:stored', deletedAt: 2_000 })
+  assert.deepEqual(persisted[2][1], { deletedAt: 3_000 })
+})
+
+await databaseRegression('database mode replaces history only for the current sync payload', async store => {
+  await store.applySyncPayload(payload(), () => false)
+  assert.equal(persisted.length, 0, 'a cancelled payload must not persist')
+  await store.applySyncPayload({ entries: [{ track: track('netease:cloud'), playedAt: 1_500.4 }], deletions: [] })
+  assert.equal(persisted.length, 1)
+  const [command, args] = persisted[0]
+  assert.equal(command, 'replace_play_history')
+  assert.deepEqual(args.history.entries.map(item => [item.track.id, item.playedAt]), [['netease:cloud', 1_500]])
 })
 
 console.log(`History sync regressions: ${cases - failures.length}/${cases} passed`)
