@@ -35,6 +35,7 @@ import {
 import { switchThemeWithRipple, type ThemeMode } from '@/utils/theme'
 import { THEME_COLORS, getSwatchColor, applyThemeColor, getSavedThemeColor, switchThemeColorWithRipple } from '@/utils/themeColor'
 import { shortcutDescriptors } from '@/modules/shortcuts/globalShortcuts'
+import { useEscapeClose } from '@/composables/useEscapeClose'
 import { createLogger } from '@/utils/logger'
 
 const log = createLogger('settings-view')
@@ -1057,6 +1058,23 @@ async function confirmClearGitHub() {
 
 const hideProtocolUpgrade = ref(false)
 watch(() => syncStore.pendingProtocolUpgrade, () => { hideProtocolUpgrade.value = false })
+
+// 页内旧式对话框（.dialog-overlay）同样响应 Escape，并与 M3Dialog 共用弹层栈
+for (const dialog of [
+  showGitHubDialog,
+  showWebDavDialog,
+  showLogoutConfirm,
+  showClearGitHubConfirm,
+  showResetLtIdentityConfirm,
+  showConfigExportWarning,
+  showDownloadTemplateDialog,
+]) {
+  useEscapeClose(() => dialog.value, () => { dialog.value = false })
+}
+useEscapeClose(
+  () => !!syncStore.pendingProtocolUpgrade && !hideProtocolUpgrade.value,
+  () => { hideProtocolUpgrade.value = true },
+)
 </script>
 
 <template>

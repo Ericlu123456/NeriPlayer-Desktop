@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
+import { ref, watch, nextTick, onMounted } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { useI18n } from 'vue-i18n'
 import type { TrackInfo } from '@/stores/player'
@@ -7,6 +7,7 @@ import { useToastStore } from '@/stores/toast'
 import M3Input from '@/components/ui/M3Input.vue'
 import BilibiliCoverImage from '@/components/BilibiliCoverImage.vue'
 import { localPlaylistDisplayName } from '@/modules/library/localPlaylists'
+import { useEscapeClose } from '@/composables/useEscapeClose'
 import { createLogger } from '@/utils/logger'
 
 const log = createLogger('add-to-playlist')
@@ -143,20 +144,11 @@ function close() {
   emit('update:open', false)
 }
 
-function handleKeydown(event: KeyboardEvent) {
-  if (!props.open || event.key !== 'Escape' || event.defaultPrevented) return
-  // 消费掉 ESC, 阻止全局快捷键继续关闭下层 (对齐 Android 返回语义)
-  event.preventDefault()
-  close()
-}
+// 消费掉 ESC, 阻止全局快捷键继续关闭下层 (对齐 Android 返回语义)
+useEscapeClose(() => props.open, close)
 
 onMounted(() => {
-  document.addEventListener('keydown', handleKeydown)
   void loadPlaylists()
-})
-
-onBeforeUnmount(() => {
-  document.removeEventListener('keydown', handleKeydown)
 })
 
 function inferSource(track: TrackInfo) {

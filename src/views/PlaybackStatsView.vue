@@ -10,6 +10,7 @@ import {
   type TrackStat,
 } from '@/stores/playbackStats'
 import BilibiliCoverImage from '@/components/BilibiliCoverImage.vue'
+import { useEscapeClose } from '@/composables/useEscapeClose'
 
 const router = useRouter()
 const player = usePlayerStore()
@@ -17,6 +18,7 @@ const stats = usePlaybackStatsStore()
 const { t } = useI18n()
 
 const showClearConfirm = ref(false)
+useEscapeClose(() => showClearConfirm.value, () => { showClearConfirm.value = false })
 const TOP_CHART_SIZE = 5
 
 const summary = computed(() => stats.current)

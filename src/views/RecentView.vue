@@ -13,6 +13,7 @@ import LocateTrackFab from '@/components/LocateTrackFab.vue'
 import { useTrackSelection } from '@/composables/useTrackSelection'
 import { useLocateCurrentTrack } from '@/composables/useLocateCurrentTrack'
 import { useTrackDownloadMenu } from '@/composables/useTrackDownloadMenu'
+import { useEscapeClose } from '@/composables/useEscapeClose'
 import {
   createContextMenuItem,
   type ContextMenuActionItem,
@@ -28,6 +29,7 @@ const { t } = useI18n()
 
 const searchQuery = ref('')
 const showClearConfirm = ref(false)
+useEscapeClose(() => showClearConfirm.value, () => { showClearConfirm.value = false })
 const trackMenu = ref<{ show: boolean; x: number; y: number; track: TrackInfo | null }>({
   show: false, x: 0, y: 0, track: null,
 })

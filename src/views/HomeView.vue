@@ -22,6 +22,7 @@ import { useHomeFeedStore } from '@/stores/homeFeed'
 import { NETEASE_HOME_SECTIONS } from '@/modules/library/neteaseHome'
 import HomeFeedSection from '@/components/HomeFeedSection.vue'
 import { buildYoutubeHomeSections } from '@/modules/youtube/youtubeHomeLayout'
+import { useEscapeClose } from '@/composables/useEscapeClose'
 
 const router = useRouter()
 const player = usePlayerStore()
@@ -121,6 +122,7 @@ onUnmounted(() => {
 })
 
 const showNotifications = ref(false)
+useEscapeClose(() => showNotifications.value, () => { showNotifications.value = false })
 const homeSearchQuery = ref('')
 
 function submitHomeSearch() {

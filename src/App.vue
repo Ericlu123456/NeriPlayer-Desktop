@@ -266,22 +266,22 @@ function scheduleHistorySync() {
 const KEEP_ALIVE_ROUTE_NAMES = ['home', 'explore', 'library']
 const _scrollPositions = new Map<string, number>()
 let _prevRouteName = route.name as string | undefined
-watch(() => route.fullPath, async () => {
+let pendingScrollTop = 0
+watch(() => route.fullPath, () => {
   // flush:'pre'——此刻 DOM 尚未切换，contentRef.scrollTop 仍是离开页的真实滚动量
   if (_prevRouteName && contentRef.value) {
     _scrollPositions.set(_prevRouteName, contentRef.value.scrollTop)
   }
   const entering = route.name as string | undefined
   _prevRouteName = entering
-  await nextTick()
-  requestAnimationFrame(() => {
-    if (!contentRef.value) return
-    const restore = entering && KEEP_ALIVE_ROUTE_NAMES.includes(entering)
-      ? _scrollPositions.get(entering) ?? 0
-      : 0
-    contentRef.value.scrollTo({ top: restore, left: 0 })
-  })
+  pendingScrollTop = entering && KEEP_ALIVE_ROUTE_NAMES.includes(entering)
+    ? _scrollPositions.get(entering) ?? 0
+    : 0
 }, { flush: 'pre' })
+// out-in 过渡要等离开页淡出后才插入新页；在 enter 钩子里滚动，才作用在新页上
+function restoreContentScroll() {
+  contentRef.value?.scrollTo({ top: pendingScrollTop, left: 0 })
+}
 
 // 动态取色：跟随封面主题色。解析当前深浅色，供令牌生成使用
 function resolveDynamicIsDark(): boolean {
@@ -367,10 +367,9 @@ onMounted(async () => {
     },
     toggleShuffle: () => player.toggleShuffle(),
     cycleRepeat: () => player.toggleRepeatMode(),
-    // 覆盖所有实际存在的弹层根类；旧选择器 .dialog-overlay/.m3-dialog-scrim 均不存在，
-    // 导致弹层打开时全局播放快捷键仍生效（UI-002）
+    // 覆盖所有实际存在的弹层根类，弹层打开时不响应全局播放快捷键（UI-002）
     isOverlayOpen: () => document.querySelector(
-      '.m3-dialog-overlay, .atp-overlay, .lt-overlay, .queue-overlay, .notif-overlay, .debug-dialog-overlay',
+      '.m3-dialog-overlay, .dialog-overlay, .context-menu-overlay, .atp-overlay, .lt-overlay, .queue-overlay, .notif-overlay, .debug-dialog-overlay',
     ) !== null,
   })
 
@@ -457,7 +456,7 @@ onUnmounted(() => {
       }"
     >
       <router-view v-slot="{ Component, route }">
-        <transition name="fade" mode="out-in">
+        <transition name="fade" mode="out-in" @enter="restoreContentScroll">
           <keep-alive :include="['HomeView', 'ExploreView', 'LibraryView']">
             <component :is="Component" :key="route.path" />
           </keep-alive>
