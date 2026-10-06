@@ -423,8 +423,11 @@ SAF 目录、安全模式等）不在桌面端范围内；桌面端仍在持续�
   WebDAV 密码），与 Android 端 EncryptedSharedPreferences 的
   威胁模型一致：防「文件被拷走后可读」；
   旧版系统钥匙串中的凭据会在首次读取时自动迁移。
-- 歌单等本地数据以 JSON 落盘，统一走原子写入工具（临时文件 + rename），
-  避免断电/崩溃导致文件损坏。
+- 歌单、收藏、播放历史、播放队列、播放统计、下载目录、同步元数据以及
+  详情/歌词缓存存放在 SQLite 用户数据库 `neri_user_data.db`（表结构对齐
+  Android `NeriUserDataDatabase`，WAL 且每次提交 fsync）；旧版 JSON 文件与
+  WebView localStorage 数据在首次启动时按数据域导入一次，原文件移入
+  `legacy-json-backup/`。设置、登录态与同步配置仍为键值存储。
 - 日志经脱敏处理后写入文件（可配置级别与开关），
   崩溃报告独立落盘。
 
@@ -516,6 +519,7 @@ NeriPlayer Desktop 支持将本地元数据同步到 **用户自己的 GitHub �
 
 ### 近期已落地
 
+- [x] 用户数据迁移到 SQLite 数据库（对齐 Android Room），旧数据自动导入
 - [x] 网易云艺术家详情页与收藏页艺术家分类
 - [x] 国际化模式下 YouTube Music 首页货架优先
 - [x] 分层 ESC 关闭、光标锚定菜单与菜单细节打磨

@@ -458,8 +458,13 @@ file an issue when the two apps disagree.
   password) in app-side encrypted files, matching the Android
   EncryptedSharedPreferences threat model; legacy keychain entries are
   migrated on first read.
-- Local data is JSON on disk, always written through an atomic-write
-  helper (temp file + rename) to survive crashes.
+- Playlists, favorites, play history, the playback queue, playback stats,
+  the download catalog, sync metadata and detail/lyrics caches live in the
+  SQLite user database `neri_user_data.db` (tables mirror Android's
+  `NeriUserDataDatabase`; WAL with an fsync per commit). Legacy JSON files and
+  WebView localStorage data are imported once per domain on first launch and
+  the originals are moved to `legacy-json-backup/`. Settings, sign-in state
+  and sync configuration stay in key-value stores.
 - Logs are sanitized before hitting the file log (level and switch
   configurable); crash reports are stored separately.
 
@@ -558,6 +563,7 @@ feedback; no fixed schedule is promised.
 
 ### Recently landed
 
+- [x] User data moved to a SQLite database (aligned with Android Room) with automatic legacy import
 - [x] NetEase artist detail page and a favorites artists category
 - [x] YouTube Music home shelves first in internationalization mode
 - [x] Layered ESC close, cursor-anchored menus, and menu polish
