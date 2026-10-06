@@ -819,15 +819,7 @@ fn known_lease_targets() -> AppResult<HashSet<String>> {
         .lock()
         .map_err(|_| invalid("lease capability lock poisoned"))?;
     if guard.is_empty() && !cfg!(test) {
-        let path = lease_capability_path();
-        match std::fs::read(path) {
-            Ok(bytes) => {
-                *guard = serde_json::from_slice(&bytes)
-                    .map_err(|_| invalid("lease capability metadata corrupt"))?
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
-        }
+        *guard = crate::db::user_db()?.read(super::storage::load_lease_targets)?;
     }
     Ok(guard.clone())
 }
@@ -838,15 +830,10 @@ fn mark_known_lease(scope: &str) -> AppResult<()> {
         .map_err(|_| invalid("lease capability lock poisoned"))?;
     targets.insert(scope.to_string());
     if !cfg!(test) {
-        crate::fsutil::atomic_write(lease_capability_path(), serde_json::to_vec(&*targets)?)?;
+        crate::db::user_db()?
+            .write(|transaction| super::storage::save_lease_targets(transaction, &targets))?;
     }
     Ok(())
-}
-fn lease_capability_path() -> std::path::PathBuf {
-    dirs_next::data_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("NeriPlayer")
-        .join("sync-webdav-finite-leases.json")
 }
 
 async fn bounded_body(mut response: reqwest::Response, maximum: usize) -> AppResult<Vec<u8>> {

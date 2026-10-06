@@ -132,11 +132,7 @@ pub(crate) fn complete_cloud_sync(
     local: &SyncData,
     epoch: u64,
 ) -> AppResult<SyncOutcome> {
-    ensure_local_playlist_epoch(epoch)?;
-    save_archive_metadata(&completed.merged)?;
-    save_synced_playlists_if_epoch(&completed.merged, epoch)?;
-    save_recent_play_history(&completed.merged)?;
-    save_base_snapshot(&completed.merged, &completed.scope)?;
+    apply_cloud_sync_locally(&completed.merged, &completed.scope, epoch)?;
     let previous_playlists = completed
         .remote
         .as_ref()
@@ -186,21 +182,26 @@ pub(crate) fn complete_cloud_sync(
     })
 }
 
-pub(crate) fn sync_extensions_path() -> std::path::PathBuf {
-    dirs_next::data_dir().unwrap_or_else(|| std::path::PathBuf::from(".")).join("NeriPlayer").join("sync-android-metadata.json")
+/// 把云端合并结果整体落到本地：归档扩展、歌单与收藏、最近播放快照和合并基线
+/// 在同一个事务里提交，任何一步失败都不会留下只应用了一半的同步结果
+fn apply_cloud_sync_locally(merged: &SyncData, scope: &str, epoch: u64) -> AppResult<()> {
+    let _guard = playlist::lock_io();
+    ensure_local_playlist_epoch(epoch)?;
+    let store = merged_playlist_store(merged)?;
+    crate::db::user_db()?.write(|transaction| {
+        super::storage::save_archive_metadata(transaction, merged)?;
+        store.save_into(transaction)?;
+        crate::library::favorites::save_into(transaction, &merged.favorite_playlists)?;
+        super::storage::save_recent_play_history(transaction, merged)?;
+        super::storage::save_base_snapshot(transaction, merged, scope)
+    })?;
+    playlist::mark_io_changed();
+    Ok(())
 }
 
-#[derive(Default, Serialize, Deserialize)]
-#[serde(rename_all="camelCase")]
-struct PersistedArchiveMetadata {
-    #[serde(default)] extensions: serde_json::Map<String, serde_json::Value>,
-    #[serde(default)] playback_stats: Vec<SyncTrackStat>,
-    #[serde(default)] playback_stat_buckets: Vec<SyncPlaybackStatBucket>,
-    #[serde(default)] playback_stats_cleared_at: i64,
-}
-
+/// 读取旧版同步侧车里的统计来源（仅供旧版统计导入使用）
 pub(crate) fn load_saved_stats_provenance(path: &std::path::Path) -> AppResult<SyncStatsPayload> {
-    let metadata: PersistedArchiveMetadata =
+    let metadata: super::storage::ArchiveMetadata =
         read_optional_json(path, "Android sync metadata")?.unwrap_or_default();
     Ok(SyncStatsPayload {
         stats: metadata.playback_stats,
@@ -209,52 +210,38 @@ pub(crate) fn load_saved_stats_provenance(path: &std::path::Path) -> AppResult<S
     })
 }
 
-fn save_archive_metadata(data: &SyncData) -> AppResult<()> {
-    let metadata=PersistedArchiveMetadata {extensions:data.extensions.clone(),playback_stats:data.playback_stats.clone(),playback_stat_buckets:data.playback_stat_buckets.clone(),playback_stats_cleared_at:data.playback_stats_cleared_at};
-    crate::fsutil::atomic_write(sync_extensions_path(), serde_json::to_vec(&metadata)?)?;
-    Ok(())
-}
-
-/// 构建本地同步数据（从 tauri-plugin-store 读取歌单等）
+/// 构建本地同步数据（歌单、收藏、同步元数据均来自用户数据库）
 pub fn build_local_sync_data(
     app: &AppHandle,
     history_entries: Option<&[SyncHistoryEntry]>,
     history_deletions: Option<&[SyncHistoryDeletion]>,
     stats: Option<SyncStatsPayload>,
 ) -> AppResult<SyncData> {
-    // 从 store 读取本地歌单数据
-    // 当前歌单系统使用文件存储，构建 SyncData
     let device_id = get_or_create_device_id(app);
     let hostname = whoami::fallible::hostname().unwrap_or_else(|_| "Desktop".into());
 
-    let stored_history = Some(load_recent_play_history()?);
+    // 歌单、删除墓碑、收藏与同步元数据来自同一次读取，不能读到前后不一致的库
+    let (store, favorites, stored, metadata) = crate::db::user_db()?.read(|connection| {
+        Ok((
+            PlaylistStore::load_from(connection)?,
+            crate::library::favorites::load_from(connection, true)?,
+            super::storage::load_recent_play_history(connection)?,
+            super::storage::load_archive_metadata(connection)?,
+        ))
+    })?;
     let mut recent_plays = history_entries
         .map(|entries| history_entries_to_sync(entries, &device_id))
-        .unwrap_or_else(|| {
-            stored_history
-                .as_ref()
-                .map(|history| history.recent_plays.clone())
-                .unwrap_or_default()
-        });
+        .unwrap_or_else(|| stored.recent_plays.clone());
     let mut recent_play_deletions = history_deletions
         .map(|deletions| history_deletions_to_sync(deletions, &device_id))
-        .unwrap_or_else(|| {
-            stored_history
-                .as_ref()
-                .map(|history| history.recent_play_deletions.clone())
-                .unwrap_or_default()
-        });
-    let stored = stored_history.as_ref().unwrap();
+        .unwrap_or_else(|| stored.recent_play_deletions.clone());
     preserve_recent_progress(&mut recent_plays, &stored.recent_plays);
     recent_play_deletions = merge::merge_recent_play_deletions(&recent_play_deletions, &stored.recent_play_deletions);
     recent_plays = merge::merge_recent_plays(&recent_plays, &stored.recent_plays, &recent_play_deletions);
     let stats = stats.unwrap_or_default();
-    let metadata:PersistedArchiveMetadata=read_optional_json(&sync_extensions_path(),"Android sync metadata")?.unwrap_or_default();
     let cleared_at=stats.cleared_at.max(metadata.playback_stats_cleared_at);
     let buckets=merge::merge_stat_buckets(&stats.buckets,&metadata.playback_stat_buckets,cleared_at);
     let merged_stats=merge::merge_playback_stats(&stats.stats,&metadata.playback_stats,cleared_at);
-    // 歌单与删除墓碑来自同一次读取，不能分两次读到前后不一致的库
-    let store = PlaylistStore::load()?;
 
     Ok(SyncData {
         version: "2.0".into(),
@@ -262,7 +249,7 @@ pub fn build_local_sync_data(
         device_name: format!("NeriPlayer Desktop ({})", hostname),
         last_modified: chrono::Utc::now().timestamp_millis(),
         playlists: local_sync_playlists(&store),
-        favorite_playlists: crate::library::favorites::load(true)?,
+        favorite_playlists: favorites,
         recent_plays,
         sync_log: Vec::new(),
         recent_play_deletions,
@@ -318,40 +305,6 @@ fn history_deletions_to_sync(
             }
         })
         .collect()
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
-struct PersistedRecentPlayHistory {
-    #[serde(default)]
-    recent_plays: Vec<SyncRecentPlay>,
-    #[serde(default)]
-    recent_play_deletions: Vec<SyncRecentPlayDeletion>,
-}
-
-fn recent_play_history_path() -> std::path::PathBuf {
-    let mut path = dirs_next::data_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
-    path.push("NeriPlayer");
-    path.push("recent-play-history.json");
-    path
-}
-
-fn load_recent_play_history() -> AppResult<PersistedRecentPlayHistory> {
-    read_optional_json(&recent_play_history_path(), "recent-play-history.json")
-        .map(|history| history.unwrap_or_default())
-}
-
-fn save_recent_play_history(data: &SyncData) -> AppResult<()> {
-    save_recent_history_at(&recent_play_history_path(), data)
-}
-
-fn save_recent_history_at(path: &std::path::Path, data: &SyncData) -> AppResult<()> {
-    let history = PersistedRecentPlayHistory {
-        recent_plays: data.recent_plays.clone(),
-        recent_play_deletions: data.recent_play_deletions.clone(),
-    };
-    crate::fsutil::atomic_write(path, serde_json::to_vec_pretty(&history)?)?;
-    Ok(())
 }
 
 fn with_history(mut result: SyncResult, data: &SyncData) -> SyncResult {
@@ -804,13 +757,7 @@ pub fn save_synced_playlists(merged: &SyncData) -> AppResult<()> {
 /// 仅在同步期间没有本地歌单写入时应用合并结果
 ///
 /// 网络请求可能持续数秒，期间用户仍可编辑歌单。epoch 变化时拒绝回写，
-/// 保留用户刚写入的文件，下一轮同步再合并远端结果，避免静默覆盖本地编辑
-pub fn save_synced_playlists_if_epoch(merged: &SyncData, expected_epoch: u64) -> AppResult<()> {
-    let _guard = playlist::lock_io();
-    ensure_local_playlist_epoch(expected_epoch)?;
-    save_synced_playlists_locked(merged)
-}
-
+/// 保留用户刚写入的数据，下一轮同步再合并远端结果，避免静默覆盖本地编辑
 pub(super) fn ensure_local_playlist_epoch(expected_epoch: u64) -> AppResult<()> {
     if playlist::io_epoch() != expected_epoch {
         return Err(AppError::Other(
@@ -821,6 +768,19 @@ pub(super) fn ensure_local_playlist_epoch(expected_epoch: u64) -> AppResult<()> 
 }
 
 fn save_synced_playlists_locked(merged: &SyncData) -> AppResult<()> {
+    let store = merged_playlist_store(merged)?;
+    // 歌单与收藏（含删除墓碑）在同一事务里落库，不会出现只写了一半的同步结果；
+    // 写失败必须上抛，静默吞掉会让用户以为已同步
+    crate::db::user_db()?.write(|transaction| {
+        store.save_into(transaction)?;
+        crate::library::favorites::save_into(transaction, &merged.favorite_playlists)
+    })?;
+    playlist::mark_io_changed();
+    Ok(())
+}
+
+/// 以本地歌单库为基底构建合并后的歌单库（保留本地 ID 映射与本地文件曲目）
+fn merged_playlist_store(merged: &SyncData) -> AppResult<PlaylistStore> {
     // 读取失败时中止回写：在空库上重建会把用户本地独有的歌单 ID 映射全部丢弃
     let mut store = PlaylistStore::load()?;
     let existing_playlists = store.playlists.clone();
@@ -920,14 +880,7 @@ fn save_synced_playlists_locked(merged: &SyncData) -> AppResult<()> {
         })
         .collect();
     store.fix_next_id();
-    // 歌单与收藏（含删除墓碑）在同一事务里落库，不会出现只写了一半的同步结果；
-    // 写失败必须上抛，静默吞掉会让用户以为已同步
-    crate::db::user_db()?.write(|transaction| {
-        store.save_into(transaction)?;
-        crate::library::favorites::save_into(transaction, &merged.favorite_playlists)
-    })?;
-    playlist::mark_io_changed();
-    Ok(())
+    Ok(store)
 }
 
 /// 读取收藏歌单（供 list 命令调用，隐藏墓碑）
@@ -955,25 +908,9 @@ fn local_playlist_song_deletions(store: &PlaylistStore) -> Vec<SyncPlaylistSongD
         .collect()
 }
 
-// Base Snapshot：用于三方歌曲合并的删除检测
-/// snapshot 文件路径
-fn base_snapshot_path(scope: &str) -> std::path::PathBuf {
-    let mut path = dirs_next::data_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
-    path.push("NeriPlayer");
-    path.push(format!("sync-base-snapshot-{}.json", scope));
-    path
-}
-
-/// 加载上次同步后每个歌单的歌曲 stable_key 集合
-/// 格式: { "playlist_id": ["key1", "key2", ...], ... }
+/// 加载上次同步后每个歌单的歌曲 stable_key 集合（三方歌曲合并的删除检测基线）
 pub fn load_base_snapshot(scope: &str) -> AppResult<HashMap<String, HashSet<String>>> {
-    let path = base_snapshot_path(scope);
-    let raw: HashMap<String, Vec<String>> =
-        read_optional_json(&path, &format!("base snapshot {scope}"))?.unwrap_or_default();
-    Ok(raw
-        .into_iter()
-        .map(|(k, v)| (k, v.into_iter().collect()))
-        .collect())
+    crate::db::user_db()?.read(|connection| super::storage::load_base_snapshot(connection, scope))
 }
 
 /// 读取可选 JSON 文件：不存在表示首次运行，损坏则隔离现场并失败。
@@ -1004,27 +941,6 @@ where
         }
     }
 }
-
-/// 保存当前合并结果作为下次同步的 base snapshot
-fn save_base_snapshot(merged: &SyncData, scope: &str) -> AppResult<()> {
-    save_base_snapshot_at(&base_snapshot_path(scope), merged)
-}
-
-fn save_base_snapshot_at(path: &std::path::Path, merged: &SyncData) -> AppResult<()> {
-    let snapshot: HashMap<String, Vec<String>> = merged.playlists.iter()
-        .filter(|p| !p.is_deleted)
-        .map(|p| {
-            let keys: Vec<String> = p.songs.iter()
-                .map(|s| s.identity().stable_key())
-                .collect();
-            (p.id.clone(), keys)
-        })
-        .collect();
-
-    crate::fsutil::atomic_write(path, serde_json::to_vec(&snapshot)?)?;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1166,17 +1082,6 @@ mod tests {
         assert_eq!(std::fs::read(quarantined[0].path()).unwrap(), b"{not-json");
 
         std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
-    fn failed_history_and_base_writes_propagate_and_retry_idempotently() {
-        let directory=std::env::temp_dir().join(format!("neri-sync-write-failure-{}",uuid::Uuid::new_v4()));std::fs::create_dir_all(&directory).unwrap();let blocker=directory.join("blocked");std::fs::write(&blocker,b"file").unwrap();let blocked=blocker.join("state.json");let data=SyncData::default();
-        assert!(save_recent_history_at(&blocked,&data).is_err());assert!(save_base_snapshot_at(&blocked,&data).is_err());
-        std::fs::remove_file(&blocker).unwrap();
-        for (name,write) in [("history",save_recent_history_at as fn(&std::path::Path,&SyncData)->AppResult<()>),("base",save_base_snapshot_at)] {
-            let path=directory.join(name);write(&path,&data).unwrap();let first=std::fs::read(&path).unwrap();write(&path,&data).unwrap();assert_eq!(std::fs::read(&path).unwrap(),first);std::fs::remove_file(path).unwrap();
-        }
-        std::fs::remove_dir(directory).unwrap();
     }
 
     #[test]

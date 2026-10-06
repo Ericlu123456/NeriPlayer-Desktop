@@ -8,4 +8,5 @@ pub mod manager;
 pub mod archive;
 pub mod webdav_archive;
 pub mod cloud;
+pub(crate) mod storage;
 mod webdav_gc;

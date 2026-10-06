@@ -22,27 +22,15 @@ pub async fn scan_music_directory(
 
 #[tauri::command]
 pub async fn get_playlist_usage_stats() -> AppResult<Value> {
-    tokio::task::spawn_blocking(|| read_playlist_usage_stats(&manager::sync_extensions_path()))
-        .await
-        .map_err(|error| AppError::Other(error.to_string()))?
+    tokio::task::spawn_blocking(|| {
+        let metadata = crate::db::user_db()?.read(crate::sync::storage::load_archive_metadata)?;
+        playlist_usage_stats_value(&metadata.extensions)
+    })
+    .await
+    .map_err(|error| AppError::Other(error.to_string()))?
 }
 
-fn read_playlist_usage_stats(path: &std::path::Path) -> AppResult<Value> {
-    let content = match std::fs::read(path) {
-        Ok(content) => content,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(serde_json::json!([]));
-        }
-        Err(error) => return Err(error.into()),
-    };
-    let metadata: Value = serde_json::from_slice(&content)?;
-    let metadata = metadata.as_object()
-        .ok_or_else(|| AppError::Other("Android sync metadata must be an object".into()))?;
-    let Some(extensions) = metadata.get("extensions") else {
-        return Ok(serde_json::json!([]));
-    };
-    let extensions = extensions.as_object()
-        .ok_or_else(|| AppError::Other("Android sync extensions must be an object".into()))?;
+fn playlist_usage_stats_value(extensions: &serde_json::Map<String, Value>) -> AppResult<Value> {
     let Some(usage) = extensions.get("playlistUsageStats") else {
         return Ok(serde_json::json!([]));
     };
@@ -1234,50 +1222,19 @@ mod playlist_usage_tests {
     }
 
     #[test]
-    fn missing_metadata_returns_empty_usage_without_creating_a_file() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("sync-android-metadata.json");
-
-        assert_eq!(read_playlist_usage_stats(&path).unwrap(), json!([]));
-        assert!(!path.exists());
-    }
-
-    #[test]
     fn metadata_without_playlist_usage_returns_an_empty_array() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("sync-android-metadata.json");
-        for metadata in [json!({}), json!({"extensions": {}})] {
-            std::fs::write(&path, metadata.to_string()).unwrap();
-            assert_eq!(read_playlist_usage_stats(&path).unwrap(), json!([]));
-        }
-    }
-
-    #[test]
-    fn corrupt_metadata_returns_an_error_without_quarantining_the_file() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("sync-android-metadata.json");
-        let content = b"{invalid metadata";
-        std::fs::write(&path, content).unwrap();
-
-        assert!(read_playlist_usage_stats(&path).is_err());
-        assert_eq!(std::fs::read(&path).unwrap(), content);
-        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
-    }
-
-    #[test]
-    fn unreadable_metadata_returns_an_error() {
-        let directory = tempfile::tempdir().unwrap();
-        assert!(read_playlist_usage_stats(directory.path()).is_err());
+        assert_eq!(playlist_usage_stats_value(&serde_json::Map::new()).unwrap(), json!([]));
+        let extensions = json!({"lyricOverrides": []});
+        assert_eq!(playlist_usage_stats_value(extensions.as_object().unwrap()).unwrap(), json!([]));
     }
 
     #[test]
     fn synced_usage_preserves_android_long_ids_and_camel_case_fields() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("sync-android-metadata.json");
-        let content = br#"{"extensions":{"playlistUsageStats":[{"playlistKey":"youtubeMusic:VLdemo","source":"youtubeMusic","id":9223372036854775807,"fid":9007199254740993,"mid":-9223372036854775808,"browseId":"VLdemo","playlistId":"demo","name":"Music","coverUrl":"https://example.test/cover","trackCount":12,"firstOpenedAt":1710000000000,"lastOpenedAt":1720000000000,"openCount":3,"counterShards":[]}],"localPlaylistPlaybackStats":[{"playlistId":7,"totalPlayCount":8}]},"playbackStats":[]}"#;
-        std::fs::write(&path, content).unwrap();
+        let metadata: crate::sync::storage::ArchiveMetadata = serde_json::from_str(r#"{"extensions":{"playlistUsageStats":[{"playlistKey":"youtubeMusic:VLdemo","source":"youtubeMusic","id":9223372036854775807,"fid":9007199254740993,"mid":-9223372036854775808,"browseId":"VLdemo","playlistId":"demo","name":"Music","coverUrl":"https://example.test/cover","trackCount":12,"firstOpenedAt":1710000000000,"lastOpenedAt":1720000000000,"openCount":3,"counterShards":[]}],"localPlaylistPlaybackStats":[{"playlistId":7,"totalPlayCount":8}]},"playbackStats":[]}"#).unwrap();
+        let stored = serde_json::to_string(&metadata).unwrap();
+        let reloaded: crate::sync::storage::ArchiveMetadata = serde_json::from_str(&stored).unwrap();
 
-        let usage = read_playlist_usage_stats(&path).unwrap();
+        let usage = playlist_usage_stats_value(&reloaded.extensions).unwrap();
         assert_eq!(usage.as_array().unwrap().len(), 1);
         assert_eq!(usage[0]["id"], "9223372036854775807");
         assert_eq!(usage[0]["fid"], "9007199254740993");
@@ -1287,22 +1244,17 @@ mod playlist_usage_tests {
         assert_eq!(usage[0]["trackCount"], 12);
         assert_eq!(usage[0]["lastOpenedAt"], 1720000000000_i64);
         assert_eq!(usage[0]["openCount"], 3);
-        assert_eq!(std::fs::read(&path).unwrap(), content);
+        assert_eq!(reloaded.extensions["playlistUsageStats"][0]["id"], json!(9223372036854775807_i64));
     }
 
     #[test]
     fn invalid_usage_shapes_return_an_error() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("sync-android-metadata.json");
-        for metadata in [
-            json!([]),
-            json!({"extensions": []}),
-            json!({"extensions": {"playlistUsageStats": {}}}),
-            json!({"extensions": {"playlistUsageStats": [null]}}),
-            json!({"extensions": {"playlistUsageStats": [{"id": 1.5}]}}),
+        for extensions in [
+            json!({"playlistUsageStats": {}}),
+            json!({"playlistUsageStats": [null]}),
+            json!({"playlistUsageStats": [{"id": 1.5}]}),
         ] {
-            std::fs::write(&path, metadata.to_string()).unwrap();
-            assert!(read_playlist_usage_stats(&path).is_err());
+            assert!(playlist_usage_stats_value(extensions.as_object().unwrap()).is_err());
         }
     }
 }
