@@ -186,6 +186,23 @@ cargo clippy         # lint（交付要求零警告）
   - 按域分组的命令实现：player / library / search / lyrics /
     settings / auth / recommend / sync / download / listen_together /
     stats / storage / image / debug。
+- `commands/download_cmd.rs`、`commands/download_metadata.rs`
+  - 前端 `stores/download.ts` 与 `modules/download/downloadQueue.ts` 调度任务，
+    `DownloadsView.vue` 在下载 Tab 展示排队/解析/传输/元数据处理进度、取消与失败重试。
+    并发设置限制为 1-8，默认 6；默认跟随播放音质，也可使用平台独立下载音质。
+  - 音频位于选定根目录，`Lyrics/` 存歌词、翻译与罗马字，`Covers/` 存封面，
+    `.tmp/` 存临时文件；`<音频文件名>.npmeta.json` 保存 NP 元数据与关联资源引用。
+    元数据补齐默认开启，标准化歌词嵌入默认关闭；标准化不覆盖 sidecar/NP 中的原文。
+    写标签后更新 manifest 的最终文件大小，避免将标签造成的大小变化误判为损坏。
+- `commands/local_files_cmd.rs`、`library/local_file_tags.rs`
+  - `LocalFilesView.vue` 与 `stores/library.ts` 提供可取消的扫描预览，搜索、多选与
+    已入歌单/元数据重复筛选；扫描不写歌单，由用户手动导入现有或新歌单。
+    标题/歌手/专辑先在副本写入，读回验证原有歌词、图片和其他标签后原子替换，
+    保留 NP sidecar 未修改字段；已下载文件的标签修改同时更新下载清单并发送
+    `downloads-changed`，提交失败时回滚。
+  - 针对性测试：`node scripts/test-local-scan-preview.mjs`、
+    `node scripts/test-local-scan-store.mjs` 与
+    `cargo test --manifest-path src-tauri/Cargo.toml --lib library::local_file_tags::tests`。
 - `audio/`
   - `player.rs`（`PlayerEngine`，播放/seek/淡入淡出/交叉淡入淡出）、
     `queue.rs`（随机/循环）、`effects.rs`（5 频段 EQ、响度均衡、

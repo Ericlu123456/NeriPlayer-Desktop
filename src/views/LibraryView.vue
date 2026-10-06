@@ -4,15 +4,14 @@ import { useRouter, useRoute } from 'vue-router'
 
 defineOptions({ name: 'LibraryView' })
 import { useI18n } from 'vue-i18n'
-import { useLibraryStore } from '@/stores/library'
+import LocalFilesView from '@/views/LocalFilesView.vue'
 import { normalizeTrack, usePlayerStore, type TrackInfo } from '@/stores/player'
 import { useRecommendStore } from '@/stores/recommend'
 import { AUTH_CHANGED_EVENT, useAuthStore } from '@/stores/auth'
-import { useDownloadStore } from '@/stores/download'
+import DownloadsView from '@/views/DownloadsView.vue'
 import { useToastStore } from '@/stores/toast'
 import { convertFileSrc, invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
-import { open as dialogOpen } from '@tauri-apps/plugin-dialog'
 import M3Dialog from '@/components/ui/M3Dialog.vue'
 import M3Input from '@/components/ui/M3Input.vue'
 import ContextMenu from '@/components/ui/ContextMenu.vue'
@@ -49,11 +48,9 @@ const log = createLogger('library-view')
 const router = useRouter()
 const route = useRoute()
 const { t } = useI18n()
-const library = useLibraryStore()
 const player = usePlayerStore()
 const recommend = useRecommendStore()
 const auth = useAuthStore()
-const downloadStore = useDownloadStore()
 const toast = useToastStore()
 
 // 喜欢的歌曲计数
@@ -245,39 +242,6 @@ async function loadPlaylists() {
   }
 }
 
-function inferTrackSource(track: TrackInfo) {
-  if (track.id.startsWith('netease:')) return 'netease'
-  if (track.id.startsWith('qq:')) return 'qq'
-  if (track.id.startsWith('bilibili:')) return 'bilibili'
-  if (track.id.startsWith('youtube:')) return 'youtube'
-  return 'local'
-}
-
-// 扫描时封面路径经 convertFileSrc 转成 asset URL, 直接落盘会把 webview 专用 URL 写进
-// playlists.json, 协议格式变更/数据迁移后封面失效（SC-12）。持久化前反解回原始路径
-function assetUrlToLocalPath(value?: string | null): string {
-  if (!value) return ''
-  const m = value.match(/^(?:asset:\/\/localhost\/|https?:\/\/asset\.localhost\/)(.+)$/i)
-  if (!m) return value
-  try { return decodeURIComponent(m[1]) } catch { return value }
-}
-
-function toBackendTrack(track: TrackInfo) {
-  return {
-    id: track.id,
-    title: track.title,
-    artist: track.artist,
-    album: track.album || '',
-    duration_ms: track.durationMs || 0,
-    source: inferTrackSource(track),
-    url: track.audioUrl || '',
-    cover_url: assetUrlToLocalPath(track.coverUrl) || null,
-    added_at: Math.max(0, Math.round(track.addedAt || 0)),
-    sync_payload: track.syncPayload ?? null,
-    playlist_key: track.playlistKey ?? null,
-  }
-}
-
 function platformLabel(source?: string) {
   switch ((source || '').toLowerCase()) {
     case 'netease': return t('player.source_netease')
@@ -362,6 +326,7 @@ const tabSearchModel = computed({
 })
 const tabSearchHint = computed(() =>
   isLocalArtistSearch.value ? t('library.local_artist_search_hint')
+  : activeTab.value === 0 && localCategory.value === 'files' ? t('library.local_scan_search')
   : activeTab.value === 2 ? t('library.download_search_hint')
   : t('library.tab_search_hint'),
 )
@@ -425,16 +390,8 @@ const filteredBiliPlaylists = computed(() =>
 const filteredYoutubePlaylists = computed(() =>
   youtubePlaylists.value.filter((ypl: any) => matchesQuery(tabQuery.value, ypl.name)),
 )
-// 下载页：同一关键词同时过滤进行中任务与已下载文件（标题/歌手不区分大小写）
-const filteredActiveDownloads = computed(() =>
-  downloadStore.activeDownloads.filter((task) => matchesQuery(tabQuery.value, task.title, task.artist)),
-)
-const filteredDownloads = computed(() =>
-  downloadStore.downloads.filter((dl) => matchesQuery(tabQuery.value, dl.title, dl.artist)),
-)
-
 // 本地库分类：歌单 / 歌手（对齐 Android LOCAL_CATEGORY_ARTIST）
-type LocalCategory = 'playlists' | 'artists'
+type LocalCategory = 'playlists' | 'artists' | 'files'
 const localCategory = ref<LocalCategory>('playlists')
 const localArtistSort = ref<LocalArtistSortMode>('name')
 const localArtistQuery = ref('')
@@ -471,6 +428,7 @@ async function loadLocalArtistTracks(force = false) {
 
 function switchLocalCategory(category: LocalCategory) {
   if (localCategory.value === category) return
+  if (isMultiSelectMode.value) exitMultiSelect()
   localCategory.value = category
   if (category === 'artists') void loadLocalArtistTracks()
 }
@@ -482,83 +440,6 @@ function openLocalArtist(artist: LocalArtistSummary) {
 function playLocalArtist(artist: LocalArtistSummary) {
   if (!artist.tracks.length) return
   player.playAll(artist.tracks)
-}
-
-async function ensureLocalPlaylistId(): Promise<number> {
-  const raw = await invoke<PlaylistInfo[]>('list_playlists')
-  const localPlaylist = raw.find((pl) => LOCAL_NAMES.includes(pl.name))
-  if (localPlaylist) return localPlaylist.id
-
-  const created = await invoke<PlaylistInfo>('create_playlist', { name: t('home.local_music') })
-  return created.id
-}
-
-async function syncScannedTracksToLocalPlaylist(
-  scannedTracks: TrackInfo[],
-  allowRemovals = true,
-) {
-  const localPlaylistId = await ensureLocalPlaylistId()
-
-  const existingTracks = await invoke<any[]>('get_playlist_tracks', { id: localPlaylistId })
-  const existingIds = new Set(
-    (existingTracks || [])
-      .map((track: any) => String(track?.id || ''))
-      .filter(Boolean),
-  )
-  const scannedIds = new Set(scannedTracks.map(t => t.id).filter(Boolean))
-
-  // 差量同步（SC-8）: 只移除本次扫描已消失的曲目, 只新增未入库的曲目; 仍存在的
-  // 曲目保持 added_at 与自定义顺序不变, 避免每次重扫排序归零、本地删除墓碑 token
-  // 无界累积（旧逻辑 remove-all/add-all 会重置 added_at 并给每首歌新增墓碑 token）
-  const removedIds = allowRemovals
-    ? [...existingIds].filter(id => !scannedIds.has(id))
-    : []
-  if (removedIds.length > 0) {
-    await invoke('remove_tracks_from_playlist', {
-      playlistId: localPlaylistId,
-      trackIds: removedIds,
-    })
-  }
-
-  const newTracks = scannedTracks.filter(t => t.id && !existingIds.has(t.id))
-  if (newTracks.length > 0) {
-    await invoke('add_tracks_to_playlist', {
-      playlistId: localPlaylistId,
-      tracks: newTracks.map(toBackendTrack),
-    })
-  }
-
-  await loadPlaylists()
-  if (localCategory.value === 'artists') await loadLocalArtistTracks(true)
-}
-
-async function selectAndScanLocalMusic() {
-  if (library.isScanning) return
-  try {
-    const result = await dialogOpen({ directory: true, multiple: false })
-    if (!result) return
-
-    const dir = typeof result === 'string' ? result : (result as any).path || String(result)
-    if (!dir || dir === '[object Object]') return
-
-    await library.scanDirectory(dir)
-    if (library.scanError) {
-      toast.error(t('library.scan_failed'))
-      return
-    }
-
-    // 部分扫描失败时无法区分“文件已删除”和“目录暂时不可读”，只新增成功项，
-    // 保留旧曲目直到下一次完整扫描（SC-1）
-    await syncScannedTracksToLocalPlaylist(library.tracks, library.scanSkipped.length === 0)
-    if (library.scanSkipped.length > 0) {
-      toast.show(t('library.scan_partial', { count: library.tracks.length, failed: library.scanSkipped.length }), 'info')
-    } else {
-      toast.success(t('library.scan_success', { count: library.tracks.length }))
-    }
-  } catch (e) {
-    log.error('Scan local music failed:', e)
-    toast.error(t('library.scan_failed'))
-  }
 }
 
 function isProtectedPlaylist(pl: PlaylistInfo) {
@@ -756,178 +637,6 @@ async function loadFavorites() {
 
 onMounted(loadPlaylists)
 onMounted(loadFavorites)
-onMounted(() => downloadStore.loadDownloads())
-
-// 下载相关
-function formatFileSize(bytes: number): string {
-  if (bytes < 1024) return bytes + ' B'
-  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB'
-  return (bytes / (1024 * 1024)).toFixed(1) + ' MB'
-}
-
-function playDownloadedTrack(dl: any) {
-  player.play({
-    id: dl.id,
-    title: dl.title,
-    artist: dl.artist,
-    album: dl.album,
-    durationMs: dl.durationMs,
-    coverUrl: dl.coverUrl || '',
-    audioUrl: dl.filePath,
-  })
-}
-
-// 下载列表右键菜单
-const dlContextMenu = ref<{ show: boolean; x: number; y: number; track: any | null }>({
-  show: false, x: 0, y: 0, track: null,
-})
-
-function openDlContextMenu(e: MouseEvent, track: any) {
-  const btn = e.currentTarget as HTMLElement
-  const rect = btn.getBoundingClientRect()
-  let x = rect.left - 204
-  if (x < 8) x = rect.right + 4
-  dlContextMenu.value = { show: true, x, y: rect.top, track }
-}
-
-// 行上右键：菜单在光标处弹出（复用 ContextMenu 的边缘翻转与重定位）
-function openDlRowContextMenu(e: MouseEvent, track: any) {
-  dlContextMenu.value = { show: true, x: e.clientX, y: e.clientY, track }
-}
-
-function closeDlContextMenu() {
-  dlContextMenu.value.show = false
-}
-
-// 删除下载确认
-const showDlDeleteDialog = ref(false)
-const dlDeleteTarget = ref<any>(null)
-
-async function cancelActiveDownload(trackId: string) {
-  await downloadStore.cancelDownload(trackId)
-}
-
-function activeDownloadStatusText(status: string) {
-  switch (status) {
-    case 'resolving': return t('download.resolving')
-    case 'cancelling': return t('download.cancelling')
-    case 'cancelled': return t('download.cancelled')
-    case 'error': return t('download.download_failed')
-    case 'already_exists': return t('download.already_exists')
-    default: return t('download.downloading')
-  }
-}
-
-function activeDownloadProgressText(task: {
-  status: string
-  progress?: number
-  downloadedBytes?: number
-  totalBytes?: number
-  message?: string
-}) {
-  if (task.status === 'resolving' || task.status === 'cancelling' || task.status === 'cancelled' || task.status === 'already_exists') {
-    return activeDownloadStatusText(task.status)
-  }
-  if (task.status === 'error') {
-    return task.message
-      ? `${activeDownloadStatusText(task.status)} · ${task.message}`
-      : activeDownloadStatusText(task.status)
-  }
-
-  const downloaded = typeof task.downloadedBytes === 'number' ? formatFileSize(task.downloadedBytes) : null
-  const total = typeof task.totalBytes === 'number' && task.totalBytes > 0 ? formatFileSize(task.totalBytes) : null
-  const percent = typeof task.progress === 'number' ? `${task.progress}%` : null
-
-  if (downloaded && total && percent) return `${activeDownloadStatusText(task.status)} · ${downloaded} / ${total} · ${percent}`
-  if (downloaded && total) return `${activeDownloadStatusText(task.status)} · ${downloaded} / ${total}`
-  if (downloaded && percent) return `${activeDownloadStatusText(task.status)} · ${downloaded} · ${percent}`
-  return activeDownloadStatusText(task.status)
-}
-
-function requestDlDelete(track: any) {
-  if (isDownloadedTrackInUse(track)) return
-  closeDlContextMenu()
-  dlDeleteTarget.value = track
-  showDlDeleteDialog.value = true
-}
-
-async function revealDownloadFile(track: any) {
-  closeDlContextMenu()
-  try {
-    await invoke('reveal_file', { path: track.filePath })
-  } catch (e) {
-    log.error('Failed to reveal file:', e)
-  }
-}
-
-async function confirmDlDelete() {
-  if (!dlDeleteTarget.value) return
-  const deleted = dlDeleteTarget.value
-  await downloadStore.deleteDownload(deleted.id)
-  player.handleDownloadedFileRemoved(deleted.id, deleted.filePath)
-  showDlDeleteDialog.value = false
-  dlDeleteTarget.value = null
-}
-
-function isDownloadedTrackInUse(track: any) {
-  return player.isPlayingFromDownload && player.currentTrack?.id === track?.id
-}
-
-async function redownloadDownloadedTrack(track: any) {
-  if (isDownloadedTrackInUse(track)) return
-  closeDlContextMenu()
-  player.handleDownloadedFileRemoved(track.id, track.filePath)
-  await downloadStore.redownloadTrack({
-    id: track.id,
-    title: track.title,
-    artist: track.artist,
-    album: track.album || '',
-    durationMs: track.durationMs || 0,
-    coverUrl: track.coverUrl || '',
-    audioUrl: '',
-  })
-}
-
-const downloadMenuItems = computed<ContextMenuItem[]>(() => {
-  const track = dlContextMenu.value.track
-  const isInUse = track ? isDownloadedTrackInUse(track) : true
-  return [
-    createContextMenuItem(t('download.open_folder'), {
-      id: 'reveal',
-      icon: 'folder_open',
-      disabled: !track,
-    }),
-    createContextMenuItem(t('download.redownload'), {
-      id: 'redownload',
-      icon: 'refresh',
-      disabled: !track || isInUse,
-    }),
-    createContextMenuItem(t('common.delete'), {
-      id: 'delete',
-      icon: 'delete',
-      danger: true,
-      disabled: !track || isInUse,
-    }),
-  ]
-})
-
-function handleDownloadMenuClick(item: ContextMenuActionItem) {
-  const track = dlContextMenu.value.track
-  if (!track) return
-
-  switch (item.id) {
-    case 'reveal':
-      void revealDownloadFile(track)
-      break
-    case 'redownload':
-      void redownloadDownloadedTrack(track)
-      break
-    case 'delete':
-      requestDlDelete(track)
-      break
-  }
-}
-
 // 拉取云端歌单
 /// 平台数据按需拉取
 ///
@@ -1032,7 +741,7 @@ onUnmounted(() => {
         >
           <span class="material-symbols-rounded">bar_chart</span>
         </button>
-        <button v-if="activeTab === 0 && !isMultiSelectMode" class="header-action" @click="enterMultiSelect()" :title="t('common.multi_select')">
+        <button v-if="activeTab === 0 && localCategory === 'playlists' && !isMultiSelectMode" class="header-action" @click="enterMultiSelect()" :title="t('common.multi_select')">
           <span class="material-symbols-rounded">checklist</span>
         </button>
         <button v-if="isMultiSelectMode" class="header-action" @click="selectAll" :title="t('common.select_all')">
@@ -1094,16 +803,16 @@ onUnmounted(() => {
            排序按钮常驻在同一行右侧，只在歌手视图内以缩放过渡出现 -->
       <div class="local-category-bar">
         <button
-          v-for="category in (['playlists', 'artists'] as const)"
+          v-for="category in (['playlists', 'artists', 'files'] as const)"
           :key="category"
           class="local-category-chip"
           :class="{ active: localCategory === category }"
           @click="switchLocalCategory(category)"
         >
           <span class="material-symbols-rounded" style="font-size: 17px">
-            {{ category === 'playlists' ? 'queue_music' : 'account_circle' }}
+            {{ category === 'playlists' ? 'queue_music' : category === 'artists' ? 'account_circle' : 'folder_open' }}
           </span>
-          <span>{{ category === 'playlists' ? t('library.local_category_playlists') : t('library.local_category_artists') }}</span>
+          <span>{{ category === 'playlists' ? t('library.local_category_playlists') : category === 'artists' ? t('library.local_category_artists') : t('library.local_files') }}</span>
         </button>
         <Transition name="lib-zoom">
           <button
@@ -1183,24 +892,16 @@ onUnmounted(() => {
         </Transition>
       </div>
 
+      <LocalFilesView v-else-if="localCategory === 'files'" key="local-files" embedded :search-query="tabQuery" />
+
       <!-- 歌单视图 -->
       <div v-else key="local-playlists" class="local-subview">
-      <div class="new-playlist-row" :class="{ disabled: library.isScanning }" @click="selectAndScanLocalMusic">
-        <span class="material-symbols-rounded" :class="{ spinning: library.isScanning }" style="font-size: 20px">
-          {{ library.isScanning ? 'progress_activity' : 'folder_open' }}
-        </span>
-        <div class="new-playlist-copy">
-          <span>{{ library.isScanning ? t('library.scanning') : t('library.scan_local_music') }}</span>
-          <small v-if="library.lastScanDir" class="new-playlist-sub">{{ library.lastScanDir }}</small>
-        </div>
-      </div>
       <!-- 新建歌单（对齐 Android：+ 新建歌单 行） -->
       <div class="new-playlist-row" @click="openCreateDialog">
         <span class="material-symbols-rounded" style="font-size: 20px">add</span>
         <span>{{ t('library.create_playlist') }}</span>
       </div>
       <div class="list-divider" />
-      <p v-if="library.scanError" class="scan-error">{{ t('library.scan_failed') }}</p>
 
       <!-- 歌单列表：进入 / 移除走 TransitionGroup；拖拽重排与歌单详情页
            歌曲拖拽同一套指针交互（让路位移 + 单实例落点指示线 + 拖影） -->
@@ -1409,96 +1110,7 @@ onUnmounted(() => {
     </div>
 
     <!-- Tab: 下载 -->
-    <div v-else-if="activeTab === 2" key="tab-downloads" class="playlist-list">
-      <!-- 进行中分组：过滤后为空时整组折叠隐藏，避免下方列表位置跳变 -->
-      <Transition name="lib-collapse">
-      <div v-if="filteredActiveDownloads.length > 0" class="collapse-row">
-      <div class="collapse-clip">
-        <div class="subsection-label">
-          <span class="material-symbols-rounded" style="font-size: 18px">downloading</span>
-          <span>{{ t('download.active_tasks', { count: filteredActiveDownloads.length }) }}</span>
-        </div>
-        <TransitionGroup tag="div" name="lib-list" class="lib-list">
-        <div
-          v-for="task in filteredActiveDownloads"
-          :key="'active-' + task.trackId"
-          class="playlist-item active-download-item"
-        >
-          <div class="pl-icon">
-            <span class="material-symbols-rounded filled" style="font-size: 22px">
-              {{ task.status === 'resolving' ? 'network_node' : task.status === 'error' ? 'error' : task.status === 'cancelled' ? 'cancel' : 'downloading' }}
-            </span>
-          </div>
-          <div class="pl-info">
-            <div class="pl-name">{{ task.title }}</div>
-            <div class="pl-count">{{ task.artist }} · {{ activeDownloadProgressText(task) }}</div>
-            <div
-              class="download-progress-bar"
-              :class="{
-                indeterminate: task.status === 'downloading' && !task.totalBytes,
-                error: task.status === 'error',
-                muted: task.status === 'cancelling' || task.status === 'cancelled' || task.status === 'already_exists',
-              }"
-            >
-              <div
-                class="download-progress-fill"
-                :style="{ width: `${Math.max(4, task.status === 'cancelled' || task.status === 'already_exists' ? 100 : task.progress ?? 0)}%` }"
-              />
-            </div>
-          </div>
-          <button
-            class="pl-more danger"
-            :disabled="task.status === 'cancelling' || task.status === 'cancelled' || task.status === 'error' || task.status === 'already_exists'"
-            @click.stop="cancelActiveDownload(task.trackId)"
-          >
-            <span class="material-symbols-rounded" style="font-size: 20px">close</span>
-          </button>
-        </div>
-        </TransitionGroup>
-        <div v-if="downloadStore.downloads.length > 0" class="subsection-label" style="margin-top: 10px;">
-          <span class="material-symbols-rounded" style="font-size: 18px">download_done</span>
-          <span>{{ t('download.downloaded_items') }}</span>
-        </div>
-      </div>
-      </div>
-      </Transition>
-
-      <template v-if="downloadStore.downloads.length > 0">
-        <TransitionGroup tag="div" name="lib-list" class="lib-list">
-        <div
-          v-for="dl in filteredDownloads"
-          :key="'dl-' + dl.id"
-          class="playlist-item"
-          @click="playDownloadedTrack(dl)"
-          @contextmenu.prevent.stop="openDlRowContextMenu($event, dl)"
-        >
-          <div class="pl-icon has-cover" v-if="dl.coverUrl && !isLibraryCoverFailed('download', dl.id, dl.coverUrl)">
-            <img
-              :src="toDisplayableLibraryCoverUrl(dl.coverUrl)"
-              referrerpolicy="no-referrer"
-              class="pl-cover-img"
-              @error="markLibraryCoverFailed('download', dl.id, dl.coverUrl)"
-            />
-          </div>
-          <div class="pl-icon" v-else>
-            <span class="material-symbols-rounded filled" style="font-size: 22px">music_note</span>
-          </div>
-          <div class="pl-info">
-            <div class="pl-name">{{ dl.title }}</div>
-            <div class="pl-count">{{ dl.artist }} · {{ formatFileSize(dl.fileSize) }} · {{ platformLabel(dl.source) }}</div>
-          </div>
-          <button class="pl-more" @click.stop="openDlContextMenu($event, dl)">
-            <span class="material-symbols-rounded" style="font-size: 20px">more_vert</span>
-          </button>
-        </div>
-        </TransitionGroup>
-      </template>
-      <div v-else-if="downloadStore.activeDownloads.length === 0" class="empty-tab">
-        <div class="empty-circle"><span class="material-symbols-rounded" style="font-size: 40px">download</span></div>
-        <p class="empty-title">{{ t('library.downloads_empty_title') }}</p>
-        <p class="empty-desc">{{ t('library.downloads_empty_desc') }}</p>
-      </div>
-    </div>
+    <DownloadsView v-else-if="activeTab === 2" key="tab-downloads" embedded :search-query="tabQuery" />
 
     <!-- Tab: 网易云-歌单 -->
     <div v-else-if="activeTab === 3" key="tab-netease" class="playlist-list">
@@ -1667,27 +1279,6 @@ onUnmounted(() => {
       </div>
     </div>
     </Transition>
-
-    <ContextMenu
-      :open="dlContextMenu.show"
-      :x="dlContextMenu.x"
-      :y="dlContextMenu.y"
-      :items="downloadMenuItems"
-      @update:open="dlContextMenu.show = $event"
-      @click="handleDownloadMenuClick"
-    />
-
-    <!-- 删除下载确认对话框 -->
-    <M3Dialog
-      v-model:open="showDlDeleteDialog"
-      :title="t('download.delete_confirm')"
-      icon="delete"
-      :confirm-text="t('common.delete')"
-      confirm-danger
-      @confirm="confirmDlDelete"
-    >
-      <p class="dialog-msg">{{ t('library.delete_confirm_msg', { name: dlDeleteTarget?.title || '' }) }}</p>
-    </M3Dialog>
 
     <!-- 创建播放列表对话框 -->
     <M3Dialog

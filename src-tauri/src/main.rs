@@ -4,7 +4,7 @@ use neri_player_desktop::audio::analyzer::SharedAudioLevel;
 use neri_player_desktop::audio::media_session::{MediaAction, MediaSessionController};
 use neri_player_desktop::auth;
 use neri_player_desktop::commands::{
-    auth_cmd, debug_cmd, desktop_lyrics_cmd, download_cmd, image_cmd, library_cmd,
+    auth_cmd, debug_cmd, desktop_lyrics_cmd, download_cmd, image_cmd, library_cmd, local_files_cmd,
     listen_together_cmd, lyrics_cmd, player_cmd, playback_fallback_cmd, recommend_cmd, search_cmd, settings_cmd,
     stats_cmd, storage_cmd, sync_cmd,
 };
@@ -429,6 +429,10 @@ fn main() {
             player_cmd::toggle_shuffle,
             player_cmd::cycle_repeat,
             library_cmd::scan_music_directory,
+            local_files_cmd::scan_local_files,
+            local_files_cmd::cancel_local_scan,
+            local_files_cmd::get_local_playlist_tracks,
+            local_files_cmd::edit_local_file_tags,
             library_cmd::list_playlists,
             library_cmd::get_playlist_usage_stats,
             library_cmd::get_home_local_playlists,

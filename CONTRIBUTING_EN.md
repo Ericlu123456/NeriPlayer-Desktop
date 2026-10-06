@@ -185,6 +185,29 @@ talks to music platforms directly.
 - `commands/*_cmd.rs` — command implementations grouped by domain:
   player / library / search / lyrics / settings / auth / recommend /
   sync / download / listen_together / stats / storage / image / debug.
+- `commands/download_cmd.rs`, `commands/download_metadata.rs` —
+  `stores/download.ts` and `modules/download/downloadQueue.ts` schedule tasks;
+  `DownloadsView.vue` exposes queued/resolving/transferring/metadata-processing
+  progress, cancellation and failed-task retries in the Downloads tab.
+  Concurrency is clamped to 1-8, default 6. Quality follows playback by default
+  or uses independent per-platform download settings. Audio stays in the chosen
+  root, `Lyrics/` holds lyrics/translations/romanization, `Covers/` holds covers,
+  and `.tmp/` holds temporary files. `<audio filename>.npmeta.json` stores NP
+  metadata and asset references. Metadata completion defaults on; standardized
+  lyric embedding defaults off and retains original text in sidecars/NP metadata.
+  The manifest records the final file size after tagging to avoid false corruption
+  reports caused by tag writes.
+- `commands/local_files_cmd.rs`, `library/local_file_tags.rs` —
+  `LocalFilesView.vue` and `stores/library.ts` provide cancellable scan previews,
+  search, multi-select and filters for existing playlist files/duplicate metadata.
+  Scanning does not write playlists; users manually import into existing or new
+  playlists. Title/artist/album edits are prepared on a copy, then atomically
+  replace the original after verifying that lyrics, pictures and other tags
+  survive. Unmodified NP sidecar fields are retained. Editing a downloaded file
+  also updates its manifest entry and emits `downloads-changed`; failed commits
+  roll back. Focused tests: `node scripts/test-local-scan-preview.mjs`,
+  `node scripts/test-local-scan-store.mjs`, and
+  `cargo test --manifest-path src-tauri/Cargo.toml --lib library::local_file_tags::tests`.
 - `audio/` — `player.rs` (`PlayerEngine`: play/seek/fades/crossfades),
   `queue.rs` (shuffle/repeat), `effects.rs` (5-band EQ, loudness
   normalization, loudness gain), `growing.rs` (progressive buffering),

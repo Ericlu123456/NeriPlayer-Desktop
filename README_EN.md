@@ -269,13 +269,28 @@ the sidebar.
   playback speed, loudness gain, per-track loudness normalization, and a
   5-band EQ (presets + manual).
 - ⬇️ **In-app downloads**:
-  multi-platform audio downloads with lyric / translated-lyric / cover
-  sidecars, filename templates, a custom download directory, progress
-  events, bulk cancel, corruption validation, and reveal-in-file-manager.
+  the Library Downloads tab shows queued, resolving, transferring and
+  metadata-processing tasks, with live byte counts and percentages when
+  available, individual/bulk cancellation, and retries for failed tasks.
+  Concurrency is adjustable from Downloads or Settings: 1-8 tasks, default 6.
+  Download quality follows playback by default, or can be configured per platform.
+  Audio stays in the selected download directory; lyrics, translations and
+  romanization go in `Lyrics/`, covers in `Covers/`, and temporary files in `.tmp/`.
+  Each adjacent `<audio filename>.npmeta.json` stores NP metadata, source identity
+  and sidecar references. Metadata completion is enabled by default; standardized
+  lyric embedding is disabled by default. Original lyrics remain in sidecars and
+  NP metadata when standardization is enabled. Filename templates, custom paths,
+  corruption validation and reveal-in-file-manager are also supported.
 - 🩷 **Local playlists and favorites**:
   create/rename/delete/reorder, multi-select bulk actions, pointer drag
   reordering, NetEase like/unlike, and favorites that open via their
   source-platform routes.
+  The Local Files category provides directory scan previews, scan progress and
+  cancellation, search, multi-select, and filters for files already in playlists
+  or with duplicate metadata. Selected files are manually added to an existing
+  or new playlist; scanning does not create a default Local Files playlist.
+  Title, artist and album tags can be saved to the audio file after verifying
+  that existing lyrics, covers and other tags survive the write.
 - 🧑‍🎤 **NetEase artists**:
   artist detail with paged top songs and albums, plus an artists category
   on the favorites tab.
