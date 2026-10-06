@@ -26,6 +26,8 @@ const IMPORTERS: &[(&str, LegacyImporter)] = &[
         crate::library::favorites::LEGACY_IMPORT_KEY,
         crate::library::favorites::import_legacy_json,
     ),
+    // 旧统计投影要用同步侧车补回分片来源，必须先于同步元数据导入读取侧车
+    (crate::stats::LEGACY_IMPORT_KEY, crate::stats::import_legacy_json),
 ];
 
 pub fn import_all(database: &UserDatabase, directory: &Path) -> AppResult<()> {

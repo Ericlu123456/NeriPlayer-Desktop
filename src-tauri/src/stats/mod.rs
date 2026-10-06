@@ -9,7 +9,6 @@
 // 单次连续收听 >= 30s，或整轨播完（track-ended）即 +1。
 
 use std::collections::HashMap;
-use std::path::PathBuf;
 
 use chrono::{Datelike, Local, TimeZone};
 use serde::{Deserialize, Serialize};
@@ -17,6 +16,9 @@ use serde::{Deserialize, Serialize};
 use crate::sync::models::{
     SyncData, SyncPlaybackCounterShard, SyncPlaybackStatBucket, SyncTrackStat,
 };
+
+mod storage;
+pub(crate) use storage::{import_legacy_json, LEGACY_IMPORT_KEY};
 
 /// 一次收听增量上报，由前端 PlaybackStatsTracker 产出
 #[derive(Debug, Clone, Deserialize)]
@@ -90,6 +92,9 @@ pub struct StatsStore {
     /// 上次执行保留窗口修剪的「天」零点；仅内存态，不落盘
     #[serde(skip)]
     last_pruned_day: i64,
+    /// 启动时未能从数据库读出统计；此后拒绝保存，避免用空快照覆盖库中的真实数据
+    #[serde(skip)]
+    storage_unavailable: bool,
 }
 
 pub fn daily_shard_key(day_start_at: i64, identity_key: &str) -> String {
@@ -624,13 +629,6 @@ fn copy_bucket_display_fields(stat: &mut SyncTrackStat, bucket: &SyncPlaybackSta
     }
 }
 
-pub fn stats_path() -> PathBuf {
-    let mut path = dirs_next::data_dir().unwrap_or_else(|| PathBuf::from("."));
-    path.push("NeriPlayer");
-    path.push("playback-stats.json");
-    path
-}
-
 fn restore_saved_stats_provenance(
     store: &mut StatsStore,
     provenance: &crate::sync::manager::SyncStatsPayload,
@@ -690,75 +688,186 @@ fn restore_saved_stats_provenance(
     }
 }
 
+/// 从用户数据库读取统计
+///
+/// 读取失败时返回空统计并标记为不可保存：统计可以暂时显示为空，
+/// 但绝不能让空快照在后续保存时把库里的真实数据按差异删掉
 pub fn load() -> StatsStore {
-    load_at(&stats_path(), &crate::sync::manager::sync_extensions_path())
+    let loaded = crate::db::user_db().and_then(|database| database.read(storage::load_from));
+    match loaded {
+        Ok(mut store) => {
+            // 启动即修剪保留窗口，超期的日分桶不再随每次保存原样保留
+            store.prune_retention(chrono::Utc::now().timestamp_millis());
+            store
+        }
+        Err(error) => {
+            log::error!(target: "stats", "播放统计读取失败, 本次运行不再写入统计: {error}");
+            StatsStore { storage_unavailable: true, ..Default::default() }
+        }
+    }
 }
 
-fn load_at(path: &std::path::Path, metadata_path: &std::path::Path) -> StatsStore {
-    let Ok(content) = std::fs::read_to_string(path) else {
-        return StatsStore::default();
-    };
-    let mut store: StatsStore = match serde_json::from_str(&content) {
-        Ok(store) => store,
-        Err(error) => {
-            // 统计可容忍从空重建（分片会随同步找回），但必须保留现场：
-            // 静默清空 + 后续覆盖写会让损坏原因永远无法排查
-            let quarantined = crate::fsutil::quarantine_corrupt_file(path);
-            log::warn!(
-                target: "stats",
-                "playback-stats.json 解析失败, 现场已隔离到 {:?}, 从空统计重建: {}",
-                quarantined,
-                error,
-            );
-            return StatsStore::default();
-        }
+/// 读取旧版 playback-stats.json，并用同步侧车补回旧投影缺失的分片来源
+///
+/// 统计可容忍从空重建（分片会随同步找回），解析失败时隔离现场按无数据处理
+pub(crate) fn read_legacy_files(
+    path: &std::path::Path,
+    metadata_path: &std::path::Path,
+) -> crate::error::AppResult<Option<StatsStore>> {
+    let Some(mut store) = crate::db::legacy::read_json::<StatsStore>(path)? else {
+        return Ok(None);
     };
     match crate::sync::manager::load_saved_stats_provenance(metadata_path) {
         Ok(provenance) => restore_saved_stats_provenance(&mut store, &provenance),
         Err(error) => log::warn!(target: "stats", "统计来源侧车读取失败，保留本地累计值: {error}"),
     }
-    // 启动即修剪保留窗口，避免历史膨胀文件一直原样滚动
     store.prune_retention(chrono::Utc::now().timestamp_millis());
-    store
+    Ok(Some(store))
 }
 
 pub fn save(store: &StatsStore) {
     if let Err(error) = save_checked(store) {
-        log::warn!(target: "stats", "playback-stats.json 写入失败: {error}");
+        log::warn!(target: "stats", "播放统计写入失败: {error}");
     }
 }
 
+/// 同步提交需要知道落盘结果，失败时保留进度供下一轮重试
 pub(crate) fn save_checked(store: &StatsStore) -> crate::error::AppResult<()> {
-    save_checked_at(&stats_path(), store)
-}
-
-fn save_checked_at(path: &std::path::Path, store: &StatsStore) -> crate::error::AppResult<()> {
-    // 同步提交需要知道落盘结果，失败时保留进度供下一轮重试
-    crate::fsutil::atomic_write(path, serde_json::to_vec(store)?)?;
-    Ok(())
+    if store.storage_unavailable {
+        return Err(crate::error::AppError::Other(
+            "Playback statistics storage is unavailable until restart".into(),
+        ));
+    }
+    crate::db::user_db()?.write(|transaction| storage::save_into(transaction, store))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    use crate::db::UserDatabase;
+    use std::path::PathBuf;
+
+    /// 旧版 playback-stats.json 的写法，仅用于构造导入测试的旧文件
+    fn save_checked_at(path: &std::path::Path, store: &StatsStore) -> crate::error::AppResult<()> {
+        crate::fsutil::atomic_write(path, serde_json::to_vec(store)?)?;
+        Ok(())
+    }
+
+    fn load_at(path: &std::path::Path, metadata_path: &std::path::Path) -> StatsStore {
+        read_legacy_files(path, metadata_path).unwrap().unwrap_or_default()
+    }
+
+    fn save_db(database: &UserDatabase, store: &StatsStore) {
+        database.write(|transaction| storage::save_into(transaction, store)).unwrap();
+    }
+
+    fn load_db(database: &UserDatabase) -> StatsStore {
+        database.read(storage::load_from).unwrap()
+    }
+
     #[test]
-    fn checked_stats_save_reports_failure_and_preserves_retry_contents() {
-        let directory = tempfile::tempdir().unwrap();
-        let blocked = directory.path().join("blocked");
-        std::fs::create_dir(&blocked).unwrap();
+    fn database_round_trip_preserves_counters_shards_and_clear_epoch() {
+        let database = UserDatabase::open_in_memory().unwrap();
         let mut store = StatsStore::default();
         let now = day_start_at(chrono::Utc::now().timestamp_millis()) + 3_600_000;
+        store.clear(now - 10);
         store.record(&session("k", 30_000, 1), "desktop", now);
-        assert!(save_checked_at(&blocked, &store).is_err());
-        let path = directory.path().join("playback-stats.json");
-        save_checked_at(&path, &store).unwrap();
-        let persisted: StatsStore = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        assert_eq!(persisted.stats[0].play_count, 1);
-        assert_eq!(persisted.stats[0].total_listen_ms, 30_000);
-        let first = std::fs::read(&path).unwrap();
-        save_checked_at(&path, &store).unwrap();
-        assert_eq!(std::fs::read(&path).unwrap(), first);
+        store.stats[0].counter_shards.push(SyncPlaybackCounterShard {
+            device_id: "android".into(),
+            epoch_started_at: now - 10,
+            total_listen_ms: 5,
+            play_count: 1,
+            first_played_at: now,
+            last_played_at: now,
+        });
+        save_db(&database, &store);
+
+        let restored = load_db(&database);
+        assert_eq!(restored.cleared_at, now - 10);
+        assert_eq!(restored.stats.len(), 1);
+        assert_eq!(restored.stats[0].play_count, 1);
+        assert_eq!(restored.stats[0].counter_shards, store.stats[0].counter_shards);
+        assert_eq!(restored.track_shards["k"], store.track_shards["k"]);
+        assert_eq!(restored.buckets[0].total_listen_ms, 30_000);
+        assert_eq!(restored.daily_shards, store.daily_shards);
+        assert_eq!(
+            serde_json::to_value(restored.sync_snapshot().0).unwrap(),
+            serde_json::to_value(store.sync_snapshot().0).unwrap(),
+        );
+    }
+
+    #[test]
+    fn database_save_only_rewrites_changed_rows() {
+        let database = UserDatabase::open_in_memory().unwrap();
+        let mut store = StatsStore::default();
+        let now = day_start_at(chrono::Utc::now().timestamp_millis()) + 3_600_000;
+        store.record(&session("stable", 30_000, 1), "desktop", now);
+        store.record(&session("played", 30_000, 1), "desktop", now);
+        save_db(&database, &store);
+        database
+            .write(|transaction| {
+                transaction.execute("UPDATE playback_stat SET name = 'untouched' WHERE identity_key = 'stable'", [])?;
+                Ok(())
+            })
+            .unwrap();
+
+        store.record(&session("played", 30_000, 1), "desktop", now + 1_000);
+        save_db(&database, &store);
+
+        let restored = load_db(&database);
+        let stable = restored.stats.iter().find(|stat| stat.identity_key == "stable").unwrap();
+        let played = restored.stats.iter().find(|stat| stat.identity_key == "played").unwrap();
+        assert_eq!(stable.name, "untouched");
+        assert_eq!(played.play_count, 2);
+        assert_eq!(restored.track_shards["played"][0].play_count, 2);
+    }
+
+    #[test]
+    fn database_save_deletes_removed_tracks_and_cascades_shards() {
+        let database = UserDatabase::open_in_memory().unwrap();
+        let mut store = StatsStore::default();
+        let now = day_start_at(chrono::Utc::now().timestamp_millis()) + 3_600_000;
+        store.record(&session("gone", 30_000, 1), "desktop", now);
+        store.record(&session("kept", 30_000, 1), "desktop", now);
+        save_db(&database, &store);
+        store.remove_tracks(&["gone".into()]);
+        save_db(&database, &store);
+
+        let counts: (i64, i64) = database
+            .read(|connection| {
+                Ok((
+                    connection.query_row("SELECT COUNT(*) FROM playback_stat_counter_shard", [], |row| row.get(0))?,
+                    connection.query_row("SELECT COUNT(*) FROM playback_stat_daily_counter_shard", [], |row| row.get(0))?,
+                ))
+            })
+            .unwrap();
+        assert_eq!(counts, (1, 1));
+        let restored = load_db(&database);
+        assert_eq!(restored.stats.len(), 1);
+        assert_eq!(restored.stats[0].identity_key, "kept");
+    }
+
+    #[test]
+    fn unavailable_store_refuses_to_overwrite_the_database() {
+        let store = StatsStore { storage_unavailable: true, ..Default::default() };
+        assert!(save_checked(&store).is_err());
+    }
+
+    #[test]
+    fn legacy_stats_json_is_imported_with_sidecar_provenance() {
+        let now = day_start_at(chrono::Utc::now().timestamp_millis()) + 3_600_000;
+        let (projection, payload) = old_stats_projection("android", 1, 30_000, now);
+        let directory = tempfile::tempdir().unwrap();
+        write_old_stats_projection(directory.path(), &projection, &payload);
+        let database = UserDatabase::open_in_memory().unwrap();
+
+        assert!(crate::db::legacy::run_once(&database, directory.path(), LEGACY_IMPORT_KEY, import_legacy_json).unwrap());
+        let restored = load_db(&database);
+        assert_eq!(restored.stats[0].play_count, 1);
+        assert_eq!(restored.stats[0].counter_shards, payload.stats[0].counter_shards);
+        assert!(!directory.path().join("playback-stats.json").exists());
+        assert!(directory.path().join("sync-android-metadata.json").exists(), "the sync sidecar belongs to the sync importer");
     }
 
     fn session(identity: &str, listened_ms: i64, increment: i32) -> PlaybackSession {
@@ -925,11 +1034,9 @@ mod tests {
         let mut store = StatsStore::default();
         store.apply_merged(&stats, &buckets, cleared_at, "desktop");
 
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("playback-stats.json");
-        save_checked_at(&path, &store).unwrap();
-        let mut restored: StatsStore =
-            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let database = UserDatabase::open_in_memory().unwrap();
+        save_db(&database, &store);
+        let mut restored = load_db(&database);
         restored.apply_merged(&stats, &buckets, cleared_at, "desktop");
         assert_eq!(restored.stats[0].play_count, 1);
         assert_eq!(restored.stats[0].total_listen_ms, 30_000);
