@@ -375,6 +375,7 @@ async fn webdav_with_epoch_guard(
                     },
                     observed.unwrap(),
                     verified,
+                    HashSet::new(),
                 ));
             }
             let (prepared, merged) = prepare(&merged).await?;
@@ -455,6 +456,7 @@ async fn webdav_with_epoch_guard(
                         },
                         published,
                         loaded.paths,
+                        verified,
                     ));
                 }
                 Err(error)
@@ -474,8 +476,8 @@ async fn webdav_with_epoch_guard(
     }
     .await;
     let operation = match operation {
-        Ok((mut completed, published, paths)) => {
-            match api.maintain_gc(&published, &paths, lease.as_ref()).await {
+        Ok((mut completed, published, paths, replaced)) => {
+            match api.maintain_gc(&published, &paths, &replaced, lease.as_ref()).await {
                 Ok(current) => {
                     completed.version = current.fingerprint.clone();
                     Ok((completed, current, paths))

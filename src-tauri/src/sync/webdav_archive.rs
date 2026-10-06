@@ -518,11 +518,13 @@ impl WebDavArchiveClient {
         &self,
         published: &RemoteFile,
         paths: &HashSet<String>,
+        retained: &HashSet<String>,
         lease: Option<&Lease>,
     ) -> AppResult<RemoteFile> {
         self.maintain_gc_at(
             published,
             paths,
+            retained,
             lease,
             chrono::Utc::now().timestamp_millis(),
             super::webdav_gc::uptime_ms(),
@@ -530,10 +532,13 @@ impl WebDavArchiveClient {
         .await
     }
 
+    /// `retained` 是刚被替换的旧清单引用的对象：别的设备可能还在按旧清单读取，
+    /// 这一轮不把它们当候选，保留期从头计算（对齐 Android journal.protect）
     async fn maintain_gc_at(
         &self,
         published: &RemoteFile,
         paths: &HashSet<String>,
+        retained: &HashSet<String>,
         lease: Option<&Lease>,
         wall: i64,
         uptime: i64,
@@ -554,7 +559,8 @@ impl WebDavArchiveClient {
                 Err(error) if error.kind()==std::io::ErrorKind::NotFound=>super::webdav_gc::Journal::default(),
                 Err(error)=>return Err(error.into()),
             };
-            let mut journal=previous.observe(&entries,paths,wall,uptime);
+            let protected:HashSet<String>=paths.union(retained).cloned().collect();
+            let mut journal=previous.observe(&entries,&protected,wall,uptime);
             let eligible=journal.eligible();
             if !cfg!(test) {crate::fsutil::atomic_write(&path,serde_json::to_vec(&journal)?)?;}
             if eligible.is_empty() {return Ok(());}
@@ -1567,6 +1573,7 @@ mod tests {
             .maintain_gc_at(
                 &published,
                 &protected,
+                &HashSet::new(),
                 Some(&lease),
                 1000 + super::super::webdav_gc::GRACE_MS,
                 10000 + super::super::webdav_gc::GRACE_MS,
@@ -1587,6 +1594,70 @@ mod tests {
         assert!(deletion.contains("if-match: \"retired\""));
         assert!(deletion.contains("(<12345>)"));
         assert!(!deletion.contains("unrelated"));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn objects_of_the_replaced_manifest_restart_their_retention() {
+        let prepared = archive::prepare(
+            &super::super::models::SyncData::default(),
+            Some("observed".into()),
+        )
+        .unwrap();
+        let replaced = format!("neriplayer-sync-v4-{}.zst", "b".repeat(64));
+        let mut listing = format!(
+            "<d:multistatus xmlns:d=\"DAV:\">{}",
+            listing_resource("/", None, true)
+        );
+        for path in prepared.objects.keys() {
+            listing.push_str(&listing_resource(&format!("/{path}"), Some("\"protected\""), false));
+        }
+        listing.push_str(&listing_resource(&format!("/{replaced}"), Some("\"replaced\""), false));
+        listing.push_str("</d:multistatus>");
+        let (api, task) = server(vec![
+            response("207 Multi-Status", "", listing.as_bytes()),
+            response("200 OK", "ETag: \"observed\"\r\n", &prepared.content),
+        ])
+        .await;
+        // 这个对象早已过了观察期，只是刚被别的设备的旧清单重新引用过
+        let journal = super::super::webdav_gc::Journal::default().observe(
+            &std::collections::BTreeMap::from([(replaced.clone(), "\"replaced\"".into())]),
+            &HashSet::new(),
+            1000,
+            10000,
+        );
+        let path = gc_journal_path(&api.scope());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, serde_json::to_vec(&journal).unwrap()).unwrap();
+        let lease = Lease {
+            client: api.clone(),
+            state: Arc::new(tokio::sync::Mutex::new(LeaseState {
+                token: "12345".into(),
+                expires: Instant::now() + Duration::from_secs(300),
+                closed: false,
+            })),
+        };
+        let published = RemoteFile {
+            content: prepared.content.clone(),
+            fingerprint: archive::digest(&prepared.content),
+            etag: Some("\"observed\"".into()),
+        };
+        let current = api
+            .maintain_gc_at(
+                &published,
+                &prepared.objects.keys().cloned().collect(),
+                &HashSet::from([replaced.clone()]),
+                Some(&lease),
+                1000 + super::super::webdav_gc::GRACE_MS,
+                10000 + super::super::webdav_gc::GRACE_MS,
+            )
+            .await
+            .unwrap();
+        assert_eq!(current.fingerprint, published.fingerprint, "nothing was eligible, so no fence was published");
+        lease.state.lock().await.closed = true;
+        let requests = task.await.unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(requests.iter().all(|request| !request.starts_with(b"DELETE ")));
         std::fs::remove_file(path).unwrap();
     }
 
