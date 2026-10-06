@@ -17,6 +17,9 @@ pub enum AppError {
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
 
+    #[error("Database error: {0}")]
+    Database(#[from] rusqlite::Error),
+
     #[error("Crypto error: {0}")]
     Crypto(String),
 

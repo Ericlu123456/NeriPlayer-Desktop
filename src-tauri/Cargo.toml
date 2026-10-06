@@ -56,6 +56,7 @@ image = { version = "0.25", default-features = false, features = ["gif", "jpeg",
 keyring = { version = "3", default-features = false, features = ["apple-native", "windows-native", "sync-secret-service"] }
 tauri-plugin-log = "2.9.0"
 tauri-plugin-single-instance = "2"
+rusqlite = { version = "0.40", features = ["bundled"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"

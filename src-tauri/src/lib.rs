@@ -2,6 +2,7 @@ pub mod api;
 pub mod audio;
 pub mod auth;
 pub mod commands;
+pub mod db;
 pub mod error;
 pub mod fsutil;
 pub mod library;
