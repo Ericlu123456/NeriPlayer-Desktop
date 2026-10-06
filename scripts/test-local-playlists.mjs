@@ -9,9 +9,23 @@ const compiled = ts.transpileModule(source, {
 const {
   LEGACY_PLAYLIST_ORDER_KEY,
   isEmptyLocalFilesPlaylist,
+  isFavoritesPlaylist,
+  isSystemPlaylist,
+  localPlaylistDisplayName,
   playlistOrderIds,
   readLegacyPlaylistOrder,
+  visibleSelection,
 } = await import(`data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}`)
+
+assert.equal(isFavoritesPlaylist({ id: -1001, name: 'Renamed elsewhere' }), true)
+assert.equal(isFavoritesPlaylist({ id: '42', name: 'My Favorite Music' }), true)
+assert.equal(isSystemPlaylist({ id: 7, name: 'Local Files' }), true)
+assert.equal(isSystemPlaylist({ id: 7, name: 'Road trip' }), false)
+const labels = { favorites: 'Liked Songs', localFiles: 'Local Files' }
+assert.equal(localPlaylistDisplayName({ id: 1, name: '我喜欢的音乐' }, labels), 'Liked Songs')
+assert.equal(localPlaylistDisplayName({ id: -1002, name: '本地文件' }, labels), 'Local Files')
+assert.equal(localPlaylistDisplayName({ id: 2, name: 'Road trip' }, labels), 'Road trip')
+assert.deepEqual([...visibleSelection(new Set([1, 2, 3]), [{ id: 3 }, { id: 1 }])].sort(), [1, 3])
 
 assert.equal(isEmptyLocalFilesPlaylist({ id: -1002, name: '本地文件', track_count: 0 }), true)
 assert.equal(isEmptyLocalFilesPlaylist({ id: 5, name: 'Local Music', track_count: 0 }), true)

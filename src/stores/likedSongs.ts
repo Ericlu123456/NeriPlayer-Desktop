@@ -6,6 +6,7 @@ import type { TrackInfo } from '@/stores/player'
 import { useRecommendStore } from '@/stores/recommend'
 import { useToastStore } from '@/stores/toast'
 import i18n from '@/i18n'
+import { FAVORITES_PLAYLIST_NAMES, isFavoritesPlaylist } from '@/modules/library/localPlaylists'
 import { createLogger } from '@/utils/logger'
 
 const log = createLogger('liked-songs')
@@ -15,14 +16,7 @@ interface PlaylistInfo {
   name: string
 }
 
-const DEFAULT_LIKED_PLAYLIST_NAME = '我喜欢的音乐'
-const LIKED_PLAYLIST_NAMES = [
-  DEFAULT_LIKED_PLAYLIST_NAME,
-  '我喜歡的音樂',
-  'お気に入りの曲',
-  'Liked Songs',
-  'My Favorite Music',
-]
+const DEFAULT_LIKED_PLAYLIST_NAME = FAVORITES_PLAYLIST_NAMES[0]
 
 export const useLikedSongsStore = defineStore('likedSongs', () => {
   const likedPlaylistId = ref<number | null>(null)
@@ -80,7 +74,7 @@ export const useLikedSongsStore = defineStore('likedSongs', () => {
       isLoading.value = true
       try {
         const playlists = await invoke<PlaylistInfo[]>('list_playlists')
-        const liked = playlists.find(p => LIKED_PLAYLIST_NAMES.includes(p.name))
+        const liked = playlists.find(isFavoritesPlaylist)
         if (!liked) {
           likedPlaylistId.value = null
           likedTrackIds.value = new Set()

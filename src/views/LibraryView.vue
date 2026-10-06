@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted, nextTick, watch } from 'vue'
+import { ref, computed, onMounted, onUnmounted, onDeactivated, nextTick, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 
 defineOptions({ name: 'LibraryView' })
@@ -32,9 +32,14 @@ import {
 import { createLogger } from '@/utils/logger'
 import {
   isEmptyLocalFilesPlaylist,
+  isFavoritesPlaylist,
+  isLocalFilesPlaylist,
+  isSystemPlaylist,
   LEGACY_PLAYLIST_ORDER_KEY,
+  localPlaylistDisplayName,
   playlistOrderIds,
   readLegacyPlaylistOrder,
+  visibleSelection,
 } from '@/modules/library/localPlaylists'
 import { usePointerListReorder } from '@/composables/usePointerListReorder'
 import {
@@ -87,6 +92,8 @@ const activeTab = ref(initialTab)
 watch(() => route.query.tab, (tab) => {
   if (typeof tab === 'string' && tab in tabKeyToIndex) {
     activeTab.value = tabKeyToIndex[tab]
+    if (tab === 'netease_albums') neteaseCategory.value = 'albums'
+    else if (tab === 'netease_playlists') neteaseCategory.value = 'playlists'
   }
 })
 
@@ -108,6 +115,13 @@ function exitMultiSelect() {
   isMultiSelectMode.value = false
   selectedPlaylists.value.clear()
 }
+// 多选只属于本地歌单列表：切 tab 或离开资料库（KeepAlive 停用）都要退出
+watch(activeTab, () => {
+  if (isMultiSelectMode.value) exitMultiSelect()
+})
+onDeactivated(() => {
+  if (isMultiSelectMode.value) exitMultiSelect()
+})
 function togglePlaylistSelection(id: number) {
   // 受保护歌单（我喜欢的音乐/本地文件）不允许进入选择集，防止被批量删除
   const pl = playlists.value.find(p => p.id === id)
@@ -116,16 +130,15 @@ function togglePlaylistSelection(id: number) {
   if (set.has(id)) set.delete(id)
   else set.add(id)
 }
+// 全选 / 反选只作用于当前可见（搜索过滤后）的歌单，被筛掉的歌单不会被批量删除
 function selectAll() {
-  for (const pl of playlists.value) {
-    if (!LIKED_NAMES.includes(pl.name) && !LOCAL_NAMES.includes(pl.name)) {
-      selectedPlaylists.value.add(pl.id)
-    }
+  for (const pl of filteredPlaylists.value) {
+    if (!isProtectedPlaylist(pl)) selectedPlaylists.value.add(pl.id)
   }
 }
 function invertSelection() {
-  for (const pl of playlists.value) {
-    if (LIKED_NAMES.includes(pl.name) || LOCAL_NAMES.includes(pl.name)) continue
+  for (const pl of filteredPlaylists.value) {
+    if (isProtectedPlaylist(pl)) continue
     if (selectedPlaylists.value.has(pl.id)) selectedPlaylists.value.delete(pl.id)
     else selectedPlaylists.value.add(pl.id)
   }
@@ -243,8 +256,8 @@ async function loadPlaylists() {
     const normal: PlaylistInfo[] = []
     for (const pl of raw) {
       if (isEmptyLocalFilesPlaylist(pl)) continue
-      if (LIKED_NAMES.includes(pl.name)) liked.push(pl)
-      else if (LOCAL_NAMES.includes(pl.name)) localFiles.push(pl)
+      if (isFavoritesPlaylist(pl)) liked.push(pl)
+      else if (isLocalFilesPlaylist(pl)) localFiles.push(pl)
       else normal.push(pl)
     }
     playlists.value = [...liked, ...normal, ...localFiles]
@@ -296,6 +309,7 @@ async function confirmCreate() {
     await loadPlaylists()
   } catch (e) {
     log.error('Create playlist failed:', e)
+    toast.error(t('library.create_playlist_failed'))
   }
 }
 
@@ -303,11 +317,6 @@ async function confirmCreate() {
 const contextMenu = ref<{ show: boolean; x: number; y: number; playlist: PlaylistInfo | null }>({
   show: false, x: 0, y: 0, playlist: null,
 })
-
-// 特殊歌单：跨语言匹配（同步数据可能是任何语言的名称）
-const LIKED_NAMES = ['我喜欢的音乐', '我喜歡的音樂', 'お気に入りの曲', 'Liked Songs']
-const LOCAL_NAMES = ['本地音乐', '本機音樂', 'ローカル音楽', 'Local Music']
-const ALL_PROTECTED = [...LIKED_NAMES, ...LOCAL_NAMES]
 
 // 每个 tab 的搜索（对齐 Android 各库页顶部的搜索栏）
 //
@@ -345,6 +354,9 @@ const tabSearchHint = computed(() =>
 const filteredPlaylists = computed(() =>
   playlists.value.filter((pl) => matchesQuery(tabQuery.value, displayName(pl))),
 )
+watch(filteredPlaylists, (visible) => {
+  if (selectedPlaylists.value.size > 0) selectedPlaylists.value = visibleSelection(selectedPlaylists.value, visible)
+})
 // 收藏分类: 歌单 / 歌手 (对齐 Android FavoritePlaylistList 的二级分类)
 const favoriteCategory = ref<'playlists' | 'artists'>('playlists')
 const favoriteArtistSource = ref<ArtistFavoriteSource>('neteaseArtist')
@@ -454,14 +466,11 @@ function playLocalArtist(artist: LocalArtistSummary) {
 }
 
 function isProtectedPlaylist(pl: PlaylistInfo) {
-  return ALL_PROTECTED.includes(pl.name)
+  return isSystemPlaylist(pl)
 }
 
-// 显示名：特殊歌单用当前语言翻译，其他原样
 function displayName(pl: PlaylistInfo): string {
-  if (LIKED_NAMES.includes(pl.name)) return t('library.liked_songs')
-  if (LOCAL_NAMES.includes(pl.name)) return t('library.local_files')
-  return pl.name
+  return localPlaylistDisplayName(pl, { favorites: t('library.liked_songs'), localFiles: t('library.local_files') })
 }
 
 function openContextMenu(e: MouseEvent, pl: PlaylistInfo) {
@@ -506,6 +515,7 @@ async function confirmDelete() {
     await loadPlaylists()
   } catch (e) {
     log.error('Delete playlist failed:', e)
+    toast.error(t('library.delete_playlist_failed'))
   }
 }
 
@@ -564,6 +574,7 @@ async function confirmRename() {
     await loadPlaylists()
   } catch (e) {
     log.error('Rename playlist failed:', e)
+    toast.error(t('library.rename_playlist_failed'))
   }
 }
 
@@ -576,8 +587,8 @@ function requestDeleteSelected() {
 }
 
 async function confirmDeleteSelected() {
-  // 兜底再过滤一次受保护歌单：即使选择集被其它路径污染也绝不删除系统歌单
-  const ids = [...selectedPlaylists.value].filter((id) => {
+  // 兜底再过滤一次：系统歌单与当前不可见的歌单都绝不删除
+  const ids = [...visibleSelection(selectedPlaylists.value, filteredPlaylists.value)].filter((id) => {
     const pl = playlists.value.find(p => p.id === id)
     return !pl || !isProtectedPlaylist(pl)
   })
@@ -590,6 +601,8 @@ async function confirmDeleteSelected() {
     await loadPlaylists()
   } catch (e) {
     log.error('Batch delete playlists failed:', e)
+    toast.error(t('library.delete_playlist_failed'))
+    await loadPlaylists()
   }
 }
 
@@ -727,6 +740,9 @@ onMounted(async () => {
   const stop = await listen('playlists-changed', () => {
     void loadPlaylists()
     void loadFavorites()
+    // 本地歌手由歌单曲目聚合而来；不在歌手视图时清空，下次进入重新加载
+    if (localCategory.value === 'artists') void loadLocalArtistTracks(true)
+    else localArtistTracks.value = []
   })
   if (libraryUnmounted) stop()
   else unlistenPlaylistsChanged = stop
@@ -870,8 +886,8 @@ onUnmounted(() => {
         </div>
         <div v-else-if="localArtists.length === 0" key="empty" class="empty-tab">
           <div class="empty-circle"><span class="material-symbols-rounded" style="font-size: 40px">account_circle</span></div>
-          <p class="empty-title">{{ t('library.local_artist_empty') }}</p>
-          <p class="empty-desc">{{ t('library.local_artist_hint') }}</p>
+          <p class="empty-title">{{ t(localArtistQuery.trim() ? 'library.artist_search_empty' : 'library.local_artist_empty') }}</p>
+          <p v-if="!localArtistQuery.trim()" class="empty-desc">{{ t('library.local_artist_hint') }}</p>
         </div>
         <div v-else :key="`grid-${localArtistSort}`" class="artist-grid">
           <div
@@ -1011,6 +1027,10 @@ onUnmounted(() => {
         <p class="empty-title">{{ t('library.playlist_empty_title') }}</p>
         <p class="empty-desc">{{ t('library.playlist_empty_desc') }}</p>
       </div>
+      <div v-else-if="filteredPlaylists.length === 0" class="empty-tab">
+        <div class="empty-circle"><span class="material-symbols-rounded" style="font-size: 40px">search_off</span></div>
+        <p class="empty-title">{{ t('player.no_results') }}</p>
+      </div>
       </div>
       </Transition>
     </div>
@@ -1109,8 +1129,10 @@ onUnmounted(() => {
             {{ favoriteCategory === 'artists' ? 'account_circle' : 'bookmark' }}
           </span>
         </div>
-        <p class="empty-title">{{ t(favoriteCategory === 'artists' ? (tabQuery.trim() ? 'library.artist_search_empty' : 'library.artist_empty') : 'explore.no_playlists') }}</p>
-        <p class="empty-desc">{{ t(favoriteCategory === 'artists' ? 'library.artist_empty_hint' : 'explore.login_for_playlists') }}</p>
+        <p class="empty-title">{{ t(favoriteCategory === 'artists'
+          ? (tabQuery.trim() ? 'library.artist_search_empty' : 'library.artist_empty')
+          : (tabQuery.trim() ? 'player.no_results' : 'explore.no_playlists')) }}</p>
+        <p v-if="!tabQuery.trim()" class="empty-desc">{{ t(favoriteCategory === 'artists' ? 'library.artist_empty_hint' : 'explore.login_for_playlists') }}</p>
       </div>
       </Transition>
       <button
@@ -1144,7 +1166,7 @@ onUnmounted(() => {
       <!-- 歌单 / 专辑分类切换同样走交叉淡入，与本地页保持一致 -->
       <Transition name="fade" mode="out-in">
       <div v-if="neteaseCategory === 'albums'" key="ne-albums" class="local-subview">
-        <TransitionGroup v-if="recommend.userAlbums.length > 0" tag="div" name="lib-list" class="lib-list">
+        <TransitionGroup v-if="filteredNeteaseAlbums.length > 0" tag="div" name="lib-list" class="lib-list">
           <div
             v-for="album in filteredNeteaseAlbums"
             :key="album.id"
@@ -1169,6 +1191,10 @@ onUnmounted(() => {
             <span class="material-symbols-rounded" style="font-size: 18px; opacity: 0.3">chevron_right</span>
           </div>
         </TransitionGroup>
+        <div v-else-if="recommend.userAlbums.length > 0" class="empty-tab">
+          <div class="empty-circle"><span class="material-symbols-rounded" style="font-size: 40px">search_off</span></div>
+          <p class="empty-title">{{ t('player.no_results') }}</p>
+        </div>
         <div v-else class="empty-tab">
           <div class="empty-circle"><span class="material-symbols-rounded" style="font-size: 40px">album</span></div>
           <p class="empty-title">{{ t('library.empty_title', { type: t('library.albums') }) }}</p>
@@ -1177,7 +1203,7 @@ onUnmounted(() => {
       </div>
 
       <div v-else key="ne-playlists" class="local-subview">
-      <TransitionGroup v-if="neteasePlaylists.length > 0" tag="div" name="lib-list" class="lib-list">
+      <TransitionGroup v-if="filteredNeteasePlaylists.length > 0" tag="div" name="lib-list" class="lib-list">
         <div
           v-for="npl in filteredNeteasePlaylists"
           :key="'ne-' + npl.id"
@@ -1201,6 +1227,10 @@ onUnmounted(() => {
           <span class="material-symbols-rounded" style="font-size: 18px; opacity: 0.3">chevron_right</span>
         </div>
       </TransitionGroup>
+      <div v-else-if="neteasePlaylists.length > 0" class="empty-tab">
+        <div class="empty-circle"><span class="material-symbols-rounded" style="font-size: 40px">search_off</span></div>
+        <p class="empty-title">{{ t('player.no_results') }}</p>
+      </div>
       <div v-else class="empty-tab">
         <div class="empty-circle"><span class="material-symbols-rounded" style="font-size: 40px">cloud_queue</span></div>
         <p class="empty-title">{{ t('explore.no_playlists') }}</p>
@@ -1240,6 +1270,10 @@ onUnmounted(() => {
           <span class="material-symbols-rounded" style="font-size: 18px; opacity: 0.3">chevron_right</span>
         </div>
         </TransitionGroup>
+        <div v-if="filteredBiliPlaylists.length === 0" class="empty-tab">
+          <div class="empty-circle"><span class="material-symbols-rounded" style="font-size: 40px">search_off</span></div>
+          <p class="empty-title">{{ t('player.no_results') }}</p>
+        </div>
       </template>
       <div v-else class="empty-tab">
         <div class="empty-circle platform-empty bilibili"><span class="platform-icon-mask" style="mask-image: url('/icons/ic_bilibili.svg')"></span></div>
@@ -1255,7 +1289,7 @@ onUnmounted(() => {
           <span class="platform-icon-mask" style="mask-image: url('/icons/ic_youtube.svg')"></span>
           <div>
             <div class="platform-title">YouTube Music</div>
-            <div class="platform-desc">{{ t('player.track_count', { count: youtubePlaylists.length }) }}</div>
+            <div class="platform-desc">{{ t('library.playlist_count', { count: youtubePlaylists.length }) }}</div>
           </div>
         </div>
         <TransitionGroup tag="div" name="lib-list" class="lib-list">
@@ -1282,6 +1316,10 @@ onUnmounted(() => {
           <span class="material-symbols-rounded" style="font-size: 18px; opacity: 0.3">chevron_right</span>
         </div>
         </TransitionGroup>
+        <div v-if="filteredYoutubePlaylists.length === 0" class="empty-tab">
+          <div class="empty-circle"><span class="material-symbols-rounded" style="font-size: 40px">search_off</span></div>
+          <p class="empty-title">{{ t('player.no_results') }}</p>
+        </div>
       </template>
       <div v-else class="empty-tab">
         <div class="empty-circle platform-empty youtube"><span class="platform-icon-mask" style="mask-image: url('/icons/ic_youtube.svg')"></span></div>

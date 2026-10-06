@@ -6,6 +6,7 @@ import type { TrackInfo } from '@/stores/player'
 import { useToastStore } from '@/stores/toast'
 import M3Input from '@/components/ui/M3Input.vue'
 import BilibiliCoverImage from '@/components/BilibiliCoverImage.vue'
+import { localPlaylistDisplayName } from '@/modules/library/localPlaylists'
 import { createLogger } from '@/utils/logger'
 
 const log = createLogger('add-to-playlist')
@@ -22,6 +23,7 @@ const emit = defineEmits<{
 
 const { t } = useI18n()
 const toast = useToastStore()
+const systemPlaylistLabels = () => ({ favorites: t('library.liked_songs'), localFiles: t('library.local_files') })
 
 interface PlaylistInfo {
   id: number
@@ -102,6 +104,7 @@ async function addToPlaylist(playlistId: number) {
     emit('update:open', false)
   } catch (e) {
     log.error('Add to playlist failed:', e)
+    toast.error(t('library.add_to_playlist_failed'))
   } finally {
     isSubmitting.value = false
   }
@@ -129,6 +132,8 @@ async function createAndAdd() {
     emit('update:open', false)
   } catch (e) {
     log.error('Create & add failed:', e)
+    toast.error(t('library.add_to_playlist_failed'))
+    void loadPlaylists()
   } finally {
     isSubmitting.value = false
   }
@@ -254,7 +259,7 @@ function toBackendTrack(track: TrackInfo) {
                 <span v-else class="material-symbols-rounded filled" style="font-size: 20px">queue_music</span>
               </div>
               <div class="atp-item-info">
-                <div class="atp-item-name">{{ pl.name }}</div>
+                <div class="atp-item-name">{{ localPlaylistDisplayName(pl, systemPlaylistLabels()) }}</div>
                 <div class="atp-item-count">{{ t('library.track_count', { count: pl.track_count }) }}</div>
               </div>
             </div>

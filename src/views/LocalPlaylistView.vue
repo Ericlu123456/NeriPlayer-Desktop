@@ -25,6 +25,7 @@ import {
   type ContextMenuActionItem,
   type ContextMenuItem,
 } from '@/utils/contextMenu'
+import { localPlaylistDisplayName } from '@/modules/library/localPlaylists'
 import { createLogger } from '@/utils/logger'
 import { formatTrackDuration as formatDuration } from '@/utils/timeFormat'
 
@@ -242,7 +243,9 @@ async function loadDetail(options: { silent?: boolean } = {}) {
       loadingAudio: player.isLoadingAudio,
     })
     const pl = playlists.find(p => p.id === id)
-    playlistName.value = pl?.name || ''
+    playlistName.value = pl
+      ? localPlaylistDisplayName(pl, { favorites: t('library.liked_songs'), localFiles: t('library.local_files') })
+      : ''
 
     const tracksStarted = performance.now()
     const trackList = await invoke<any[]>('get_playlist_tracks', { id })
