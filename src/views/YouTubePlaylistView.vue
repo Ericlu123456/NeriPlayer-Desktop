@@ -349,7 +349,9 @@ onMounted(() => {
     <template v-else>
       <div class="detail-hero">
         <div class="hero-cover">
-          <BilibiliCoverImage v-if="coverUrl" :src="coverUrl" />
+          <BilibiliCoverImage v-if="coverUrl" :src="coverUrl">
+            <span class="material-symbols-rounded filled" style="font-size: 48px; opacity: 0.3">queue_music</span>
+          </BilibiliCoverImage>
           <span v-else class="material-symbols-rounded filled" style="font-size: 48px; opacity: 0.3">queue_music</span>
         </div>
         <div class="hero-info">
@@ -406,7 +408,9 @@ onMounted(() => {
               <span v-else class="index-num">{{ index + 1 }}</span>
             </div>
             <div class="track-cover">
-              <BilibiliCoverImage v-if="track.coverUrl" :src="track.coverUrl" loading="lazy" />
+              <BilibiliCoverImage v-if="track.coverUrl" :src="track.coverUrl" loading="lazy">
+                <span class="material-symbols-rounded filled">music_note</span>
+              </BilibiliCoverImage>
               <span v-else class="material-symbols-rounded filled">music_note</span>
             </div>
             <div class="track-info">

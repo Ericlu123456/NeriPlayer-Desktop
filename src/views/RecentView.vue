@@ -25,7 +25,7 @@ const router = useRouter()
 const player = usePlayerStore()
 const history = useHistoryStore()
 const downloadStore = useDownloadStore()
-const { t } = useI18n()
+const { t, locale } = useI18n()
 
 const searchQuery = ref('')
 const showClearConfirm = ref(false)
@@ -84,7 +84,7 @@ function formatRelativeTime(timestamp: number): string {
   if (hours < 24) return t('recent.hours_ago', { count: hours })
   const days = Math.floor(hours / 24)
   if (days < 7) return t('recent.days_ago', { count: days })
-  return new Date(timestamp).toLocaleDateString()
+  return new Date(timestamp).toLocaleDateString(locale.value)
 }
 
 function playAll() {
@@ -284,7 +284,9 @@ function handleTrackMenuClick(item: ContextMenuActionItem) {
             <span v-else class="index-num">{{ index + 1 }}</span>
           </div>
           <div class="track-cover">
-            <BilibiliCoverImage v-if="entry.track.coverUrl" :src="entry.track.coverUrl" loading="lazy" />
+            <BilibiliCoverImage v-if="entry.track.coverUrl" :src="entry.track.coverUrl" loading="lazy">
+              <span class="material-symbols-rounded filled">music_note</span>
+            </BilibiliCoverImage>
             <span v-else class="material-symbols-rounded filled">music_note</span>
           </div>
           <div class="track-info">

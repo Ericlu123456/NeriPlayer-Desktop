@@ -22,7 +22,7 @@ import { displayAlbum } from '@/modules/library/albumDisplay'
 
 const log = createLogger('downloads-view')
 
-const { t } = useI18n()
+const { t, locale } = useI18n()
 const downloadStore = useDownloadStore()
 const player = usePlayerStore()
 const toast = useToastStore()
@@ -161,7 +161,7 @@ function formatFileSize(bytes?: number): string {
 function formatDate(ts?: number): string {
   if (!ts) return '—'
   const ms = ts < 10_000_000_000 ? ts * 1000 : ts
-  return new Date(ms).toLocaleString(undefined, {
+  return new Date(ms).toLocaleString(locale.value, {
     month: '2-digit',
     day: '2-digit',
     hour: '2-digit',
@@ -543,7 +543,9 @@ function progressWidth(task: ActiveDownloadTask) {
           </button>
 
           <div class="cover-box">
-            <BilibiliCoverImage v-if="track.coverUrl" :src="track.coverUrl" loading="lazy" />
+            <BilibiliCoverImage v-if="track.coverUrl" :src="track.coverUrl" loading="lazy">
+              <span class="material-symbols-rounded filled">music_note</span>
+            </BilibiliCoverImage>
             <span v-else class="material-symbols-rounded filled">music_note</span>
             <div class="play-overlay"><span class="material-symbols-rounded">play_arrow</span></div>
           </div>

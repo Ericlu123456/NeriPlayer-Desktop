@@ -38,7 +38,12 @@ for (const source of ['netease', 'qq', 'bilibili', 'youtube']) {
   assert.equal(resolveAudioQualityLabel(online, fallback), `${source}:configured`)
 }
 assert.equal(canSwitchAudioQuality({ source: 'unknown', fromDownload: false, info: null }), false)
-assert.equal(resolveAudioQualityLabel({ source: 'youtube', fromDownload: false, info: { qualityLabel: '高', qualityKey: 'high' } }, fallback), '高')
+// 已知档位用界面语言的译名，而不是播放层写入的固定中文
+assert.equal(resolveAudioQualityLabel({ source: 'youtube', fromDownload: false, info: { qualityLabel: '高', qualityKey: 'high' } }, fallback), 'youtube:high')
+// 界面不认识的档位（译名回退为原始 key）才展示平台给的描述
+const knownOnly = (source, key) => (key === 'high' ? 'High' : key || '')
+assert.equal(resolveAudioQualityLabel({ source: 'bilibili', fromDownload: false, info: { qualityLabel: 'Dolby Atmos', qualityKey: '30250' } }, knownOnly), 'Dolby Atmos')
+assert.equal(resolveAudioQualityLabel({ source: 'bilibili', fromDownload: false, info: { qualityLabel: 'Dolby Atmos' } }, knownOnly), 'Dolby Atmos')
 assert.equal(resolveAudioQualityLabel({ source: 'netease', fromDownload: false, info: { qualityLabel: '320 kbps', qualityKey: 'exhigh' } }, fallback), 'netease:exhigh')
 assert.equal(resolveAudioQualityLabel({ source: 'netease', fromDownload: false, info: { source: 'bilibili', qualityKey: 'high' } }, fallback), 'bilibili:high')
 for (const bitrate of [undefined, NaN, Infinity, -1, 0]) assert.equal(actualAudioBitrateLabel({ bitrate }), '')

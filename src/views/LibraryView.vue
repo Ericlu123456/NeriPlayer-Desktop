@@ -901,7 +901,9 @@ onUnmounted(() => {
             @keydown.space.prevent="openLocalArtist(artist)"
           >
             <div class="artist-cover">
-              <BilibiliCoverImage v-if="artist.coverUrl" :src="artist.coverUrl" loading="lazy" />
+              <BilibiliCoverImage v-if="artist.coverUrl" :src="artist.coverUrl" loading="lazy">
+                <span class="material-symbols-rounded filled" style="font-size: 34px">account_circle</span>
+              </BilibiliCoverImage>
               <span v-else class="material-symbols-rounded filled" style="font-size: 34px">account_circle</span>
               <button
                 class="artist-play"

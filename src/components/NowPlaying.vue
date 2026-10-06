@@ -1554,6 +1554,8 @@ function isRemotePlaybackSource(source: string) {
 
 function downloadTaskStatusText(status?: string) {
   switch (status) {
+    case 'queued': return t('download.queued')
+    case 'processing': return t('download.processing')
     case 'resolving': return t('download.resolving')
     case 'downloading': return t('download.downloading')
     case 'cancelling': return t('download.cancelling')
@@ -2511,8 +2513,8 @@ const sliderActiveColor = computed(() => {
             <button class="np-more-list-item" @click="goToSubView('track-detail')">
               <span class="material-symbols-rounded">article</span>
               <div class="np-more-list-info">
-                <span class="np-more-list-headline">歌曲详情</span>
-                <span class="np-more-list-desc">来源、ID、音频与下载状态</span>
+                <span class="np-more-list-headline">{{ t('player.track_detail') }}</span>
+                <span class="np-more-list-desc">{{ t('player.track_detail_desc') }}</span>
               </div>
               <span class="material-symbols-rounded np-more-chevron">chevron_right</span>
             </button>
@@ -2612,7 +2614,7 @@ const sliderActiveColor = computed(() => {
               <span class="material-symbols-rounded">headphones</span>
               <div class="np-more-list-info">
                 <span class="np-more-list-headline">{{ t('listen_together.title') }}</span>
-                <span class="np-more-list-desc">创建或加入同步播放房间</span>
+                <span class="np-more-list-desc">{{ t('listen_together.entry_desc') }}</span>
               </div>
               <span class="material-symbols-rounded np-more-chevron">chevron_right</span>
             </button>
@@ -2768,13 +2770,13 @@ const sliderActiveColor = computed(() => {
                 :class="{ active: infoSearchPlatform === 'netease' }"
                 @click="infoSearchPlatform = 'netease'; searchResults = []; infoApplyCandidate = null"
               >
-                网易云
+                {{ t('player.source_netease') }}
               </button>
               <button
                 :class="{ active: infoSearchPlatform === 'qq' }"
                 @click="infoSearchPlatform = 'qq'; searchResults = []; infoApplyCandidate = null"
               >
-                QQ 音乐
+                {{ t('player.source_qq') }}
               </button>
               <button
                 :class="{ active: infoSearchPlatform === 'bilibili' }"
@@ -2799,7 +2801,7 @@ const sliderActiveColor = computed(() => {
                 :class="{ active: infoApplyCandidate === r }"
                 @click="applySearchResult(r)"
               >
-                <BilibiliCoverImage v-if="r.cover_url" :src="r.cover_url" class="np-more-search-cover" />
+                <BilibiliCoverImage :src="r.cover_url" class="np-more-search-cover"><span class="np-more-search-cover np-more-search-cover-fallback material-symbols-rounded filled">music_note</span></BilibiliCoverImage>
                 <div class="np-more-search-info">
                   <span class="np-more-search-title">{{ r.title }}</span>
                   <span class="np-more-search-artist">{{ r.artist }}</span>
@@ -2819,32 +2821,32 @@ const sliderActiveColor = computed(() => {
                   <span class="np-more-search-artist">{{ infoApplyCandidate.artist }}</span>
                 </div>
               </div>
-              <div class="np-more-field-title">选择要填充的字段</div>
+              <div class="np-more-field-title">{{ t('player.fill_fields_title') }}</div>
               <div class="np-more-field-options">
                 <label class="np-more-chip">
                   <input v-model="applyInfoFields.title" type="checkbox" />
-                  <span>歌曲名</span>
+                  <span>{{ t('player.song_title') }}</span>
                 </label>
                 <label class="np-more-chip">
                   <input v-model="applyInfoFields.artist" type="checkbox" />
-                  <span>歌手</span>
+                  <span>{{ t('player.artist_name') }}</span>
                 </label>
                 <label class="np-more-chip">
                   <input v-model="applyInfoFields.cover" type="checkbox" />
-                  <span>封面</span>
+                  <span>{{ t('player.fill_field_cover') }}</span>
                 </label>
                 <label class="np-more-chip">
                   <input v-model="applyInfoFields.lyrics" type="checkbox" />
-                  <span>歌词</span>
+                  <span>{{ t('player.fill_field_lyrics') }}</span>
                 </label>
               </div>
               <div class="np-more-form-actions compact">
                 <button class="np-more-form-btn primary" @click="confirmApplySearchResult">
                   <span class="material-symbols-rounded">check</span>
-                  应用选择
+                  {{ t('player.apply_selection') }}
                 </button>
                 <button class="np-more-form-btn" @click="infoApplyCandidate = null">
-                  取消
+                  {{ t('common.cancel') }}
                 </button>
               </div>
             </div>
@@ -2887,16 +2889,18 @@ const sliderActiveColor = computed(() => {
               <button class="np-more-back" @click="goBackToMain()">
                 <span class="material-symbols-rounded">arrow_back</span>
               </button>
-              <h4 class="np-more-title">歌曲详情</h4>
+              <h4 class="np-more-title">{{ t('player.track_detail') }}</h4>
             </div>
             <div class="np-track-detail-card">
               <div class="np-track-detail-hero">
                 <img
-                  v-if="coverUrl"
+                  v-if="coverUrl && !coverLoadError"
                   :src="coverUrl"
                   class="np-track-detail-cover"
                   referrerpolicy="no-referrer"
+                  @error="handleNowPlayingCoverError"
                 />
+                <span v-else class="np-track-detail-cover np-track-detail-cover-fallback material-symbols-rounded filled">music_note</span>
                 <div class="np-track-detail-heading">
                   <strong>{{ player.currentTrack?.title || '-' }}</strong>
                   <span>{{ player.currentTrack?.artist || '-' }}</span>
@@ -2904,24 +2908,24 @@ const sliderActiveColor = computed(() => {
               </div>
 
               <button class="np-track-detail-row copyable" @click="copyText(player.currentTrack?.id || '')">
-                <span>歌曲 ID</span>
+                <span>{{ t('player.track_detail_id') }}</span>
                 <strong>{{ player.currentTrack?.id || '-' }}</strong>
               </button>
               <button class="np-track-detail-row copyable" @click="copyText(player.currentTrack?.title || '')">
-                <span>标题</span>
+                <span>{{ t('player.track_detail_title') }}</span>
                 <strong>{{ player.currentTrack?.title || '-' }}</strong>
               </button>
               <button class="np-track-detail-row copyable" @click="copyText(player.currentTrack?.artist || '')">
-                <span>歌手</span>
+                <span>{{ t('player.track_detail_artist') }}</span>
                 <strong>{{ player.currentTrack?.artist || '-' }}</strong>
               </button>
               <div class="np-track-detail-row">
-                <span>专辑</span>
+                <span>{{ t('player.track_detail_album') }}</span>
                 <strong>{{ albumName || '-' }}</strong>
               </div>
               <div class="np-track-detail-row">
-                <span>来源</span>
-                <strong>{{ playbackSourceLabel || currentSource }}</strong>
+                <span>{{ t('player.track_detail_source') }}</span>
+                <strong>{{ playbackSourceLabel || platformLabel(currentSource) || '-' }}</strong>
               </div>
               <div class="np-track-detail-row">
                 <span>{{ t('player.track_detail_duration') }}</span>
@@ -3007,13 +3011,13 @@ const sliderActiveColor = computed(() => {
                   :class="{ active: lyricsEditorTab === 'original' }"
                   @click="lyricsEditorTab = 'original'"
                 >
-                  原文
+                  {{ t('player.lyrics_editor_original') }}
                 </button>
                 <button
                   :class="{ active: lyricsEditorTab === 'translation' }"
                   @click="lyricsEditorTab = 'translation'"
                 >
-                  翻译
+                  {{ t('player.lyrics_editor_translation') }}
                 </button>
               </div>
               <textarea
@@ -3027,7 +3031,7 @@ const sliderActiveColor = computed(() => {
                 v-else
                 v-model="lyricsTranslationEditorText"
                 class="np-lyrics-textarea"
-                placeholder="[00:12.34]翻译歌词，可留空"
+                :placeholder="t('player.lyrics_translation_placeholder')"
                 spellcheck="false"
               />
               <div class="np-more-form-actions">
@@ -3067,13 +3071,13 @@ const sliderActiveColor = computed(() => {
                 :class="{ active: lyricFillPlatform === 'netease' }"
                 @click="lyricFillPlatform = 'netease'; lyricFillResults = []"
               >
-                网易云
+                {{ t('player.source_netease') }}
               </button>
               <button
                 :class="{ active: lyricFillPlatform === 'qq' }"
                 @click="lyricFillPlatform = 'qq'; lyricFillResults = []"
               >
-                QQ 音乐
+                {{ t('player.source_qq') }}
               </button>
               <button
                 :class="{ active: lyricFillPlatform === 'lrclib' }"
@@ -3091,7 +3095,7 @@ const sliderActiveColor = computed(() => {
                 class="np-more-search-item"
                 @click="applyLyricFill(r)"
               >
-                <BilibiliCoverImage v-if="r.cover_url" :src="r.cover_url" class="np-more-search-cover" />
+                <BilibiliCoverImage :src="r.cover_url" class="np-more-search-cover"><span class="np-more-search-cover np-more-search-cover-fallback material-symbols-rounded filled">music_note</span></BilibiliCoverImage>
                 <div class="np-more-search-info">
                   <span class="np-more-search-title">{{ r.title }}</span>
                   <span class="np-more-search-artist">{{ r.artist }}</span>
@@ -5128,6 +5132,14 @@ const sliderActiveColor = computed(() => {
   background: rgba(255,255,255,0.06);
 }
 
+.np-more-search-cover-fallback {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 20px;
+  color: rgba(255,255,255,0.5);
+}
+
 .np-more-search-info {
   flex: 1;
   display: flex;
@@ -5327,6 +5339,15 @@ const sliderActiveColor = computed(() => {
   border-radius: 14px;
   object-fit: cover;
   background: rgba(255,255,255,0.08);
+}
+
+.np-track-detail-cover-fallback {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  font-size: 28px;
+  color: rgba(255,255,255,0.6);
 }
 
 .np-track-detail-heading {

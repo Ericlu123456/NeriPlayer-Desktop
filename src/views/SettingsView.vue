@@ -1023,7 +1023,7 @@ async function configureWebDav() {
 
 function formatSyncTime(ms: number): string {
   if (!ms) return ''
-  return new Date(ms).toLocaleString()
+  return new Date(ms).toLocaleString(locale.value)
 }
 
 // 平台账号配置

@@ -31,7 +31,7 @@ const route = useRoute()
 const router = useRouter()
 const player = usePlayerStore()
 const downloadStore = useDownloadStore()
-const { t } = useI18n()
+const { t, locale } = useI18n()
 
 const isLoading = ref(true)
 // 慢加载才显示 spinner，避免快速加载时一闪而过（UI-016）
@@ -231,10 +231,10 @@ function queueSelected() {
   leaveSelectionMode()
 }
 
+// 紧凑计数随界面语言：中文 1.5亿 / 1.2万，英文 150M / 12K
+const playCountFormat = computed(() => new Intl.NumberFormat(locale.value, { notation: 'compact', maximumFractionDigits: 1 }))
 function formatPlayCount(count: number): string {
-  if (count >= 100000000) return (count / 100000000).toFixed(1) + t('common.hundred_million')
-  if (count >= 10000) return (count / 10000).toFixed(1) + t('common.ten_thousand')
-  return count.toString()
+  return playCountFormat.value.format(count)
 }
 
 // 曲目右键菜单
@@ -423,7 +423,9 @@ onMounted(() => {
       <!-- 歌单 / 专辑 信息头 -->
       <div class="detail-hero">
         <div class="hero-cover">
-          <BilibiliCoverImage v-if="coverUrl" :src="coverUrl" />
+          <BilibiliCoverImage v-if="coverUrl" :src="coverUrl">
+            <span class="material-symbols-rounded filled" style="font-size: 48px; opacity: 0.3">queue_music</span>
+          </BilibiliCoverImage>
           <span v-else class="material-symbols-rounded filled" style="font-size: 48px; opacity: 0.3">queue_music</span>
         </div>
         <div class="hero-info">

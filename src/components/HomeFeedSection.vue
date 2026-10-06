@@ -15,8 +15,8 @@ const emit = defineEmits<{
   play: [songs: TrackInfo[], index: number]
   playlist: [playlist: HomePlaylist]
 }>()
-const { t } = useI18n()
-const playCountFormat = new Intl.NumberFormat(undefined, { notation: 'compact', maximumFractionDigits: 1 })
+const { t, locale } = useI18n()
+const playCountFormat = computed(() => new Intl.NumberFormat(locale.value, { notation: 'compact', maximumFractionDigits: 1 }))
 const page = ref(0)
 const columns = ref(3)
 const perPage = computed(() => columns.value * 3)

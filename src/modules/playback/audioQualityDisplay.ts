@@ -22,9 +22,16 @@ export function resolveAudioQualityLabel(
 ): string {
   if (isLocalAudioPlayback(state)) return ''
   const info = state.info
+  const source = info?.source || state.source
+  const key = info?.qualityKey
+  // 已知档位走界面语言的译名；播放层写入的 qualityLabel 是固定中文，只用于界面不认识的档位
+  if (key) {
+    const translated = resolveFallback(source, key)
+    if (translated && translated !== key) return translated
+  }
   const labeled = info?.qualityLabel?.trim()
-  if (labeled && !/kbps/i.test(labeled) && labeled !== info?.qualityKey) return labeled
-  return resolveFallback(info?.source || state.source, info?.qualityKey)
+  if (labeled && !/kbps/i.test(labeled) && labeled !== key) return labeled
+  return resolveFallback(source, key)
 }
 
 export function actualAudioBitrateLabel(info: { bitrate?: number } | null): string {

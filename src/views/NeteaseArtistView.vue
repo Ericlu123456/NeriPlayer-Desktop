@@ -337,7 +337,9 @@ onUnmounted(() => { generation++ })
             <span v-else class="index-num">{{ index + 1 }}</span>
           </div>
           <div class="track-cover">
-            <BilibiliCoverImage v-if="track.coverUrl" :src="track.coverUrl" loading="lazy" />
+            <BilibiliCoverImage v-if="track.coverUrl" :src="track.coverUrl" loading="lazy">
+              <span class="material-symbols-rounded filled">music_note</span>
+            </BilibiliCoverImage>
             <span v-else class="material-symbols-rounded filled">music_note</span>
           </div>
           <div class="track-info">
@@ -363,7 +365,9 @@ onUnmounted(() => { generation++ })
           @keydown.enter="openAlbum(album)"
         >
           <div class="artist-album-cover">
-            <BilibiliCoverImage v-if="album.coverUrl" :src="album.coverUrl" loading="lazy" />
+            <BilibiliCoverImage v-if="album.coverUrl" :src="album.coverUrl" loading="lazy">
+              <span class="material-symbols-rounded filled">album</span>
+            </BilibiliCoverImage>
             <span v-else class="material-symbols-rounded filled">album</span>
           </div>
           <div class="artist-album-info">
