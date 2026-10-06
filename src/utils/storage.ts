@@ -25,6 +25,7 @@ export interface StorageCacheClearOptions {
   downloadStaging: boolean
   sharedMedia: boolean
   platformList: boolean
+  lyricsCache: boolean
 }
 
 // 歌单详情与歌词缓存已迁入用户数据库，由后端统计；这里只剩首屏用的推荐快照

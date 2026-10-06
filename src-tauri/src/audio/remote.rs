@@ -1596,6 +1596,8 @@ impl RemoteAudioCache {
         if let Ok(mut published) = self.published_path.lock() {
             *published = Some(path.clone());
         }
+        // 刷新 .ready 的修改时间实现最近使用淘汰；不碰 .audio，其校验戳按路径和修改时间记忆
+        crate::fsutil::touch_modified(&self.ready_path);
         log::info!(
             target: "remote-cache",
             "lookup hit digest={} bytes={} elapsed_ms={}",
@@ -2107,12 +2109,13 @@ fn prune_disk_cache(root: &PathBuf, max_cache_bytes: u64, keep_digest: &str) {
         return;
     }
 
+    // 按每组最新的修改时间排序：命中会刷新 .ready，常听的曲目排在后面（对齐 Android LRU 淘汰）
     let mut ordered = groups.into_iter().collect::<Vec<_>>();
     ordered.sort_by_key(|(_, files)| {
         files
             .iter()
             .map(|(_, _, modified)| *modified)
-            .min()
+            .max()
             .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
     });
     for (_, files) in ordered {
@@ -2125,6 +2128,11 @@ fn prune_disk_cache(root: &PathBuf, max_cache_bytes: u64, keep_digest: &str) {
             }
         }
     }
+}
+
+/// 按上限裁剪整个音频缓存（启动时、调小缓存上限后调用；平时只在新文件发布时裁剪）
+pub fn prune_remote_audio_cache(root: &Path, max_cache_bytes: u64) {
+    prune_disk_cache(&root.to_path_buf(), max_cache_bytes, "");
 }
 
 fn collect_disk_cache_files(

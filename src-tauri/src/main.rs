@@ -141,6 +141,11 @@ fn main() {
                         handle.state::<AppState>().rebuild_http(false);
                     }
                     settings_cmd::apply_runtime_settings(&loaded.settings);
+                    let handle_prune = handle.clone();
+                    let cache_limit = loaded.settings.max_cache_size;
+                    tauri::async_runtime::spawn_blocking(move || {
+                        player_cmd::prune_media_caches(&handle_prune, cache_limit);
+                    });
                 }
                 Err(error) => log::warn!(target: "settings", "启动时读取设置失败: {error}"),
             }
@@ -544,7 +549,6 @@ fn main() {
             sync_cmd::update_github_sync_settings,
             sync_cmd::update_sync_preferences,
             sync_cmd::update_webdav_sync_settings,
-            sync_cmd::clear_app_cache,
             sync_cmd::export_playlists,
             sync_cmd::import_playlists,
             sync_cmd::export_config,

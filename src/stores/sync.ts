@@ -582,26 +582,6 @@ export const useSyncStore = defineStore('sync', () => {
     }
   }
 
-  /** 清除缓存 */
-  async function clearCache() {
-    const toast = useToastStore()
-    try {
-      const result = await invoke<any>('clear_app_cache')
-      const bytes = result.clearedBytes ?? 0
-      const failedCount = result.failedCount ?? 0
-      const mb = (bytes / 1024 / 1024).toFixed(1)
-      if (bytes === 0 && failedCount === 0) {
-        toast.success(t('settings.cache_empty'))
-      } else if (failedCount > 0) {
-        toast.success(t('settings.cache_clear_partial', { mb, count: failedCount }))
-      } else {
-        toast.success(t('settings.cache_cleared', { mb }))
-      }
-    } catch (e: any) {
-      toast.error(e?.toString() || t('settings.cache_clear_failed'))
-    }
-  }
-
   /** 导出播放列表 */
   async function exportPlaylists() {
     const toast = useToastStore()
@@ -681,6 +661,6 @@ export const useSyncStore = defineStore('sync', () => {
     validateGitHubToken, createGitHubRepo, useExistingGitHubRepo,
     configureGitHub, syncGitHub, syncAuto, disconnectGitHub,
     configureWebDav, syncWebDav, disconnectWebDav,
-    clearCache, exportPlaylists, importPlaylists, exportConfig, importConfig,
+    exportPlaylists, importPlaylists, exportConfig, importConfig,
   }
 })

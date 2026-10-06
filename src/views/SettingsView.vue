@@ -833,7 +833,7 @@ async function clearStorageCache(options: StorageCacheClearOptions) {
   try {
     const result = await invoke<{ clearedBytes: number; deletedFiles: number; failedCount: number }>(
       'clear_storage_cache',
-      { options },
+      { options, downloadDir: downloadDir.value || null },
     )
     clearBrowserCache(options)
     const mb = ((result.clearedBytes || 0) / 1024 / 1024).toFixed(1)

@@ -47,8 +47,17 @@ pub async fn get_settings(app: AppHandle) -> AppResult<SettingsLoadResult> {
 
 #[tauri::command]
 pub async fn save_settings(app: AppHandle, settings: AppSettings) -> AppResult<AppSettings> {
+    let previous_cache_limit = store::load_settings(&app)
+        .ok()
+        .map(|loaded| loaded.settings.max_cache_size);
     let saved = store::save_settings(&app, settings)?;
     apply_runtime_settings(&saved);
+    // 调小缓存上限后立刻按新上限裁剪，而不是等下一首下载完成
+    if previous_cache_limit.is_some_and(|previous| saved.max_cache_size < previous) {
+        let app = app.clone();
+        let limit = saved.max_cache_size;
+        tauri::async_runtime::spawn_blocking(move || super::player_cmd::prune_media_caches(&app, limit));
+    }
     Ok(saved)
 }
 

@@ -1638,6 +1638,18 @@ fn playback_cache_root(app: &AppHandle) -> Option<PathBuf> {
         .map(|dir| dir.join("playback-audio"))
 }
 
+/// 按当前上限裁剪音频与封面缓存：启动时与调小缓存上限后执行（对齐 Android 启动即裁剪），
+/// 否则要等下一首下载完成才会裁剪
+pub fn prune_media_caches(app: &AppHandle, max_cache_size_mb: i32) {
+    let max_bytes = (max_cache_size_mb.max(0) as u64).saturating_mul(1024 * 1024);
+    if let Some(root) = playback_cache_root(app) {
+        crate::audio::remote::prune_remote_audio_cache(&root, max_bytes);
+    }
+    if let Ok(cache_dir) = app.path().app_cache_dir() {
+        super::image_cmd::prune_cover_cache_dir(&cache_dir);
+    }
+}
+
 async fn download_url_bytes(
     url: &str,
     state: &State<'_, AppState>,

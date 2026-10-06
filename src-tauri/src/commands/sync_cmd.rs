@@ -1,7 +1,7 @@
 // 同步相关命令
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Emitter, State};
 use crate::error::{AppError, AppResult};
 use crate::settings::store::{self, AppSettings};
 use crate::state::AppState;
@@ -1140,74 +1140,6 @@ pub async fn update_webdav_sync_settings(app: AppHandle, auto_sync: Option<bool>
         save_webdav_config_unlocked(&app, &config);
         Ok(())
     })
-}
-
-/// 清除应用缓存（音频/图片缓存目录 + app_data_dir 下的临时缓存子目录）
-#[tauri::command]
-pub async fn clear_app_cache(app: AppHandle) -> AppResult<Value> {
-    let mut cleared: u64 = 0;
-    let mut failed: u64 = 0;
-
-    // 清理 app_cache_dir
-    if let Ok(cache_dir) = app.path().app_cache_dir() {
-        let (c, f) = clear_directory_contents(&cache_dir);
-        cleared += c;
-        failed += f;
-    }
-
-    // 清理 app_data_dir 下的缓存子目录（covers, temp 等）
-    if let Ok(data_dir) = app.path().app_data_dir() {
-        for sub in &["covers", "temp", "cache", "thumbnails"] {
-            let sub_dir = data_dir.join(sub);
-            if sub_dir.exists() && sub_dir.is_dir() {
-                let (c, f) = clear_directory_contents(&sub_dir);
-                cleared += c;
-                failed += f;
-            }
-        }
-    }
-
-    log::info!(target: "sync", "clear_app_cache: cleared {} bytes, {} failures", cleared, failed);
-    Ok(serde_json::json!({ "clearedBytes": cleared, "failedCount": failed }))
-}
-
-/// 清除目录下所有内容，返回 (cleared_bytes, failed_count)
-fn clear_directory_contents(dir: &std::path::Path) -> (u64, u64) {
-    let mut cleared: u64 = 0;
-    let mut failed: u64 = 0;
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_file() {
-                let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
-                if std::fs::remove_file(&path).is_ok() {
-                    cleared += size;
-                } else {
-                    failed += 1;
-                }
-            } else if path.is_dir() {
-                if let Ok(size) = dir_size(&path) { cleared += size; }
-                if std::fs::remove_dir_all(&path).is_err() {
-                    failed += 1;
-                }
-            }
-        }
-    }
-    (cleared, failed)
-}
-
-fn dir_size(path: &std::path::Path) -> std::io::Result<u64> {
-    let mut total = 0;
-    for entry in std::fs::read_dir(path)? {
-        let entry = entry?;
-        let meta = entry.metadata()?;
-        if meta.is_file() {
-            total += meta.len();
-        } else if meta.is_dir() {
-            total += dir_size(&entry.path())?;
-        }
-    }
-    Ok(total)
 }
 
 /// 导出播放列表为 JSON（Android BackupData 兼容格式）
