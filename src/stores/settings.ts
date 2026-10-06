@@ -1,6 +1,9 @@
 import { defineStore } from 'pinia'
 import { ref, watch, type Ref } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
+import { createLogger } from '@/utils/logger'
+
+const log = createLogger('settings')
 
 export type ThemeMode = 'system' | 'dark' | 'light'
 export type CoverStyle = 'disc' | 'card'
@@ -106,6 +109,19 @@ export const MAX_DOWNLOAD_PARALLELISM = 8
 export const DEFAULT_DOWNLOAD_PARALLELISM = 6
 export const MIN_MEDIA_CACHE_SIZE_MB = 256
 export const MAX_MEDIA_CACHE_SIZE_MB = 512 * 1024
+// 对齐 Android LyricFontScale 0.5–1.6
+export const LYRIC_FONT_SCALE_MIN = 0.5
+export const LYRIC_FONT_SCALE_MAX = 1.6
+export const LYRIC_FONT_SCALE_STEP = 0.05
+// 封面模糊强度 × 30 = CSS 模糊半径（px），8 档上限即 240px
+export const COVER_BLUR_PX_PER_UNIT = 30
+export const MAX_COVER_BLUR_AMOUNT = 8
+// 对齐 Android LyricDefaultOffset ±5000ms
+export const LYRIC_DEFAULT_OFFSET_RANGE_MS = 5000
+const NETEASE_QUALITIES = ['standard', 'higher', 'exhigh', 'lossless', 'hires', 'jyeffect', 'sky', 'jymaster']
+const QQ_QUALITIES = ['standard', 'high', 'lossless']
+const YOUTUBE_QUALITIES = ['low', 'medium', 'high', 'very_high']
+const BILI_QUALITIES = ['low', 'medium', 'high', 'dolby', 'lossless', 'hires']
 
 const DEFAULT_SETTINGS: AppSettings = {
   formatVersion: SETTINGS_FORMAT_VERSION,
@@ -138,7 +154,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   showTranslation: true,
   lyricBlur: true,
   lyricBlurAmount: 1.5,
-  cloudMusicOffset: 500,
+  cloudMusicOffset: 1000,
   qqMusicOffset: 500,
   coverStyle: 'card',
   advancedLyrics: true,
@@ -156,7 +172,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   neteaseAutoSourceSwitch: false,
   neteaseLocalSourceFallback: false,
   bypassProxy: true,
-  internationalizationEnabled: typeof navigator !== 'undefined' && !navigator.language.startsWith('zh'),
+  internationalizationEnabled: false,
   backgroundImageUri: '',
   backgroundImageBlur: 20,
   backgroundImageAlpha: 0.3,
@@ -355,28 +371,40 @@ function normalizeSnapshot(input: unknown): AppSettings {
     : DEFAULT_DOWNLOAD_PARALLELISM
   result.downloadNameTemplate = result.downloadNameTemplate.trim() || DEFAULT_DOWNLOAD_NAME_TEMPLATE
   result.downloadDir = result.downloadDir.trim()
-  result.downloadNeteaseQuality = normalizeChoice(
-    result.downloadNeteaseQuality.trim() === 'high' ? 'higher' : result.downloadNeteaseQuality,
-    ['standard', 'higher', 'exhigh', 'lossless', 'hires', 'jyeffect', 'sky', 'jymaster'],
-    'exhigh',
-  )
-  result.downloadQqMusicQuality = normalizeChoice(result.downloadQqMusicQuality, ['standard', 'high', 'lossless'], 'high')
-  result.downloadYoutubeQuality = normalizeChoice(result.downloadYoutubeQuality, ['low', 'medium', 'high', 'very_high'], 'high')
-  result.downloadBiliQuality = normalizeChoice(result.downloadBiliQuality, ['low', 'medium', 'high', 'dolby', 'lossless', 'hires'], 'high')
+  // 网易云「较高」的取值是 higher（与播放页、Android 一致）；旧版设置页写的是 high
+  result.neteaseQuality = normalizeChoice(canonicalNeteaseQuality(result.neteaseQuality), NETEASE_QUALITIES, 'exhigh')
+  result.qqMusicQuality = normalizeChoice(result.qqMusicQuality, QQ_QUALITIES, 'high')
+  result.youtubeQuality = normalizeChoice(result.youtubeQuality, YOUTUBE_QUALITIES, 'very_high')
+  result.biliQuality = normalizeChoice(result.biliQuality, BILI_QUALITIES, 'high')
+  result.downloadNeteaseQuality = normalizeChoice(canonicalNeteaseQuality(result.downloadNeteaseQuality), NETEASE_QUALITIES, 'exhigh')
+  result.downloadQqMusicQuality = normalizeChoice(result.downloadQqMusicQuality, QQ_QUALITIES, 'high')
+  result.downloadYoutubeQuality = normalizeChoice(result.downloadYoutubeQuality, YOUTUBE_QUALITIES, 'high')
+  result.downloadBiliQuality = normalizeChoice(result.downloadBiliQuality, BILI_QUALITIES, 'high')
 
-  result.lyricFontScale = clamp(result.lyricFontScale, 0.5, 1.5)
-  result.fadeInDuration = clamp(result.fadeInDuration, 0, 10000)
-  result.fadeOutDuration = clamp(result.fadeOutDuration, 0, 10000)
-  result.crossfadeInDuration = clamp(result.crossfadeInDuration, 0, 10000)
-  result.crossfadeOutDuration = clamp(result.crossfadeOutDuration, 0, 10000)
+  // 旧版「无缝切换」与「切歌交叉淡入淡出」是同一效果的两个开关，合并到后者并沿用当时的淡入淡出时长
+  if (result.crossfade) {
+    if (!result.crossfadeNext) {
+      result.crossfadeNext = true
+      result.crossfadeInDuration = result.fadeInDuration
+      result.crossfadeOutDuration = result.fadeOutDuration
+    }
+    result.crossfade = false
+  }
+
+  // 毫秒、MB 等字段在 Rust 端是整数，带小数会让整份设置保存失败
+  result.lyricFontScale = clamp(result.lyricFontScale, LYRIC_FONT_SCALE_MIN, LYRIC_FONT_SCALE_MAX)
+  result.fadeInDuration = clampInteger(result.fadeInDuration, 0, 10000)
+  result.fadeOutDuration = clampInteger(result.fadeOutDuration, 0, 10000)
+  result.crossfadeInDuration = clampInteger(result.crossfadeInDuration, 0, 10000)
+  result.crossfadeOutDuration = clampInteger(result.crossfadeOutDuration, 0, 10000)
   result.lyricBlurAmount = clamp(result.lyricBlurAmount, 0, 8)
-  result.cloudMusicOffset = clamp(result.cloudMusicOffset, -30000, 30000)
-  result.qqMusicOffset = clamp(result.qqMusicOffset, -30000, 30000)
-  result.coverBlurAmount = clamp(result.coverBlurAmount, 0, 500)
+  result.cloudMusicOffset = clampInteger(result.cloudMusicOffset, -30000, 30000)
+  result.qqMusicOffset = clampInteger(result.qqMusicOffset, -30000, 30000)
+  result.coverBlurAmount = clamp(result.coverBlurAmount, 0, MAX_COVER_BLUR_AMOUNT)
   result.coverBlurDarken = clamp(result.coverBlurDarken, 0, 1)
   result.backgroundImageBlur = clamp(result.backgroundImageBlur, 0, 100)
   result.backgroundImageAlpha = clamp(result.backgroundImageAlpha, 0, 1)
-  result.maxCacheSize = clamp(
+  result.maxCacheSize = clampInteger(
     result.maxCacheSize,
     MIN_MEDIA_CACHE_SIZE_MB,
     MAX_MEDIA_CACHE_SIZE_MB,
@@ -403,8 +431,24 @@ function normalizeChoice(value: string, allowed: string[], fallback: string): st
   return allowed.includes(normalized) ? normalized : fallback
 }
 
+function canonicalNeteaseQuality(value: string): string {
+  return value.trim() === 'high' ? 'higher' : value
+}
+
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, Number.isFinite(value) ? value : min))
+}
+
+function clampInteger(value: number, min: number, max: number): number {
+  return clamp(Math.round(value), min, max)
+}
+
+function sameSnapshot(left: AppSettings, right: AppSettings): boolean {
+  return JSON.stringify(left) === JSON.stringify(right)
+}
+
+function hasTauriBridge(): boolean {
+  return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
 }
 
 function writeLegacyShadow(snapshot: AppSettings) {
@@ -550,9 +594,14 @@ export const useSettingsStore = defineStore('settings', () => {
     const next = snapshot()
     writeLegacyShadow(next)
     try {
-      await invoke('save_settings', { settings: next })
-    } catch {
+      const saved = await invoke<AppSettings | undefined>('save_settings', { settings: next })
+      // Rust 会再规整一遍（去空白、夹范围）；保存期间没有新改动时采用它，两边不必等到重启才一致
+      if (saved && sameSnapshot(snapshot(), next) && !sameSnapshot(normalizeSnapshot(saved), next)) {
+        applySnapshot(saved)
+      }
+    } catch (error) {
       // 浏览器开发模式没有 Rust bridge 时仍保留 localStorage 兼容缓存
+      if (hasTauriBridge()) log.error('save_settings failed:', error)
     }
   }
 

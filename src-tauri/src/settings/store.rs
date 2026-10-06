@@ -43,20 +43,27 @@ pub struct AppSettings {
     pub show_audio_sample_rate: bool,
     pub show_audio_bit_depth: bool,
     pub lyric_font_scale: f32,
+    /// 旧版「无缝切换」，已并入 crossfade_next；保留字段兼容旧配置，规整后恒为 false
     pub crossfade: bool,
     pub normalize_volume: bool,
     pub fade_in: bool,
+    #[serde(deserialize_with = "lenient_i32")]
     pub fade_in_duration: i32,
+    #[serde(deserialize_with = "lenient_i32")]
     pub fade_out_duration: i32,
     pub crossfade_next: bool,
+    #[serde(deserialize_with = "lenient_i32")]
     pub crossfade_in_duration: i32,
+    #[serde(deserialize_with = "lenient_i32")]
     pub crossfade_out_duration: i32,
     pub keep_progress: bool,
     pub keep_playback_mode: bool,
     pub show_translation: bool,
     pub lyric_blur: bool,
     pub lyric_blur_amount: f32,
+    #[serde(deserialize_with = "lenient_i32")]
     pub cloud_music_offset: i32,
+    #[serde(deserialize_with = "lenient_i32")]
     pub qq_music_offset: i32,
     pub cover_style: String,
     pub advanced_lyrics: bool,
@@ -81,9 +88,11 @@ pub struct AppSettings {
     pub dev_mode_enabled: bool,
     pub log_to_file: bool,
     pub log_level: String,
+    #[serde(deserialize_with = "lenient_i32")]
     pub max_cache_size: i32,
     pub download_name_template: String,
     pub download_dir: String,
+    #[serde(deserialize_with = "lenient_i32")]
     pub download_parallelism: i32,
     pub download_auto_fill_metadata: bool,
     pub download_embed_lyrics: bool,
@@ -100,10 +109,39 @@ pub struct AppSettings {
     pub volume: f32,
     pub audio_output_device: String,
     pub playback_speed: f32,
+    #[serde(deserialize_with = "lenient_i32")]
     pub loudness_gain_mb: i32,
     pub equalizer_enabled: bool,
     pub equalizer_preset_id: String,
+    #[serde(deserialize_with = "lenient_i32_vec")]
     pub equalizer_bands: Vec<i32>,
+}
+
+/// 前端数字输入可能带小数：整数字段四舍五入接收，单个字段不能让整份设置被拒绝
+fn lenient_i32<'de, D>(deserializer: D) -> Result<i32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    round_to_i32(f64::deserialize(deserializer)?)
+        .ok_or_else(|| serde::de::Error::custom("expected a finite number"))
+}
+
+fn lenient_i32_vec<'de, D>(deserializer: D) -> Result<Vec<i32>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Vec::<f64>::deserialize(deserializer)?
+        .into_iter()
+        .map(|value| {
+            round_to_i32(value).ok_or_else(|| serde::de::Error::custom("expected a finite number"))
+        })
+        .collect()
+}
+
+fn round_to_i32(value: f64) -> Option<i32> {
+    value
+        .is_finite()
+        .then(|| value.round().clamp(i32::MIN as f64, i32::MAX as f64) as i32)
 }
 
 impl Default for AppSettings {
@@ -139,7 +177,7 @@ impl Default for AppSettings {
             show_translation: true,
             lyric_blur: true,
             lyric_blur_amount: 1.5,
-            cloud_music_offset: 500,
+            cloud_music_offset: 1000,
             qq_music_offset: 500,
             cover_style: "card".into(),
             advanced_lyrics: true,
@@ -212,7 +250,16 @@ impl AppSettings {
         );
         self.cover_style = normalize_choice(&self.cover_style, &["disc", "card"], "card");
 
-        self.lyric_font_scale = clamp_f32(self.lyric_font_scale, 0.5, 1.5, 1.0);
+        if self.crossfade {
+            if !self.crossfade_next {
+                self.crossfade_next = true;
+                self.crossfade_in_duration = self.fade_in_duration;
+                self.crossfade_out_duration = self.fade_out_duration;
+            }
+            self.crossfade = false;
+        }
+
+        self.lyric_font_scale = clamp_f32(self.lyric_font_scale, 0.5, 1.6, 1.0);
         self.fade_in_duration = self.fade_in_duration.clamp(0, 10_000);
         self.fade_out_duration = self.fade_out_duration.clamp(0, 10_000);
         self.crossfade_in_duration = self.crossfade_in_duration.clamp(0, 10_000);
@@ -220,7 +267,7 @@ impl AppSettings {
         self.lyric_blur_amount = clamp_f32(self.lyric_blur_amount, 0.0, 8.0, 1.5);
         self.cloud_music_offset = self.cloud_music_offset.clamp(-30_000, 30_000);
         self.qq_music_offset = self.qq_music_offset.clamp(-30_000, 30_000);
-        self.cover_blur_amount = clamp_f32(self.cover_blur_amount, 0.0, 500.0, 1.5);
+        self.cover_blur_amount = clamp_f32(self.cover_blur_amount, 0.0, 8.0, 1.5);
         self.cover_blur_darken = clamp_f32(self.cover_blur_darken, 0.0, 1.0, 0.2);
         self.background_image_blur = clamp_f32(self.background_image_blur, 0.0, 100.0, 20.0);
         self.background_image_alpha = clamp_f32(self.background_image_alpha, 0.0, 1.0, 0.3);
@@ -234,12 +281,14 @@ impl AppSettings {
         self.playback_speed = clamp_f32(self.playback_speed, 0.25, 3.0, 1.0);
         self.loudness_gain_mb = self.loudness_gain_mb.clamp(0, 1_500);
 
+        if self.netease_quality.trim() == "high" {
+            self.netease_quality = "higher".into();
+        }
         self.netease_quality = normalize_choice(
             &self.netease_quality,
             &[
                 "standard",
                 "higher",
-                "high",
                 "exhigh",
                 "lossless",
                 "hires",
@@ -689,6 +738,70 @@ mod tests {
             settings.normalize();
             assert_eq!(settings.youtube_playback_source, expected, "{value}");
         }
+    }
+
+    #[test]
+    fn fractional_integer_settings_are_rounded_instead_of_rejecting_the_save() {
+        let settings: AppSettings = serde_json::from_value(serde_json::json!({
+            "fadeInDuration": 500.5,
+            "fadeOutDuration": 249.4,
+            "crossfadeInDuration": 1200.6,
+            "cloudMusicOffset": -12.5,
+            "maxCacheSize": 1049.2,
+            "loudnessGainMb": 10.7,
+            "equalizerBands": [1.4, -2.6, 0, 3.5, 4],
+            "lyricFontScale": 1.25,
+        }))
+        .expect("fractional numbers must not reject the whole settings payload");
+        assert_eq!(settings.fade_in_duration, 501);
+        assert_eq!(settings.fade_out_duration, 249);
+        assert_eq!(settings.crossfade_in_duration, 1201);
+        assert_eq!(settings.cloud_music_offset, -13);
+        assert_eq!(settings.max_cache_size, 1049);
+        assert_eq!(settings.loudness_gain_mb, 11);
+        assert_eq!(settings.equalizer_bands, vec![1, -3, 0, 4, 4]);
+        assert!(serde_json::from_value::<AppSettings>(serde_json::json!({ "fadeInDuration": "fast" })).is_err());
+    }
+
+    #[test]
+    fn legacy_crossfade_switch_merges_into_next_track_crossfade() {
+        let mut settings = AppSettings {
+            crossfade: true,
+            crossfade_next: false,
+            fade_in_duration: 800,
+            fade_out_duration: 300,
+            ..AppSettings::default()
+        };
+        settings.normalize();
+        assert!(!settings.crossfade);
+        assert!(settings.crossfade_next);
+        assert_eq!(settings.crossfade_in_duration, 800);
+        assert_eq!(settings.crossfade_out_duration, 300);
+
+        let mut explicit = AppSettings {
+            crossfade: true,
+            crossfade_next: true,
+            crossfade_in_duration: 1500,
+            ..AppSettings::default()
+        };
+        explicit.normalize();
+        assert!(!explicit.crossfade);
+        assert_eq!(explicit.crossfade_in_duration, 1500, "existing crossfade durations win");
+    }
+
+    #[test]
+    fn playback_quality_and_display_ranges_match_android() {
+        let mut settings = AppSettings {
+            netease_quality: " high ".into(),
+            lyric_font_scale: 1.6,
+            cover_blur_amount: 500.0,
+            ..AppSettings::default()
+        };
+        settings.normalize();
+        assert_eq!(settings.netease_quality, "higher");
+        assert_eq!(settings.lyric_font_scale, 1.6);
+        assert_eq!(settings.cover_blur_amount, 8.0);
+        assert_eq!(AppSettings::default().cloud_music_offset, 1000);
     }
 
     #[test]

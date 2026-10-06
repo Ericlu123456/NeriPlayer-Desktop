@@ -1194,7 +1194,7 @@ export const usePlayerStore = defineStore('player', () => {
       ? Math.max(0, Math.round(settings.crossfadeOutDuration))
       : fadeOutDurationMs
     const useOverlapCrossfade = wasPlayingBeforeSwitch && isSwitchingTrack
-      && (settings.crossfadeNext || settings.crossfade)
+      && settings.crossfadeNext
       && overlapFadeOutDurationMs > 0
       && overlapFadeInDurationMs > 0
     const useTrackSwitchFadeIn = settings.fadeIn
@@ -1809,7 +1809,7 @@ export const usePlayerStore = defineStore('player', () => {
       const settings = useSettingsStore()
       if (optimistic) {
         if (settings.fadeIn && settings.fadeInDuration > 0) {
-          await invoke('resume_with_fade', { durationMs: settings.fadeInDuration })
+          await invoke('resume_with_fade', { durationMs: Math.round(settings.fadeInDuration) })
         } else {
           await invoke('resume')
         }
@@ -1817,7 +1817,7 @@ export const usePlayerStore = defineStore('player', () => {
         lastSeekedMs = null
       } else if (settings.fadeIn && settings.fadeOutDuration > 0) {
         playbackStartupWatchdog.cancel()
-        await invoke('pause_with_fade', { durationMs: settings.fadeOutDuration })
+        await invoke('pause_with_fade', { durationMs: Math.round(settings.fadeOutDuration) })
       } else {
         playbackStartupWatchdog.cancel()
         await invoke('pause')
@@ -1880,7 +1880,7 @@ export const usePlayerStore = defineStore('player', () => {
     try {
       const settings = useSettingsStore()
       if (settings.fadeIn && settings.fadeOutDuration > 0) {
-        await invoke('pause_with_fade', { durationMs: settings.fadeOutDuration })
+        await invoke('pause_with_fade', { durationMs: Math.round(settings.fadeOutDuration) })
       } else {
         await invoke('pause')
       }
@@ -1927,7 +1927,7 @@ export const usePlayerStore = defineStore('player', () => {
     try {
       const settings = useSettingsStore()
       if (settings.fadeIn && settings.fadeInDuration > 0) {
-        await invoke('resume_with_fade', { durationMs: settings.fadeInDuration })
+        await invoke('resume_with_fade', { durationMs: Math.round(settings.fadeInDuration) })
       } else {
         await invoke('resume')
       }

@@ -36,6 +36,7 @@ new Function('require', 'exports', compiled)(name => {
   if (name === 'pinia') return pinia
   if (name === 'vue') return vue
   if (name === '@tauri-apps/api/core') return bridge
+  if (name === '@/utils/logger') return { createLogger: () => ({ info() {}, warn() {}, error() {}, debug() {} }) }
   throw new Error(`Unexpected settings dependency: ${name}`)
 }, exports)
 

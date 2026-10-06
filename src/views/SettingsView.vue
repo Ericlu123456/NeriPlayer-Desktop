@@ -9,6 +9,12 @@ import { open as dialogOpen } from '@tauri-apps/plugin-dialog'
 import { invoke } from '@tauri-apps/api/core'
 import { writeText } from '@tauri-apps/plugin-clipboard-manager'
 import {
+  COVER_BLUR_PX_PER_UNIT,
+  LYRIC_DEFAULT_OFFSET_RANGE_MS,
+  LYRIC_FONT_SCALE_MAX,
+  LYRIC_FONT_SCALE_MIN,
+  LYRIC_FONT_SCALE_STEP,
+  MAX_COVER_BLUR_AMOUNT,
   MAX_MEDIA_CACHE_SIZE_MB,
   MIN_MEDIA_CACHE_SIZE_MB,
   MAX_DOWNLOAD_PARALLELISM,
@@ -52,7 +58,7 @@ const {
   darkMode, themeColor: selectedColor, coverStyle,
   defaultScreen, showCoverBadge, showNowPlayingTitle, showToolbarDock,
   showQualitySwitch, lyricFontScale,
-  crossfade, normalizeVolume, audioOutputDevice,
+  normalizeVolume, audioOutputDevice,
   fadeIn, fadeInDuration, fadeOutDuration,
   crossfadeNext, crossfadeInDuration, crossfadeOutDuration,
   keepProgress, keepPlaybackMode,
@@ -295,7 +301,7 @@ const defaultScreenOptions = computed(() => [
 
 const neteaseQualityOptions = computed(() => [
   { value: 'standard', label: t('settings.q_standard') },
-  { value: 'high', label: t('settings.q_high') },
+  { value: 'higher', label: t('settings.q_high') },
   { value: 'exhigh', label: t('settings.q_exhigh') },
   { value: 'lossless', label: t('settings.q_lossless') },
   { value: 'hires', label: t('settings.q_hires') },
@@ -304,13 +310,12 @@ const neteaseQualityOptions = computed(() => [
   { value: 'jymaster', label: t('settings.q_master') },
 ])
 
-const downloadNeteaseQualityOptions = computed(() => neteaseQualityOptions.value.map(option => (
-  option.value === 'high' ? { ...option, value: 'higher' } : option
-)))
+const downloadNeteaseQualityOptions = neteaseQualityOptions
 
+// 与播放页音质列表同一套文案：QQ 的 high 档是「高」而不是网易云的「较高」
 const qqQualityOptions = computed(() => [
   { value: 'standard', label: t('settings.q_standard') },
-  { value: 'high', label: t('settings.q_high') },
+  { value: 'high', label: t('settings.q_high_yt') },
   { value: 'lossless', label: t('settings.q_lossless') },
 ])
 
@@ -1349,15 +1354,16 @@ useEscapeClose(
           <EditableRangeValue
             v-model="lyricFontScale"
             class="setting-desc"
-            :min="0.5"
-            :max="1.5"
-            :step="0.1"
-            :display-value="`${lyricFontScale.toFixed(1)}x`"
-            input-suffix="x"
+            :min="LYRIC_FONT_SCALE_MIN"
+            :max="LYRIC_FONT_SCALE_MAX"
+            :step="LYRIC_FONT_SCALE_STEP"
+            :display-value="`${Math.round(lyricFontScale * 100)}%`"
+            :input-scale="100"
+            input-suffix="%"
             :aria-label="t('settings.lyric_font_size')"
           />
         </div>
-        <input type="range" class="m3-slider" v-model.number="lyricFontScale" min="0.5" max="1.5" step="0.1" />
+        <input type="range" class="m3-slider" v-model.number="lyricFontScale" :min="LYRIC_FONT_SCALE_MIN" :max="LYRIC_FONT_SCALE_MAX" :step="LYRIC_FONT_SCALE_STEP" />
       </div>
 
       <!-- 封面样式 -->
@@ -1441,15 +1447,6 @@ useEscapeClose(
     </div>
 
     <div class="setting-card">
-      <div class="setting-icon-wrap"><span class="material-symbols-rounded">swap_horiz</span></div>
-      <div class="setting-info">
-        <div class="setting-title">{{ t('settings.crossfade') }}</div>
-        <div class="setting-desc">{{ t('settings.crossfade_desc') }}</div>
-      </div>
-      <label class="m3-switch"><input type="checkbox" v-model="crossfade" /><span class="track"><span class="thumb"><span v-if="crossfade" class="material-symbols-rounded" style="font-size: 14px">check</span></span></span></label>
-    </div>
-
-    <div class="setting-card">
       <div class="setting-icon-wrap"><span class="material-symbols-rounded">graphic_eq</span></div>
       <div class="setting-info">
         <div class="setting-title">{{ t('settings.normalize') }}</div>
@@ -1468,9 +1465,7 @@ useEscapeClose(
         <label class="m3-switch"><input type="checkbox" v-model="fadeIn" /><span class="track"><span class="thumb"><span v-if="fadeIn" class="material-symbols-rounded" style="font-size: 14px">check</span></span></span></label>
       </div>
 
-      <!-- crossfade（无缝切换）在 crossfadeNext 关闭时复用淡入/淡出时长做 overlap，
-           因此 crossfade 开启时也须展示这两个滑杆，否则时长被隐藏且固定为默认（ST-08） -->
-      <template v-if="fadeIn || crossfade">
+      <template v-if="fadeIn">
         <div class="setting-card sub-card">
         <div class="setting-info">
           <div class="setting-title">{{ t('settings.fade_in_duration') }}</div>
@@ -1798,15 +1793,15 @@ useEscapeClose(
           <EditableRangeValue
             v-model="cloudMusicOffset"
             class="setting-desc"
-            :min="-2000"
-            :max="2000"
+            :min="-LYRIC_DEFAULT_OFFSET_RANGE_MS"
+            :max="LYRIC_DEFAULT_OFFSET_RANGE_MS"
             :step="50"
             :display-value="`${cloudMusicOffset >= 0 ? '+' : ''}${cloudMusicOffset}ms`"
             input-suffix="ms"
             :aria-label="t('settings.netease_offset')"
           />
         </div>
-        <input type="range" class="m3-slider" v-model.number="cloudMusicOffset" min="-2000" max="2000" step="50" />
+        <input type="range" class="m3-slider" v-model.number="cloudMusicOffset" :min="-LYRIC_DEFAULT_OFFSET_RANGE_MS" :max="LYRIC_DEFAULT_OFFSET_RANGE_MS" step="50" />
       </div>
 
       <div class="setting-card">
@@ -1816,15 +1811,15 @@ useEscapeClose(
           <EditableRangeValue
             v-model="qqMusicOffset"
             class="setting-desc"
-            :min="-2000"
-            :max="2000"
+            :min="-LYRIC_DEFAULT_OFFSET_RANGE_MS"
+            :max="LYRIC_DEFAULT_OFFSET_RANGE_MS"
             :step="50"
             :display-value="`${qqMusicOffset >= 0 ? '+' : ''}${qqMusicOffset}ms`"
             input-suffix="ms"
             :aria-label="t('settings.qq_offset')"
           />
         </div>
-        <input type="range" class="m3-slider" v-model.number="qqMusicOffset" min="-2000" max="2000" step="50" />
+        <input type="range" class="m3-slider" v-model.number="qqMusicOffset" :min="-LYRIC_DEFAULT_OFFSET_RANGE_MS" :max="LYRIC_DEFAULT_OFFSET_RANGE_MS" step="50" />
       </div>
     </div></Transition>
         </div>
@@ -1882,13 +1877,15 @@ useEscapeClose(
               v-model="coverBlurAmount"
               class="setting-desc"
               :min="0"
-              :max="500"
-              :step="10"
-              :display-value="coverBlurAmount.toFixed(1)"
+              :max="MAX_COVER_BLUR_AMOUNT"
+              :step="0.1"
+              :display-value="`${Math.round(coverBlurAmount * COVER_BLUR_PX_PER_UNIT)} px`"
+              :input-scale="COVER_BLUR_PX_PER_UNIT"
+              input-suffix="px"
               :aria-label="t('settings.blur_amount')"
             />
           </div>
-          <input type="range" class="m3-slider" v-model.number="coverBlurAmount" min="0" max="500" step="10" />
+          <input type="range" class="m3-slider" v-model.number="coverBlurAmount" min="0" :max="MAX_COVER_BLUR_AMOUNT" step="0.1" />
         </div>
         <div class="setting-card sub-card">
           <div class="setting-info">

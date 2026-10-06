@@ -2,7 +2,13 @@
 import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
 import { usePlayerStore, displayAlbum, type AudioInfo, type LyricLine, type TrackInfo } from '@/stores/player'
 import { useLikedSongsStore } from '@/stores/likedSongs'
-import { useSettingsStore } from '@/stores/settings'
+import {
+  COVER_BLUR_PX_PER_UNIT,
+  LYRIC_FONT_SCALE_MAX,
+  LYRIC_FONT_SCALE_MIN,
+  LYRIC_FONT_SCALE_STEP,
+  useSettingsStore,
+} from '@/stores/settings'
 import { useToastStore } from '@/stores/toast'
 import { useDownloadStore } from '@/stores/download'
 import { useI18n } from 'vue-i18n'
@@ -2017,7 +2023,7 @@ const sliderActiveColor = computed(() => {
     <CoverBlurBackground
       v-if="player.hasPlaybackSession && settings.coverBlurBg"
       :cover-url="coverUrl"
-      :blur-amount="settings.coverBlurAmount * 30"
+      :blur-amount="settings.coverBlurAmount * COVER_BLUR_PX_PER_UNIT"
       :darken-alpha="Math.min(Math.max(settings.coverBlurDarken, 0), 0.8)"
     />
     <HyperBackground
@@ -2676,7 +2682,7 @@ const sliderActiveColor = computed(() => {
             </div>
             <div class="np-more-item">
               <div class="np-more-row">
-                <input type="range" min="0.6" max="1.6" step="0.05"
+                <input type="range" :min="LYRIC_FONT_SCALE_MIN" :max="LYRIC_FONT_SCALE_MAX" :step="LYRIC_FONT_SCALE_STEP"
                   :value="settings.lyricFontScale"
                   class="np-more-slider"
                   @input="settings.lyricFontScale = parseFloat(($event.target as HTMLInputElement).value)"
@@ -2684,9 +2690,9 @@ const sliderActiveColor = computed(() => {
                 <EditableRangeValue
                   v-model="settings.lyricFontScale"
                   class="np-offset-value"
-                  :min="0.6"
-                  :max="1.6"
-                  :step="0.05"
+                  :min="LYRIC_FONT_SCALE_MIN"
+                  :max="LYRIC_FONT_SCALE_MAX"
+                  :step="LYRIC_FONT_SCALE_STEP"
                   :input-scale="100"
                   :display-value="`${Math.round(settings.lyricFontScale * 100)}%`"
                   input-suffix="%"

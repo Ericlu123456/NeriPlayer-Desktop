@@ -43,6 +43,7 @@
     "test:local-playlists": "node scripts/test-local-playlists.mjs",
     "test:search-store": "node scripts/test-search-store.mjs",
     "test:escape-close": "node scripts/test-escape-close.mjs",
+    "test:settings-integrity": "node scripts/test-settings-integrity.mjs",
     "test:local-artists": "node scripts/test-local-artists.mjs",
     "test:local-scan-preview": "node scripts/test-local-scan-preview.mjs",
     "test:local-scan-store": "node scripts/test-local-scan-store.mjs",
