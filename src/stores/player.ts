@@ -19,6 +19,7 @@ import {
   normalizeBitrateKbps,
   playbackCacheReadCandidates,
   playbackCacheWriteOptions,
+  selectPlaybackCandidate,
   playbackPrefetchCacheId,
   playbackUrlResolver,
   resolvePlaybackResult,
@@ -29,7 +30,7 @@ import {
   type PlaybackResolution,
   type ResolvedPlaybackSource,
 } from '@/modules/playback/playbackSource'
-import { PlaybackPrefetchManager } from '@/modules/playback/playbackPrefetch'
+import { playbackPrefetchManager } from '@/modules/playback/playbackPrefetch'
 import {
   PlaybackStartupWatchdog,
   resolvePlaybackFailureAdvanceAction,
@@ -299,7 +300,6 @@ let lastTrackEndedId: string | null = null
 let lastTrackEndedTime = 0
 
 // 播放抽象层：解析缓存、预热仲裁、启动看门狗
-const playbackPrefetchManager = new PlaybackPrefetchManager()
 const playbackStartupWatchdog = new PlaybackStartupWatchdog()
 let startupRecoveryAttempts = 0
 const MAX_STARTUP_RECOVERY_ATTEMPTS = 2
@@ -625,6 +625,9 @@ export const usePlayerStore = defineStore('player', () => {
       qqMusicQuality: settings.qqMusicQuality,
       biliQuality: settings.biliQuality,
       youtubeQuality: settings.youtubeQuality,
+      youtubePlaybackSource: settings.youtubePlaybackSource,
+      neteaseAutoSourceSwitch: settings.neteaseAutoSourceSwitch,
+      neteaseLocalSourceFallback: settings.neteaseLocalSourceFallback,
     }
   }
 
@@ -684,6 +687,7 @@ export const usePlayerStore = defineStore('player', () => {
       tracks,
       playbackSourceSettings(),
       playbackUrlResolver,
+      playbackRequestToken,
     )
   }
 
@@ -695,6 +699,7 @@ export const usePlayerStore = defineStore('player', () => {
       [...candidates],
       playbackSourceSettings(),
       playbackUrlResolver,
+      playbackRequestToken,
     )
   }
 
@@ -702,10 +707,12 @@ export const usePlayerStore = defineStore('player', () => {
     track: TrackInfo,
     forceRefresh = false,
     qualityOverride?: string,
+    avoidDirect = false,
   ): Promise<PlaybackResolution> {
     return resolvePlaybackResult(track, playbackSourceSettings(), {
       forceRefresh,
       qualityOverride,
+      avoidDirect,
       requestGeneration: playbackRequestToken,
     })
   }
@@ -1068,6 +1075,7 @@ export const usePlayerStore = defineStore('player', () => {
     currentStreamUrl.value = !forceResolve && isDirectStreamUrl(track.audioUrl)
       ? track.audioUrl.trim()
       : null
+    currentResolvedStreamUrls = currentStreamUrl.value ? [currentStreamUrl.value] : []
     const wasPlayingBeforeSwitch = isPlaying.value
     const hadPlaybackSessionBeforeRequest = hasPlaybackSession.value
     const isSwitchingTrack = !!previousTrack && previousTrack.id !== track.id
@@ -1350,6 +1358,7 @@ export const usePlayerStore = defineStore('player', () => {
               const candidateStarted = performance.now()
               try {
                 const cacheWrite = playbackCacheWriteOptions(resolved, candidateIndex)
+                const selected = selectPlaybackCandidate(resolved, candidateIndex)
                   const startPlan = currentLoadStartPlan()
                   tracePlaybackUi(
                     'backend_stream_start',
@@ -1357,9 +1366,17 @@ export const usePlayerStore = defineStore('player', () => {
                     `candidate=${candidateIndex}, startMs=${startPlan.positionMs}, crossfade=${startPlan.useCrossfade}, elapsedMs=${Math.round(performance.now() - requestStarted)}`,
                     token,
                   )
-                  const duration = await playRemoteUrl(
+                  const duration = selected.source === 'local' ? await playDownloadedFile(
+                    candidateUrl,
+                    selected.durationMs || track.durationMs,
+                    startPlan.useCrossfade,
+                    transitionFadeOutMs,
+                    transitionFadeInMs,
+                    token,
+                    startPlan.positionMs,
+                  ) : await playRemoteUrl(
                   candidateUrl,
-                  track.durationMs,
+                  selected.durationMs || track.durationMs,
                   startPlan.useCrossfade,
                   transitionFadeOutMs,
                   transitionFadeInMs,
@@ -1367,8 +1384,14 @@ export const usePlayerStore = defineStore('player', () => {
                   startPlan.positionMs,
                   cacheWrite.cacheKey,
                   cacheWrite.expectedContentLength,
+                  cacheWrite.expectedContentMd5,
+                  selected.streamType,
                   )
-                  if (token === playbackRequestToken) currentStreamUrl.value = candidateUrl
+                  if (token === playbackRequestToken) {
+                    currentStreamUrl.value = resolved.source === 'local' ? null : candidateUrl
+                    currentResolvedStreamUrls = resolved.source === 'local' ? [] : candidates.slice(candidateIndex)
+                    result = selectPlaybackCandidate(resolved, candidateIndex)
+                  }
                   markLoadStartApplied(startPlan)
                   tracePlaybackUi(
                     'backend_stream_ready',
@@ -1403,7 +1426,16 @@ export const usePlayerStore = defineStore('player', () => {
             )
             if (refreshed.type !== 'success') throw firstError
             result = refreshed
-            dur = await playResolvedSource(result)
+            try {
+              dur = await playResolvedSource(result)
+            } catch (refreshError) {
+              if (token !== playbackRequestToken) return
+              if (getPlaybackSourceKind(track) !== 'youtube' || result.streamType === 'hls') throw refreshError
+              const hls = await resolvePlaybackUrl(track, true, undefined, true)
+              if (hls.type !== 'success') throw refreshError
+              result = hls
+              dur = await playResolvedSource(result)
+            }
           }
           if (token !== playbackRequestToken) return
           {
@@ -1595,9 +1627,11 @@ export const usePlayerStore = defineStore('player', () => {
       if (shouldRestorePreviousPlaybackState) {
         try {
           const state = await invoke<{ is_playing?: boolean }>('get_player_state')
+          if (token !== playbackRequestToken) return
           isPlaying.value = !!state?.is_playing
           _interpIsPlaying = isPlaying.value
         } catch {
+          if (token !== playbackRequestToken) return
           isPlaying.value = true
           _interpIsPlaying = true
         }
@@ -2122,6 +2156,7 @@ export const usePlayerStore = defineStore('player', () => {
   // 播放速度
   const playbackSpeed = ref(settings.playbackSpeed)
   const currentStreamUrl = ref<string | null>(null)
+  let currentResolvedStreamUrls: string[] = []
   let listenTogetherSyncRateMultiplier: number | null = null
 
   function effectivePlaybackSpeed(): number {
@@ -2149,6 +2184,11 @@ export const usePlayerStore = defineStore('player', () => {
   function getCurrentStreamUrl(trackId?: string): string | null {
     if (!currentTrack.value || (trackId && currentTrack.value.id !== trackId)) return null
     return currentStreamUrl.value
+  }
+
+  function getCurrentStreamUrls(trackId?: string): string[] {
+    if (!currentTrack.value || (trackId && currentTrack.value.id !== trackId)) return []
+    return [...currentResolvedStreamUrls]
   }
 
   async function setSpeed(spd: number) {
@@ -2250,6 +2290,8 @@ export const usePlayerStore = defineStore('player', () => {
 
     await Promise.allSettled([
       invoke('set_volume', { level: volume.value }),
+      invoke('set_audio_output_device', { name: settings.audioOutputDevice || null })
+        .catch(() => invoke('set_audio_output_device', { name: null })),
       invoke('set_speed', { speed: effectivePlaybackSpeed() }),
       invoke('set_loudness_gain', { gainMb: loudnessGainMb.value }),
       invoke('set_normalize_volume', { enabled: settings.normalizeVolume }),
@@ -2454,7 +2496,7 @@ export const usePlayerStore = defineStore('player', () => {
     play, togglePlayPause, pause, resume, seekTo, next, previous,
     flushPlayerState,
     toggleRepeatMode, toggleShuffle, cyclePlayMode, applyListenTogetherPlaybackMode,
-    playMode, setVolume, setSpeed, setListenTogetherSyncPlaybackRate, getCurrentStreamUrl,
+    playMode, setVolume, setSpeed, setListenTogetherSyncPlaybackRate, getCurrentStreamUrl, getCurrentStreamUrls,
     setLoudnessGain, setEqualizer, setEqualizerPreset, resetAudioEffects,
     applyPersistedSettings,
     startSleepTimer, startSleepTimerEndOfTrack, startSleepTimerEndOfQueue, cancelSleepTimer,
@@ -2501,6 +2543,8 @@ async function playRemoteUrl(
   startPositionMs = 0,
   cacheKey?: string,
   expectedContentLength?: number,
+  expectedContentMd5?: string,
+  streamType: 'direct' | 'hls' = 'direct',
 ): Promise<number> {
   const safeStartMs = Math.max(0, Math.round(startPositionMs))
   const cacheLimitBytes = playbackCacheLimitBytes()
@@ -2514,6 +2558,8 @@ async function playRemoteUrl(
         cacheKey,
         cacheLimitBytes,
         expectedContentLength,
+        expectedContentMd5,
+        streamType,
         requestGeneration,
       })
     } catch (streamError) {
@@ -2530,6 +2576,8 @@ async function playRemoteUrl(
         cacheKey,
         cacheLimitBytes,
         expectedContentLength,
+        expectedContentMd5,
+        streamType,
         requestGeneration,
       })
     }
@@ -2543,6 +2591,8 @@ async function playRemoteUrl(
       cacheKey,
       cacheLimitBytes,
       expectedContentLength,
+      expectedContentMd5,
+      streamType,
       requestGeneration,
     })
   } catch (streamError) {
@@ -2558,6 +2608,8 @@ async function playRemoteUrl(
       cacheKey,
       cacheLimitBytes,
       expectedContentLength,
+      expectedContentMd5,
+      streamType,
       requestGeneration,
     })
   }

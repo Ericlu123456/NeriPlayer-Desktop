@@ -37,6 +37,8 @@
     同步与隐私。
 - `CONTRIBUTING.md` / `CONTRIBUTING_EN.md`
   - 面向开发者，说明真实模块边界、扩展路径、测试和提交要求。
+- `scripts/test-sync-android-interop.ps1`
+  - 使用只读 Android 源码和已有 Gradle 缓存验证桌面归档的 Kotlin 反向解码。
 - `CODE_OF_CONDUCT.md`
   - 社区行为准则。
 - `CLAUDE.md` / `AGENTS.md`
@@ -198,8 +200,9 @@ cargo clippy         # lint（交付要求零警告）
 - `sync/`
   - `models.rs`（同步载荷）、`proto_models.rs`（ProtoBuf 模型，
     字段号对齐 Android）、`merge.rs`（三路合并）、`serializer.rs`
-    （JSON / 省流格式）、`github_api.rs`、`webdav_api.rs`、
-    `manager.rs`。
+    （旧 JSON / GZIP）、`archive/`（V4 清单与分块编码）、
+    `cloud.rs`（归档发布）、`github_api.rs`、`webdav_archive.rs`、
+    `webdav_gc.rs` 与 `manager.rs`。
 - `listen_together/`
   - `protocol.rs`（事件与模型）、`session.rs`、`ws_client.rs`。
 - `library/`（本地扫描、歌单存储）、`lyrics/`（多源歌词管理与解析）、
@@ -238,6 +241,8 @@ cargo clippy         # lint（交付要求零警告）
 - **播放代际与 seek 采纳**：
   播放请求与 seek 结果都带 generation，改动播放链路时
   不能让旧请求的结果覆盖新请求。
+  YouTube 等待令牌的任务必须随旧解析取消；首选客户端应进入解析和预取缓存键。
+  网易云兜底保留队列身份，但缓存、格式和时长按实际候选记录，下载禁止使用兜底。
 - **签名/加密逻辑精确匹配**：
   WEAPI / EAPI / linuxapi、WBI、SAPISIDHASH 是平台请求的
   脆弱点，修改平台请求时必须与现有 scheme 完全一致。
@@ -254,6 +259,8 @@ cargo clippy         # lint（交付要求零警告）
 - **本地数据原子写**：
   所有 JSON 落盘走 `fsutil.rs` 的原子写入，
   不要直接 `fs::write` 覆盖用户数据。
+  收藏歌手的修改通过 `manager::update_favorite_playlists` 串行读改写，
+  保留删除记录并推进同步 epoch，远端关注拉取不可覆盖拉取期间的取消关注。
 - **UI 状态变化必须有过渡**：
   本项目的硬性体验要求——任何可见状态切换（页面、面板、封面、
   主题色）都要有过渡动画，不能闪变；
@@ -314,6 +321,13 @@ cargo clippy         # lint（交付要求零警告）
    修改删除/恢复语义时，必须用「两端交替同步」场景自测：
    桌面写 → Android 读 → Android 写 → 桌面读。
 3. 凭据统一走 `security.rs`，不要放回明文配置。
+4. V4 迁移授权必须绑定后端、目标、凭据指纹和当前远端内容。GitHub 使用分支 HEAD
+   条件更新；WebDAV V4 清单使用强 ETag 或经过验证的有限排他集合租约，旧单文件
+   升级必须取得有限集合租约。不要用重定向、
+   无条件覆盖或本地对象缓存替代远端完整性校验。
+5. 执行 `pnpm test:sync-protocol-upgrade` 与 Rust `sync` 模块测试；
+   Android JVM 反向解码运行 `./scripts/test-sync-android-interop.ps1 -AndroidRoot <Android仓库> -ExportFixtures`。
+   此检查不代替整仓 Gradle、provider 或设备互通验收。
 
 #### 6. 修改一起听
 
@@ -323,6 +337,15 @@ cargo clippy         # lint（交付要求零警告）
    事件语义）以 Worker 实现为准，不要只改 UI 校验。
 3. 相关测试：`pnpm test:listen-together-mapper` 与
    `node scripts/test-listen-together-protocol.mjs`。
+4. 当前对照 Android `3e1abcb7` 及其 Worker `31d55c60`：
+   schemaVersion >= 2 使用带 `baseRoomVersion` 的队列操作，重复曲目以
+   `stableKey` + `occurrence` 定位；旧服务端回退完整队列。
+   `streamUrls` 按平台白名单过滤，并保留 `streamUrl` 供旧客户端读取。
+5. 播放同步策略在 `playbackSync.ts`，队列操作在 `queue.ts`。
+   修改后执行 `pnpm test:listen-together-queue`、
+   `pnpm test:listen-together-sync`、`pnpm test:listen-together-store`，
+   Rust 侧执行 `cargo test --manifest-path src-tauri/Cargo.toml --locked --lib listen_together`。
+   本地测试不代替 Android 与桌面端实际同房的联调。
 
 ---
 

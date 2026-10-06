@@ -11,6 +11,7 @@ import { writeText } from '@tauri-apps/plugin-clipboard-manager'
 import {
   MAX_MEDIA_CACHE_SIZE_MB,
   MIN_MEDIA_CACHE_SIZE_MB,
+  YOUTUBE_PLAYBACK_SOURCES,
   useSettingsStore,
 } from '@/stores/settings'
 import { useAuthStore } from '@/stores/auth'
@@ -22,6 +23,7 @@ import BilibiliCoverImage from '@/components/BilibiliCoverImage.vue'
 import { DEFAULT_DOWNLOAD_NAME_TEMPLATE } from '@/stores/settings'
 import StorageManagementDialog from '@/components/StorageManagementDialog.vue'
 import EditableRangeValue from '@/components/ui/EditableRangeValue.vue'
+import CustomSelect from '@/components/ui/CustomSelect.vue'
 import {
   clearBrowserCache,
   mergeBrowserCacheUsage,
@@ -47,7 +49,7 @@ const {
   darkMode, themeColor: selectedColor, coverStyle,
   defaultScreen, showCoverBadge, showNowPlayingTitle, showToolbarDock,
   showQualitySwitch, showAudioCodec, showAudioSpec, lyricFontScale,
-  crossfade, normalizeVolume,
+  crossfade, normalizeVolume, audioOutputDevice,
   fadeIn, fadeInDuration, fadeOutDuration,
   crossfadeNext, crossfadeInDuration, crossfadeOutDuration,
   keepProgress, keepPlaybackMode,
@@ -56,6 +58,7 @@ const {
   advancedLyrics, dynamicBackground, dynamicColor, audioReactive,
   coverBlurBg, coverBlurAmount, coverBlurDarken,
   neteaseQuality, qqMusicQuality, youtubeQuality, biliQuality,
+  youtubePlaybackSource, neteaseAutoSourceSwitch, neteaseLocalSourceFallback,
   bypassProxy, internationalizationEnabled,
   backgroundImageUri, backgroundImageBlur, backgroundImageAlpha,
   devModeEnabled, logToFile, logLevel,
@@ -79,6 +82,53 @@ const logLevelOptions = computed<Array<{ value: string; label: string }>>(() => 
   { value: 'debug', label: t('settings.log_level_debug') },
   { value: 'trace', label: t('settings.log_level_trace') },
 ])
+
+const youtubePlaybackSourceOptions = computed(() => YOUTUBE_PLAYBACK_SOURCES.map(value => ({
+  value,
+  label: t(`settings.youtube_source_${value}`),
+})))
+const youtubePlaybackSourceDescription = computed(() => t(`settings.youtube_source_${youtubePlaybackSource.value}_desc`))
+
+function changeYouTubePlaybackSource(value: string) {
+  const source = YOUTUBE_PLAYBACK_SOURCES.find(source => source === value)
+  if (source) youtubePlaybackSource.value = source
+}
+
+const audioOutputDevices = ref<Array<{ name: string; isDefault: boolean }>>([])
+const audioOutputSwitching = ref(false)
+const audioOutputOptions = computed(() => {
+  const devices = audioOutputDevices.value.map(device => ({
+    value: device.name,
+    label: device.name,
+  }))
+  if (audioOutputDevice.value && !devices.some(device => device.value === audioOutputDevice.value)) {
+    devices.unshift({ value: audioOutputDevice.value, label: t('settings.audio_output_unavailable', { name: audioOutputDevice.value }) })
+  }
+  return [{ value: '', label: t('settings.audio_output_default') }, ...devices]
+})
+
+async function loadAudioOutputDevices() {
+  try {
+    audioOutputDevices.value = await invoke('list_audio_output_devices')
+  } catch (error) {
+    log.warn('failed to list audio output devices:', error)
+  }
+}
+
+async function changeAudioOutputDevice(selected: string) {
+  if (audioOutputSwitching.value || selected === audioOutputDevice.value) return
+  audioOutputSwitching.value = true
+  try {
+    await invoke('set_audio_output_device', { name: selected || null })
+    audioOutputDevice.value = selected
+  } catch (error) {
+    log.warn('failed to switch audio output:', error)
+    toast.error(t('settings.audio_output_failed'))
+  } finally {
+    audioOutputSwitching.value = false
+    void loadAudioOutputDevices()
+  }
+}
 
 async function openLogDir() {
   try {
@@ -304,6 +354,7 @@ type SettingsSectionId =
   | 'accounts'
   | 'personalization'
   | 'playback'
+  | 'playback_sources'
   | 'quality'
   | 'motion'
   | 'lyrics'
@@ -316,7 +367,7 @@ type SettingsSectionId =
 
 const SETTINGS_UI_STATE_KEY = 'neri:settings-ui-state'
 const SETTINGS_SECTION_IDS: SettingsSectionId[] = [
-  'accounts', 'playback', 'quality', 'storage', 'personalization', 'motion', 'lyrics', 'network',
+  'accounts', 'playback', 'playback_sources', 'quality', 'storage', 'personalization', 'motion', 'lyrics', 'network',
   'backup', 'listen_together', 'language', 'about',
 ]
 
@@ -415,6 +466,12 @@ const settingsNavGroups = computed(() => [
         icon: 'high_quality',
       },
       {
+        id: 'playback_sources' as SettingsSectionId,
+        label: t('settings.playback_sources'),
+        description: t('settings.playback_sources_desc'),
+        icon: 'alt_route',
+      },
+      {
         id: 'storage' as SettingsSectionId,
         label: t('settings.storage'),
         description: t('settings.nav_storage_desc'),
@@ -493,6 +550,7 @@ function selectSettingsSection(id: SettingsSectionId) {
       accounts: [],
       personalization: ['personal'],
       playback: ['playback'],
+      playback_sources: [],
       quality: ['quality'],
       motion: ['effects'],
       lyrics: ['lyrics'],
@@ -520,6 +578,7 @@ onMounted(() => {
   loadBuildInfo()
   // 加载默认下载目录
   loadDefaultDownloadDir()
+  void loadAudioOutputDevices()
   void restoreSettingsScrollPosition(activeSettingsSection.value)
 })
 
@@ -973,28 +1032,8 @@ async function confirmClearGitHub() {
   await syncStore.disconnectGitHub()
 }
 
-// 切换省流模式前确认，避免用户误解已有云端文件格式
-const showDataSaverConfirm = ref(false)
-const pendingDataSaverValue = ref<boolean | null>(null)
-
-function requestDataSaverChange(event: Event) {
-  const target = event.target as HTMLInputElement | null
-  if (!target || target.checked === syncStore.github.dataSaver) return
-  pendingDataSaverValue.value = target.checked
-  showDataSaverConfirm.value = true
-}
-
-function cancelDataSaverChange() {
-  pendingDataSaverValue.value = null
-  showDataSaverConfirm.value = false
-}
-
-function confirmDataSaverChange() {
-  if (pendingDataSaverValue.value !== null) {
-    syncStore.github.dataSaver = pendingDataSaverValue.value
-  }
-  cancelDataSaverChange()
-}
+const hideProtocolUpgrade = ref(false)
+watch(() => syncStore.pendingProtocolUpgrade, () => { hideProtocolUpgrade.value = false })
 </script>
 
 <template>
@@ -1353,6 +1392,16 @@ function confirmDataSaverChange() {
 
     <!-- 播放 -->
         <div v-show="activeSettingsSection === 'playback'" class="settings-section-panel">
+    <div class="setting-card setting-card--select">
+      <div class="setting-icon-wrap"><span class="material-symbols-rounded">speaker</span></div>
+      <div class="setting-info">
+        <label class="setting-title" for="audio-output-device">{{ t('settings.audio_output') }}</label>
+        <div class="setting-desc">{{ t('settings.audio_output_desc') }}</div>
+      </div>
+      <CustomSelect id="audio-output-device" class="settings-select settings-select--device"
+        :model-value="audioOutputDevice" :options="audioOutputOptions" :label="t('settings.audio_output')"
+        :disabled="audioOutputSwitching" @open="loadAudioOutputDevices" @update:model-value="changeAudioOutputDevice" />
+    </div>
     <div class="section-label clickable" @click="toggleSection('playback')">
       <span class="material-symbols-rounded" style="font-size: 18px">play_circle</span>
       <span>{{ t('settings.playback') }}</span>
@@ -1830,6 +1879,49 @@ function confirmDataSaverChange() {
     </div></Transition>
         </div>
 
+    <!-- 播放源 -->
+        <div v-show="activeSettingsSection === 'playback_sources'" class="settings-section-panel">
+    <div class="section-label">
+      <span class="material-symbols-rounded" style="font-size: 18px">alt_route</span>
+      <span>{{ t('settings.playback_sources') }}</span>
+    </div>
+
+    <div class="setting-card setting-card--select">
+      <div class="setting-icon-wrap"><span class="material-symbols-rounded">smart_display</span></div>
+      <div class="setting-info">
+        <div class="setting-title">{{ t('settings.youtube_playback_source') }}</div>
+        <div class="setting-desc">{{ t('settings.youtube_playback_source_desc') }}</div>
+        <div class="setting-desc">{{ youtubePlaybackSourceDescription }}</div>
+      </div>
+      <CustomSelect class="settings-select" :model-value="youtubePlaybackSource" :options="youtubePlaybackSourceOptions"
+        :label="t('settings.youtube_playback_source')" @update:model-value="changeYouTubePlaybackSource" />
+    </div>
+
+    <div class="setting-card">
+      <div class="setting-icon-wrap"><span class="material-symbols-rounded">library_music</span></div>
+      <div class="setting-info">
+        <div class="setting-title">{{ t('settings.netease_local_source_fallback') }}</div>
+        <div class="setting-desc">{{ t('settings.netease_local_source_fallback_desc') }}</div>
+      </div>
+      <label class="m3-switch">
+        <input type="checkbox" v-model="neteaseLocalSourceFallback" :aria-label="t('settings.netease_local_source_fallback')" />
+        <span class="track"><span class="thumb"><span v-if="neteaseLocalSourceFallback" class="material-symbols-rounded" style="font-size: 14px">check</span></span></span>
+      </label>
+    </div>
+
+    <div class="setting-card">
+      <div class="setting-icon-wrap"><span class="material-symbols-rounded">sync_alt</span></div>
+      <div class="setting-info">
+        <div class="setting-title">{{ t('settings.netease_auto_source_switch') }}</div>
+        <div class="setting-desc">{{ t('settings.netease_auto_source_switch_desc') }}</div>
+      </div>
+      <label class="m3-switch">
+        <input type="checkbox" v-model="neteaseAutoSourceSwitch" :aria-label="t('settings.netease_auto_source_switch')" />
+        <span class="track"><span class="thumb"><span v-if="neteaseAutoSourceSwitch" class="material-symbols-rounded" style="font-size: 14px">check</span></span></span>
+      </label>
+    </div>
+        </div>
+
     <!-- 音质 -->
         <div v-show="activeSettingsSection === 'quality'" class="settings-section-panel">
     <div class="section-label clickable" @click="toggleSection('quality')">
@@ -2055,16 +2147,6 @@ function confirmDataSaverChange() {
           </div>
           <span v-if="syncStore.isSyncing" class="material-symbols-rounded spinning" style="font-size: 20px">progress_activity</span>
           <span v-else class="sync-action-label">{{ t('settings.sync_action') }}</span>
-        </div>
-
-        <!-- 数据节省模式 -->
-        <div class="setting-card sub-card">
-          <div class="setting-icon-wrap"><span class="material-symbols-rounded">download</span></div>
-          <div class="setting-info">
-            <div class="setting-title">{{ t('settings.data_saver') }}</div>
-            <div class="setting-desc">{{ t('settings.data_saver_desc') }}</div>
-          </div>
-          <label class="m3-switch"><input type="checkbox" :checked="syncStore.github.dataSaver" @change="requestDataSaverChange" /><span class="track"><span class="thumb"><span v-if="syncStore.github.dataSaver" class="material-symbols-rounded" style="font-size: 14px">check</span></span></span></label>
         </div>
 
         <!-- 静默同步失败 -->
@@ -2381,18 +2463,18 @@ function confirmDataSaverChange() {
       </div>
     </Teleport>
 
-    <!-- 切换省流模式确认 -->
+    <!-- 旧客户端无法读取升级后的归档，写入前需明确确认 -->
     <Teleport to="body">
-      <div v-if="showDataSaverConfirm" class="dialog-overlay" @click.self="cancelDataSaverChange">
+      <div v-if="syncStore.pendingProtocolUpgrade && !hideProtocolUpgrade" class="dialog-overlay" @click.self="hideProtocolUpgrade = true">
         <div class="dialog-card" style="width: 380px">
           <div class="dialog-icon warning">
             <span class="material-symbols-rounded">warning</span>
           </div>
-          <h3 class="dialog-title">{{ t('settings.data_saver_warning_title') }}</h3>
-          <p class="dialog-desc">{{ t('settings.data_saver_warning_message') }}</p>
+          <h3 class="dialog-title">{{ t('settings.sync_upgrade_title') }}</h3>
+          <p class="dialog-desc">{{ t('settings.sync_upgrade_message', { provider: syncStore.pendingProtocolUpgrade.backend === 'github' ? 'GitHub' : 'WebDAV' }) }}</p>
           <div class="dialog-actions">
-            <button class="dialog-btn" @click="cancelDataSaverChange">{{ t('settings.cancel') }}</button>
-            <button class="dialog-btn primary" @click="confirmDataSaverChange">{{ t('settings.data_saver_warning_confirm') }}</button>
+            <button class="dialog-btn" :disabled="syncStore.isSyncing" @click="hideProtocolUpgrade = true">{{ t('settings.cancel') }}</button>
+            <button class="dialog-btn primary" :disabled="syncStore.isSyncing" @click="syncStore.approveProtocolUpgrade()">{{ t('settings.sync_upgrade_confirm') }}</button>
           </div>
         </div>
       </div>
@@ -2473,6 +2555,25 @@ function confirmDataSaverChange() {
 </template>
 
 <style scoped lang="scss">
+.setting-card--select {
+  flex-wrap: wrap;
+
+  .setting-info { flex-basis: 240px; }
+}
+
+.settings-select {
+  flex: 0 1 200px;
+  margin-left: auto;
+
+  &--device { flex-basis: 300px; }
+
+  :deep(.custom-select-trigger) {
+    min-height: 44px;
+    padding: 10px 14px;
+    font-size: 14px;
+  }
+}
+
 .settings-view {
   width: 100%;
   height: 100%;
@@ -3649,6 +3750,11 @@ function confirmDataSaverChange() {
   .setting-card {
     gap: 10px;
     padding: 12px;
+  }
+
+  .setting-card--select {
+    .setting-info { flex-basis: calc(100% - 46px); }
+    .settings-select { flex-basis: 100%; margin-left: 46px; }
   }
 
   .setting-icon-wrap {
