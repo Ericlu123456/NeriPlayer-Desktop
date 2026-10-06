@@ -23,6 +23,7 @@ const MAX_SAFE_PLAYLIST_ID: i64 = (1_i64 << 53) - 1;
 const NEXT_ID_KEY: &str = "local_playlist.next_id";
 const SONG_DELETIONS_HASH_KEY: &str = "local_playlist.song_deletions_hash";
 pub(crate) const LEGACY_IMPORT_KEY: &str = "legacy_import.playlists";
+pub(crate) const SYSTEM_IDS_KEY: &str = "migration.local_playlist_system_ids";
 const LEGACY_FILE: &str = "playlists.json";
 
 static PLAYLIST_IO_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -324,7 +325,90 @@ impl PlaylistStore {
         }
     }
 
+    /// 对齐 Android sanitizePlaylistName：去掉首尾空白；占用系统歌单名或与其它歌单（忽略大小写）
+    /// 重名时追加 `_2`、`_3`…。Android 另把名字截到 10 个字符，那是手机界面的限制，桌面端不截断
+    pub fn sanitized_name(&self, name: &str, excluded: Option<i64>) -> AppResult<String> {
+        let base = name.trim();
+        if base.is_empty() {
+            return Err(AppError::Other("Playlist name is required".into()));
+        }
+        let occupied: HashSet<String> = self
+            .playlists
+            .iter()
+            .filter(|playlist| Some(playlist.id) != excluded)
+            .map(|playlist| playlist.name.to_lowercase())
+            .collect();
+        let mut candidate = base.to_string();
+        let mut index = 2;
+        while crate::sync::manager::is_reserved_playlist_name(&candidate)
+            || occupied.contains(&candidate.to_lowercase())
+        {
+            candidate = format!("{base}_{index}");
+            index += 1;
+        }
+        Ok(candidate)
+    }
+
+    /// 取固定 id 的系统歌单，不存在时用给定名字创建；返回 (歌单, 是否新建)
+    pub fn ensure_system_playlist(&mut self, id: i64, name: &str) -> (&Playlist, bool) {
+        if let Some(index) = self.playlists.iter().position(|playlist| playlist.id == id) {
+            return (&self.playlists[index], false);
+        }
+        // 重新出现的系统歌单修改时间比旧墓碑新，同步时会按 Android 规则复活而不是再被删掉
+        self.deleted_playlist_ids.retain(|deleted_id| *deleted_id != id);
+        let playlist = Playlist {
+            id,
+            name: name.trim().to_string(),
+            tracks: Vec::new(),
+            modified_at: chrono::Utc::now().timestamp_millis() as u64,
+        };
+        let index = if id == crate::sync::manager::SYSTEM_FAVORITES_ID {
+            self.playlists.insert(0, playlist);
+            0
+        } else {
+            self.playlists.push(playlist);
+            self.playlists.len() - 1
+        };
+        (&self.playlists[index], true)
+    }
+
+    /// 旧版桌面端按名字认系统歌单，自己的"我喜欢的音乐"是随机正数 id。改成 Android 的固定 id，
+    /// 之后只有固定 id 才算系统歌单；同名的其余歌单保持普通歌单
+    fn adopt_system_playlist_ids(&mut self) -> bool {
+        use crate::sync::manager::{is_favorites_name, is_local_name, SYSTEM_FAVORITES_ID, SYSTEM_LOCAL_ID};
+        let mut changed = false;
+        for (system_id, matches) in [
+            (SYSTEM_FAVORITES_ID, is_favorites_name as fn(&str) -> bool),
+            (SYSTEM_LOCAL_ID, is_local_name as fn(&str) -> bool),
+        ] {
+            if self.playlists.iter().any(|playlist| playlist.id == system_id) {
+                continue;
+            }
+            let Some(playlist) = self
+                .playlists
+                .iter_mut()
+                .find(|playlist| playlist.id > 0 && matches(&playlist.name))
+            else {
+                continue;
+            };
+            let previous = playlist.id.to_string();
+            playlist.id = system_id;
+            for deletion in &mut self.playlist_song_deletions {
+                if deletion.playlist_id == previous {
+                    deletion.playlist_id = system_id.to_string();
+                }
+            }
+            self.deleted_playlist_ids.retain(|deleted_id| *deleted_id != system_id);
+            changed = true;
+        }
+        changed
+    }
+
     pub fn delete(&mut self, id: i64) -> bool {
+        // 系统歌单的墓碑会传到所有设备，把各端的收藏一起清空（对齐 Android 删除时跳过系统歌单）
+        if matches!(id, crate::sync::manager::SYSTEM_FAVORITES_ID | crate::sync::manager::SYSTEM_LOCAL_ID) {
+            return false;
+        }
         let len = self.playlists.len();
         self.playlists.retain(|p| p.id != id);
         let deleted = self.playlists.len() < len;
@@ -502,13 +586,26 @@ pub(crate) fn import_legacy_json(transaction: &Transaction<'_>, directory: &Path
     Ok(vec![path])
 }
 
+/// 一次性把按名字识别的系统歌单改用 Android 固定 id（在数据库打开时、任何同步之前执行）
+pub(crate) fn adopt_system_playlist_ids_once(
+    transaction: &Transaction<'_>,
+    _directory: &Path,
+) -> AppResult<Vec<PathBuf>> {
+    let mut store = PlaylistStore::load_from(transaction)?;
+    if store.adopt_system_playlist_ids() {
+        store.save_into(transaction)?;
+        log::info!(target: "playlist-io", "系统歌单已改用固定 id");
+    }
+    Ok(Vec::new())
+}
+
 fn parse_member(payload: &str) -> AppResult<TrackInfo> {
     serde_json::from_str(payload).map_err(|error| {
         AppError::Other(format!("Stored playlist member is invalid: {error}"))
     })
 }
 
-fn summarize_tracks(tracks: &[TrackInfo]) -> (usize, Option<String>) {
+pub(crate) fn summarize_tracks(tracks: &[TrackInfo]) -> (usize, Option<String>) {
     let mut seen = HashSet::new();
     let track_count = tracks
         .iter()
@@ -726,6 +823,49 @@ mod tests {
         assert_eq!(store.playlists[0].tracks[0].id, "netease:1");
         assert_eq!(store.deleted_playlist_ids, vec![9]);
         assert!(!directory.path().join(LEGACY_FILE).exists());
+    }
+
+    #[test]
+    fn name_matched_favorites_adopt_the_fixed_id_once_and_keep_their_members() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = UserDatabase::open_in_memory().unwrap();
+        let mut store = PlaylistStore::default();
+        let favorites = store.create("我喜欢的音乐".into()).id;
+        store.playlists[0].tracks = vec![track("netease:1", "")];
+        let lookalike = store.create("Liked Songs".into()).id;
+        store.playlist_song_deletions.push(SyncPlaylistSongDeletion {
+            playlist_id: favorites.to_string(),
+            ..Default::default()
+        });
+        store.save_with(&database).unwrap();
+
+        assert!(db::legacy::run_once(&database, directory.path(), SYSTEM_IDS_KEY, adopt_system_playlist_ids_once).unwrap());
+        let migrated = database.read(PlaylistStore::load_from).unwrap();
+        let ids: Vec<_> = migrated.playlists.iter().map(|playlist| playlist.id).collect();
+        assert_eq!(ids, vec![crate::sync::manager::SYSTEM_FAVORITES_ID, lookalike]);
+        assert_eq!(migrated.playlists[0].tracks[0].id, "netease:1");
+        assert_eq!(migrated.playlist_song_deletions[0].playlist_id, "-1001");
+        assert!(!db::legacy::run_once(&database, directory.path(), SYSTEM_IDS_KEY, adopt_system_playlist_ids_once).unwrap());
+    }
+
+    #[test]
+    fn system_playlists_cannot_be_deleted_and_reserved_or_duplicate_names_get_a_suffix() {
+        let mut store = PlaylistStore::default();
+        let (favorites, created) =
+            store.ensure_system_playlist(crate::sync::manager::SYSTEM_FAVORITES_ID, " 我喜欢的音乐 ");
+        assert!(created);
+        assert_eq!((favorites.id, favorites.name.as_str()), (-1001, "我喜欢的音乐"));
+        assert!(!store.ensure_system_playlist(-1001, "ignored").1);
+        assert!(!store.delete(-1001), "deleting favorites would wipe them on every device");
+        assert_eq!(store.playlists.len(), 1);
+
+        let rock = store.create("Rock".into()).id;
+        assert_eq!(store.sanitized_name("  rock ", None).unwrap(), "rock_2");
+        assert_eq!(store.sanitized_name("Rock", Some(rock)).unwrap(), "Rock", "keeping its own name is not a duplicate");
+        assert_eq!(store.sanitized_name("my favorite music", None).unwrap(), "my favorite music_2");
+        assert_eq!(store.sanitized_name("Local Files", None).unwrap(), "Local Files_2");
+        assert!(store.sanitized_name("   ", None).is_err());
+        assert!(store.delete(rock));
     }
 
     #[test]

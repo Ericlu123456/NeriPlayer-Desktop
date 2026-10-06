@@ -165,6 +165,7 @@ fn list_playlists_blocking() -> AppResult<Vec<PlaylistInfo>> {
 #[tauri::command]
 pub async fn create_playlist(app: AppHandle, name: String) -> AppResult<PlaylistInfo> {
     let info = PlaylistStore::update(|store| {
+        let name = store.sanitized_name(&name, None)?;
         let pl = store.create(name);
         let info = PlaylistInfo {
             id: pl.id,
@@ -176,6 +177,28 @@ pub async fn create_playlist(app: AppHandle, name: String) -> AppResult<Playlist
         Ok((info, true))
     })?;
     let _ = app.emit("playlists-changed", ());
+    Ok(info)
+}
+
+/// 取"我喜欢的音乐"，不存在时以固定 id -1001 创建（对齐 Android FavoritesPlaylist）
+#[tauri::command]
+pub async fn ensure_favorites_playlist(app: AppHandle, name: String) -> AppResult<PlaylistInfo> {
+    let (info, created) = PlaylistStore::update(|store| {
+        let (playlist, created) =
+            store.ensure_system_playlist(manager::SYSTEM_FAVORITES_ID, &name);
+        let (track_count, cover_url) = crate::library::playlist::summarize_tracks(&playlist.tracks);
+        let info = PlaylistInfo {
+            id: playlist.id,
+            name: playlist.name.clone(),
+            track_count,
+            modified_at: playlist.modified_at,
+            cover_url,
+        };
+        Ok(((info, created), created))
+    })?;
+    if created {
+        let _ = app.emit("playlists-changed", ());
+    }
     Ok(info)
 }
 
@@ -194,9 +217,18 @@ pub async fn delete_playlist(app: AppHandle, id: i64) -> AppResult<bool> {
 #[tauri::command]
 pub async fn rename_playlist(app: AppHandle, id: i64, name: String) -> AppResult<bool> {
     let renamed = PlaylistStore::update(|store| {
-        let Some(pl) = store.playlists.iter_mut().find(|p| p.id == id) else {
+        let Some(current) = store.playlists.iter().find(|p| p.id == id) else {
             return Ok((false, false));
         };
+        // 系统歌单按各端语言显示自己的名字，改名没有意义且会被同步覆盖（对齐 Android）
+        if manager::is_system_playlist(current.id, &current.name) {
+            return Ok((false, false));
+        }
+        let name = store.sanitized_name(&name, Some(id))?;
+        let pl = store.playlists.iter_mut().find(|p| p.id == id).expect("playlist found above");
+        if pl.name == name {
+            return Ok((true, false));
+        }
         pl.name = name;
         pl.modified_at = chrono::Utc::now().timestamp_millis() as u64;
         Ok((true, true))

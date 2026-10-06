@@ -22,6 +22,11 @@ const IMPORTERS: &[(&str, LegacyImporter)] = &[
         crate::library::playlist::LEGACY_IMPORT_KEY,
         crate::library::playlist::import_legacy_json,
     ),
+    // 不读文件：只把旧版按名字认的系统歌单改成固定 id，必须在导入旧歌单之后
+    (
+        crate::library::playlist::SYSTEM_IDS_KEY,
+        crate::library::playlist::adopt_system_playlist_ids_once,
+    ),
     (
         crate::library::favorites::LEGACY_IMPORT_KEY,
         crate::library::favorites::import_legacy_json,

@@ -14,12 +14,23 @@ interface PlaylistIdentity {
   name: string
 }
 
+function nameIn(names: Iterable<string>, name: string): boolean {
+  const wanted = name.trim().toLowerCase()
+  return wanted !== '' && [...names].some(candidate => candidate.toLowerCase() === wanted)
+}
+
+/**
+ * 对齐 Android FavoritesPlaylist：固定 id 一定是系统歌单，名字只对负数 id 生效，
+ * 用户自建的同名歌单（正数 id）仍是普通歌单
+ */
 export function isFavoritesPlaylist(playlist: PlaylistIdentity): boolean {
-  return Number(playlist.id) === SYSTEM_FAVORITES_PLAYLIST_ID || FAVORITES_PLAYLIST_NAMES.includes(playlist.name)
+  const id = Number(playlist.id)
+  return id === SYSTEM_FAVORITES_PLAYLIST_ID || (id < 0 && nameIn(FAVORITES_PLAYLIST_NAMES, playlist.name))
 }
 
 export function isLocalFilesPlaylist(playlist: PlaylistIdentity): boolean {
-  return Number(playlist.id) === SYSTEM_LOCAL_FILES_PLAYLIST_ID || LOCAL_FILES_NAMES.has(playlist.name)
+  const id = Number(playlist.id)
+  return id === SYSTEM_LOCAL_FILES_PLAYLIST_ID || (id < 0 && nameIn(LOCAL_FILES_NAMES, playlist.name))
 }
 
 /** 系统歌单固定首尾，不能删除、重命名或参与排序 */

@@ -459,6 +459,7 @@ fn main() {
             library_cmd::get_playlist_usage_stats,
             library_cmd::get_home_local_playlists,
             library_cmd::create_playlist,
+            library_cmd::ensure_favorites_playlist,
             library_cmd::delete_playlist,
             library_cmd::rename_playlist,
             library_cmd::get_playlist_tracks,

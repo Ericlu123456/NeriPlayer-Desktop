@@ -707,33 +707,49 @@ fn local_sync_playlists(store: &PlaylistStore) -> Vec<SyncPlaylist> {
 }
 
 fn sync_playlist_id(id: i64, name: &str) -> String {
-    if is_favorites_name(name) {
-        return SYSTEM_FAVORITES_ID.to_string();
-    }
-    if is_local_name(name) {
-        return SYSTEM_LOCAL_ID.to_string();
-    }
-    id.to_string()
+    system_playlist_id(id, name).unwrap_or(id).to_string()
 }
 
 /// 系统歌单 ID（对齐 Android FavoritesPlaylist / LocalFilesPlaylist）
-const SYSTEM_FAVORITES_ID: i64 = -1001;
-const SYSTEM_LOCAL_ID: i64 = -1002;
+pub(crate) const SYSTEM_FAVORITES_ID: i64 = -1001;
+pub(crate) const SYSTEM_LOCAL_ID: i64 = -1002;
 
-/// 识别系统歌单的候选名称
+/// 识别系统歌单的候选名称，忽略大小写（对齐 Android buildSystemPlaylistCandidateNames）
 const FAVORITES_NAMES: &[&str] = &["我喜欢的音乐", "我喜歡的音樂", "お気に入りの曲", "Liked Songs", "My Favorite Music"];
-const LOCAL_NAMES: &[&str] = &["本地音乐", "本機音樂", "ローカル音楽", "Local Music"];
+const LOCAL_NAMES: &[&str] = &["本地文件", "Local Files", "本地音乐", "本機音樂", "ローカル音楽", "Local Music"];
 
-fn is_favorites_name(name: &str) -> bool { FAVORITES_NAMES.contains(&name) }
-fn is_local_name(name: &str) -> bool { LOCAL_NAMES.contains(&name) }
+fn matches_any(names: &[&str], name: &str) -> bool {
+    let name = name.trim().to_lowercase();
+    !name.is_empty() && names.iter().any(|candidate| candidate.to_lowercase() == name)
+}
 
-/// 系统歌单（我喜欢的音乐 / 本地文件）固定首尾，不参与自定义排序
+pub(crate) fn is_favorites_name(name: &str) -> bool { matches_any(FAVORITES_NAMES, name) }
+pub(crate) fn is_local_name(name: &str) -> bool { matches_any(LOCAL_NAMES, name) }
+
+/// 用户新建或改名时不能占用的名字（对齐 Android SystemLocalPlaylists.matchesReservedName）
+pub(crate) fn is_reserved_playlist_name(name: &str) -> bool {
+    is_favorites_name(name) || is_local_name(name)
+}
+
+/// 对齐 Android：固定 id 一定是系统歌单，名字只对负数 id 生效，
+/// 用户自建的同名歌单（正数 id）仍是普通歌单，不会和系统歌单撞成同一个同步 id
+pub(crate) fn system_playlist_id(id: i64, name: &str) -> Option<i64> {
+    if id == SYSTEM_FAVORITES_ID || (id < 0 && is_favorites_name(name)) {
+        Some(SYSTEM_FAVORITES_ID)
+    } else if id == SYSTEM_LOCAL_ID || (id < 0 && is_local_name(name)) {
+        Some(SYSTEM_LOCAL_ID)
+    } else {
+        None
+    }
+}
+
+/// 系统歌单（我喜欢的音乐 / 本地文件）固定首尾，不参与自定义排序，也不能删除或改名
 pub(crate) fn is_system_playlist(id: i64, name: &str) -> bool {
-    id == SYSTEM_FAVORITES_ID || is_favorites_name(name) || is_local_files_playlist(id, name)
+    system_playlist_id(id, name).is_some()
 }
 
 pub(crate) fn is_local_files_playlist(id: i64, name: &str) -> bool {
-    id == SYSTEM_LOCAL_ID || is_local_name(name)
+    system_playlist_id(id, name) == Some(SYSTEM_LOCAL_ID)
 }
 
 /// 解析 SyncPlaylist ID，识别系统歌单
@@ -953,6 +969,23 @@ mod tests {
     use crate::state::{TrackInfo, TrackSource};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
+
+    #[test]
+    fn only_fixed_or_negative_ids_are_system_playlists() {
+        assert_eq!(system_playlist_id(-1001, "Renamed elsewhere"), Some(SYSTEM_FAVORITES_ID));
+        assert_eq!(system_playlist_id(-5, "my favorite music"), Some(SYSTEM_FAVORITES_ID));
+        assert_eq!(system_playlist_id(-7, "Local Files"), Some(SYSTEM_LOCAL_ID));
+        assert_eq!(system_playlist_id(42, "Liked Songs"), None);
+        assert_eq!(system_playlist_id(43, "本地文件"), None);
+
+        let mut store = playlist::PlaylistStore::default();
+        store.playlists = vec![
+            playlist::Playlist { id: -1001, name: "我喜欢的音乐".into(), tracks: Vec::new(), modified_at: 1 },
+            playlist::Playlist { id: 42, name: "Liked Songs".into(), tracks: Vec::new(), modified_at: 1 },
+        ];
+        let ids: Vec<_> = local_sync_playlists(&store).into_iter().map(|playlist| playlist.id).collect();
+        assert_eq!(ids, vec!["-1001", "42"], "a look-alike user playlist must not collide with favorites");
+    }
 
     #[test]
     fn rebuilding_frontend_history_preserves_remote_resume_and_device_for_same_play() {
