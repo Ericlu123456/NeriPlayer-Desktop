@@ -4,6 +4,14 @@ use tauri::State;
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
 
+#[tauri::command]
+pub async fn get_netease_home_section(
+    source: String,
+    state: State<'_, AppState>,
+) -> AppResult<Value> {
+    state.netease().get_home_section(&source, state.bypasses_system_proxy()).await
+}
+
 /// 获取网易云个性化推荐歌单（需登录）
 #[tauri::command]
 pub async fn get_recommended_playlists(

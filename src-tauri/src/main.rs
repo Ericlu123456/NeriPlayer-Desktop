@@ -494,6 +494,7 @@ fn main() {
             auth_cmd::logout,
             recommend_cmd::get_recommended_playlists,
             recommend_cmd::get_recommended_songs,
+            recommend_cmd::get_netease_home_section,
             recommend_cmd::get_user_playlists,
             recommend_cmd::get_user_account,
             recommend_cmd::get_home_feed,

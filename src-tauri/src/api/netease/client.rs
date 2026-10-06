@@ -5,6 +5,8 @@ use reqwest::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::collections::HashSet;
+use std::future::Future;
 use std::sync::Arc;
 
 use crate::error::{AppError, AppResult};
@@ -17,6 +19,172 @@ const EAPI_BASE_URL: &str = "https://interface.music.163.com";
 
 const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
 const EAPI_USER_AGENT: &str = "Mozilla/5.0 (Linux; Android 10; NeriPlayer) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36";
+
+const HOME_SECTION_LIMIT: usize = 30;
+const PRIVATE_FM_MAX_BATCHES: usize = 10;
+const RADAR_PLAYLISTS: [(i64, &str); 5] = [
+    (5320167908, "时光雷达"),
+    (5362359247, "宝藏雷达"),
+    (5300458264, "新歌雷达"),
+    (5327906368, "乐迷雷达"),
+    (5341776086, "神秘雷达"),
+];
+
+#[derive(Clone, Copy)]
+enum HomeSectionKind {
+    Raw,
+    PrivateFm,
+    RadarPlaylists,
+}
+
+struct HomeSectionRequest {
+    path: &'static str,
+    params: Value,
+    encrypted: bool,
+    requires_login: bool,
+    kind: HomeSectionKind,
+}
+
+fn home_section_request(source: &str) -> AppResult<HomeSectionRequest> {
+    let chart = |id: &str| HomeSectionRequest {
+        path: "/api/v6/playlist/detail",
+        params: json!({"id":id,"n":"30","s":"0"}),
+        encrypted: false,
+        requires_login: false,
+        kind: HomeSectionKind::Raw,
+    };
+    let weapi = |path, params, requires_login| HomeSectionRequest {
+        path,
+        params,
+        encrypted: true,
+        requires_login,
+        kind: HomeSectionKind::Raw,
+    };
+    Ok(match source {
+        "personal_radar" => chart("3136952023"),
+        "top_soaring" => chart("19723756"),
+        "top_hot" => chart("3778678"),
+        "top_new" => chart("3779629"),
+        "daily_recommend" => weapi(
+            "/weapi/v3/discovery/recommend/songs", json!({"afresh":"true"}), true,
+        ),
+        "private_fm" => HomeSectionRequest {
+            kind: HomeSectionKind::PrivateFm,
+            ..weapi("/weapi/v1/radio/get", json!({}), true)
+        },
+        "personalized_new_songs" => weapi(
+            "/weapi/personalized/newsong",
+            json!({"type":"recommend","limit":"30","areaId":"0"}), false,
+        ),
+        "personalized" => weapi(
+            "/weapi/personalized/playlist", json!({"limit":"30"}), false,
+        ),
+        "daily_resource" => weapi("/weapi/v1/discovery/recommend/resource", json!({}), true),
+        "high_quality" => weapi(
+            "/weapi/playlist/highquality/list",
+            json!({"cat":"全部","limit":30,"lasttime":0,"total":true}), false,
+        ),
+        "hot_playlists" | "acg_playlists" => weapi(
+            "/weapi/playlist/list",
+            json!({
+                "cat":if source == "acg_playlists" { "ACG" } else { "全部" },
+                "order":"hot","limit":"30","offset":"0","total":"true",
+            }), false,
+        ),
+        "radar_playlists" => HomeSectionRequest {
+            path: "/api/playlist/detail",
+            params: json!({"n":"1","s":"0","uiPlaylistType":"MGC"}),
+            encrypted: false,
+            requires_login: false,
+            kind: HomeSectionKind::RadarPlaylists,
+        },
+        _ => return Err(AppError::Api(format!("Unknown NetEase home source: {source}"))),
+    })
+}
+
+fn validate_home_response(body: Value) -> AppResult<Value> {
+    match json_i64(&body["code"]) {
+        Some(200) => Ok(body),
+        Some(code) => Err(AppError::Api(format!("NetEase home API code {code}"))),
+        None => Err(AppError::Api("NetEase home response is missing a valid code".into())),
+    }
+}
+
+fn should_retry_home_anonymously(source: &str, logged_in: bool, body: &Value) -> bool {
+    source == "personalized"
+        && logged_in
+        && matches!(json_i64(&body["code"]), Some(301 | 50000005))
+}
+
+fn home_song_batch(body: &Value) -> Vec<&Value> {
+    let songs = [
+        "/data/dailySongs", "/data/songs", "/data", "/result", "/songs", "/playlist/tracks",
+    ].into_iter().find_map(|pointer| body.pointer(pointer).and_then(Value::as_array));
+    songs.into_iter().flatten().filter_map(|container| {
+        let song = container.get("song").filter(|value| value.is_object()).unwrap_or(container);
+        let id = json_i64(&song["id"])?;
+        let name = song["name"].as_str()?;
+        (id > 0 && !name.trim().is_empty()).then_some(song)
+    }).take(HOME_SECTION_LIMIT).collect()
+}
+
+async fn collect_private_fm<F, Fut>(mut fetch: F) -> AppResult<Value>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = AppResult<Value>>,
+{
+    let mut songs = Vec::new();
+    let mut seen = HashSet::new();
+    for _ in 0..PRIVATE_FM_MAX_BATCHES {
+        let body = match fetch().await.and_then(validate_home_response) {
+            Ok(body) => body,
+            Err(error) if songs.is_empty() => return Err(error),
+            Err(_) => break,
+        };
+        let previous_count = songs.len();
+        for song in home_song_batch(&body) {
+            if seen.insert(json_i64(&song["id"]).expect("validated song id")) {
+                songs.push(song.clone());
+                if songs.len() == HOME_SECTION_LIMIT {
+                    break;
+                }
+            }
+        }
+        if songs.len() == previous_count || songs.len() == HOME_SECTION_LIMIT {
+            break;
+        }
+    }
+    Ok(json!({"code":200,"data":songs}))
+}
+
+fn radar_metadata_params(id: i64) -> Value {
+    json!({"id":id.to_string(),"n":"1","s":"0","uiPlaylistType":"MGC"})
+}
+
+fn radar_playlist_summary((id, name): (i64, &str), body: Option<&Value>) -> Value {
+    let fallback = || json!({"id":id,"name":name,"picUrl":"","playCount":0,"trackCount":0});
+    let Some(body) = body.filter(|body| json_i64(&body["code"]) == Some(200)) else {
+        return fallback();
+    };
+    let Some(playlist) = body.get("playlist").filter(|value| value.is_object())
+        .or_else(|| body.get("result").filter(|value| value.is_object())) else {
+        return fallback();
+    };
+    let Some(current_name) = playlist["name"].as_str().filter(|name| !name.trim().is_empty()) else {
+        return fallback();
+    };
+    if json_i64(&playlist["id"]) != Some(id) {
+        return fallback();
+    }
+    let cover = ["picUrl", "coverImgUrl", "coverUrl"].into_iter()
+        .find_map(|field| playlist[field].as_str().filter(|value| !value.trim().is_empty()))
+        .unwrap_or("").replacen("http://", "https://", 1);
+    let play_count = json_i64(&playlist["playCount"])
+        .or_else(|| json_i64(&playlist["playcount"])).unwrap_or(0);
+    let track_count = json_i64(&playlist["trackCount"])
+        .or_else(|| json_i64(&playlist["songCount"])).unwrap_or(0);
+    json!({"id":id,"name":current_name,"picUrl":cover,"playCount":play_count,"trackCount":track_count})
+}
 
 pub struct NeteaseClient {
     http: FallbackHttp,
@@ -83,6 +251,72 @@ impl NeteaseClient {
 
     pub fn with_fallback(http: &Client, fallback: &Client) -> Self {
         Self::with_transport(FallbackHttp::with_fallback(http, fallback, "netease"))
+    }
+
+    fn anonymous_home_client(bypass_proxy: bool) -> AppResult<Self> {
+        // 克隆已有 Client 会共享 CookieProvider，因此匿名重试必须新建无 Jar 的传输通道
+        let build = |no_proxy| {
+            let mut builder = Client::builder()
+                .user_agent(USER_AGENT)
+                .connect_timeout(std::time::Duration::from_secs(10))
+                .read_timeout(std::time::Duration::from_secs(30));
+            if no_proxy {
+                builder = builder.no_proxy();
+            }
+            builder.build()
+        };
+        Ok(Self::with_fallback(&build(bypass_proxy)?, &build(!bypass_proxy)?))
+    }
+
+    async fn fetch_home_request(&self, request: &HomeSectionRequest) -> AppResult<Value> {
+        let url = format!("{BASE_URL}{}", request.path);
+        if request.encrypted {
+            return self.weapi_post(&url, &request.params).await;
+        }
+        let form: Vec<_> = request.params.as_object().expect("home request parameters").iter()
+            .map(|(key, value)| (key.clone(), value.as_str().map(str::to_owned)
+                .unwrap_or_else(|| value.to_string())))
+            .collect();
+        let response = self.send_with_fallback(|client| {
+            client.post(&url).header("User-Agent", EAPI_USER_AGENT)
+                .header("Referer", BASE_URL).form(&form)
+        }).await?;
+        parse_json_response(response, "netease home api").await
+    }
+
+    pub async fn get_home_section(&self, source: &str, bypass_proxy: bool) -> AppResult<Value> {
+        let request = home_section_request(source)?;
+        let logged_in = self.has_login();
+        if request.requires_login && !logged_in {
+            return Err(AppError::Api("NetEase home source requires login".into()));
+        }
+        match request.kind {
+            HomeSectionKind::PrivateFm => collect_private_fm(|| self.fetch_home_request(&request)).await,
+            HomeSectionKind::RadarPlaylists => {
+                if logged_in {
+                    self.ensure_weapi_session().await;
+                }
+                let mut playlists = Vec::with_capacity(RADAR_PLAYLISTS.len());
+                for definition in RADAR_PLAYLISTS {
+                    let metadata_request = HomeSectionRequest {
+                        params: radar_metadata_params(definition.0),
+                        ..home_section_request(source)?
+                    };
+                    let body = self.fetch_home_request(&metadata_request).await.ok();
+                    playlists.push(radar_playlist_summary(definition, body.as_ref()));
+                }
+                Ok(json!({"code":200,"playlists":playlists}))
+            }
+            HomeSectionKind::Raw => {
+                let mut body = self.fetch_home_request(&request).await?;
+                if should_retry_home_anonymously(source, logged_in, &body) {
+                    body = Self::anonymous_home_client(bypass_proxy)?
+                        .fetch_home_request(&request).await?;
+                }
+                // 前端按 Android 规则过滤有效条目后再取 30，保留原始数组避免提前截掉有效项
+                validate_home_response(body)
+            }
+        }
     }
 
     /// 注入 WEAPI 使用的 csrf_token(取自 __csrf Cookie), 对齐 Android 行为
@@ -885,5 +1119,217 @@ mod tests {
             .to_str()
             .unwrap()
             .contains("MUSIC_U=fixture-login"));
+    }
+}
+
+#[cfg(test)]
+mod home_section_tests {
+    use super::*;
+    use std::collections::VecDeque;
+
+    #[test]
+    fn home_requests_match_android_endpoints_parameters_and_login_rules() {
+        for (source, path, params, encrypted, login) in [
+            ("personal_radar", "/api/v6/playlist/detail", json!({"id":"3136952023","n":"30","s":"0"}), false, false),
+            ("daily_recommend", "/weapi/v3/discovery/recommend/songs", json!({"afresh":"true"}), true, true),
+            ("private_fm", "/weapi/v1/radio/get", json!({}), true, true),
+            ("top_soaring", "/api/v6/playlist/detail", json!({"id":"19723756","n":"30","s":"0"}), false, false),
+            ("personalized_new_songs", "/weapi/personalized/newsong", json!({"type":"recommend","limit":"30","areaId":"0"}), true, false),
+            ("top_hot", "/api/v6/playlist/detail", json!({"id":"3778678","n":"30","s":"0"}), false, false),
+            ("top_new", "/api/v6/playlist/detail", json!({"id":"3779629","n":"30","s":"0"}), false, false),
+            ("personalized", "/weapi/personalized/playlist", json!({"limit":"30"}), true, false),
+            ("daily_resource", "/weapi/v1/discovery/recommend/resource", json!({}), true, true),
+            ("high_quality", "/weapi/playlist/highquality/list", json!({"cat":"全部","limit":30,"lasttime":0,"total":true}), true, false),
+            ("hot_playlists", "/weapi/playlist/list", json!({"cat":"全部","order":"hot","limit":"30","offset":"0","total":"true"}), true, false),
+            ("acg_playlists", "/weapi/playlist/list", json!({"cat":"ACG","order":"hot","limit":"30","offset":"0","total":"true"}), true, false),
+            ("radar_playlists", "/api/playlist/detail", json!({"n":"1","s":"0","uiPlaylistType":"MGC"}), false, false),
+        ] {
+            let request = home_section_request(source).unwrap();
+            assert_eq!(request.path, path, "{source}");
+            assert_eq!(request.params, params, "{source}");
+            assert_eq!(request.encrypted, encrypted, "{source}");
+            assert_eq!(request.requires_login, login, "{source}");
+        }
+        assert!(home_section_request("unknown").is_err());
+        assert!(home_section_request("/weapi/song/like").is_err());
+    }
+
+    #[test]
+    fn home_responses_preserve_raw_arrays_for_frontend_filtering_and_reject_api_errors() {
+        for pointer in [
+            "/data/dailySongs", "/data/songs", "/data", "/result", "/songs",
+            "/playlist/tracks", "/recommend", "/playlists", "/data/playlists", "/data/list",
+        ] {
+            let mut body = json!({"code":200,"untouched":"metadata"});
+            let parts: Vec<_> = pointer.trim_start_matches('/').split('/').collect();
+            let mut parent = &mut body;
+            for key in &parts[..parts.len() - 1] {
+                parent[*key] = json!({});
+                parent = &mut parent[*key];
+            }
+            parent[parts[parts.len() - 1]] = json!((1..=50).collect::<Vec<_>>());
+            let response = validate_home_response(body).unwrap();
+            assert_eq!(response.pointer(pointer).unwrap().as_array().unwrap().len(), 50);
+            assert_eq!(response["untouched"], "metadata");
+        }
+        assert!(validate_home_response(json!({"code":301,"data":[]})).is_err());
+        assert!(validate_home_response(json!({"data":[]})).is_err());
+    }
+
+    fn fm_batch(ids: &[i64]) -> Value {
+        json!({"code":200,"data":ids.iter().map(|id| json!({"id":id,"name":format!("Song {id}")})).collect::<Vec<_>>()})
+    }
+
+    #[test]
+    fn fm_parser_filters_invalid_songs_before_limiting_and_unwraps_android_arrays() {
+        let mut items = vec![json!({"id":0,"name":"Invalid"}); 35];
+        items.extend([json!(null), json!({"id":-1,"name":"Invalid"}), json!({"id":1,"name":" "})]);
+        items.extend((1..=35).map(|id| json!({"song":{"id":id.to_string(),"name":"Valid"}})));
+        for pointer in ["/data/dailySongs", "/data/songs", "/data", "/result", "/songs", "/playlist/tracks"] {
+            let mut body = json!({"code":200});
+            let parts: Vec<_> = pointer.trim_start_matches('/').split('/').collect();
+            let mut parent = &mut body;
+            for key in &parts[..parts.len() - 1] {
+                parent[*key] = json!({});
+                parent = &mut parent[*key];
+            }
+            parent[parts[parts.len() - 1]] = json!(items);
+            let songs = home_song_batch(&body);
+            assert_eq!(songs.len(), 30, "{pointer}");
+            assert_eq!(songs[0]["id"], "1");
+            assert_eq!(songs[29]["id"], "30");
+        }
+    }
+
+    #[tokio::test]
+    async fn private_fm_preserves_first_seen_order_and_stops_on_duplicate_or_empty_batches() {
+        let mut calls = 0;
+        let mut batches = VecDeque::from([fm_batch(&[1, 2, 1]), fm_batch(&[2, 3]), fm_batch(&[3, 1])]);
+        let response = collect_private_fm(|| {
+            calls += 1;
+            std::future::ready(Ok(batches.pop_front().unwrap()))
+        }).await.unwrap();
+        assert_eq!(calls, 3);
+        assert_eq!(response["data"].as_array().unwrap().iter().map(|song| song["id"].as_i64().unwrap()).collect::<Vec<_>>(), vec![1, 2, 3]);
+
+        let mut calls = 0;
+        let response = collect_private_fm(|| {
+            calls += 1;
+            std::future::ready(Ok(fm_batch(&[])))
+        }).await.unwrap();
+        assert_eq!(calls, 1);
+        assert_eq!(response, json!({"code":200,"data":[]}));
+    }
+
+    #[tokio::test]
+    async fn private_fm_limits_both_requests_and_returned_songs() {
+        let mut calls = 0;
+        let response = collect_private_fm(|| {
+            calls += 1;
+            std::future::ready(Ok(fm_batch(&[calls])))
+        }).await.unwrap();
+        assert_eq!(calls, 10);
+        assert_eq!(response["data"].as_array().unwrap().len(), 10);
+
+        let mut calls = 0;
+        let response = collect_private_fm(|| {
+            calls += 1;
+            std::future::ready(Ok(fm_batch(&(1..=50).collect::<Vec<_>>())))
+        }).await.unwrap();
+        assert_eq!(calls, 1);
+        assert_eq!(response["data"].as_array().unwrap().len(), 30);
+    }
+
+    #[tokio::test]
+    async fn private_fm_keeps_fetched_songs_after_an_error_but_rejects_initial_errors() {
+        let mut batches = VecDeque::from([fm_batch(&[1]), json!({"code":301})]);
+        let response = collect_private_fm(|| std::future::ready(Ok(batches.pop_front().unwrap()))).await.unwrap();
+        assert_eq!(response, fm_batch(&[1]));
+        assert!(collect_private_fm(|| std::future::ready(Err(AppError::Api("fixture failure".into())))).await.is_err());
+        assert!(collect_private_fm(|| std::future::ready(Ok(json!({"code":301})))).await.is_err());
+    }
+
+    #[test]
+    fn radar_metadata_uses_fixed_android_order_and_keeps_failed_cards() {
+        let expected = [
+            (5320167908_i64, "时光雷达"), (5362359247, "宝藏雷达"),
+            (5300458264, "新歌雷达"), (5327906368, "乐迷雷达"), (5341776086, "神秘雷达"),
+        ];
+        for ((id, name), definition) in expected.into_iter().zip(RADAR_PLAYLISTS) {
+            assert_eq!(definition, (id, name));
+            assert_eq!(radar_metadata_params(id), json!({"id":id.to_string(),"n":"1","s":"0","uiPlaylistType":"MGC"}));
+            let fallback = json!({"id":id,"name":name,"picUrl":"","playCount":0,"trackCount":0});
+            assert_eq!(radar_playlist_summary(definition, None), fallback);
+            assert_eq!(radar_playlist_summary(definition, Some(&json!({"code":301}))), fallback);
+            assert_eq!(radar_playlist_summary(definition, Some(&json!({"playlist":{"id":id,"name":"missing code"}}))), fallback);
+            assert_eq!(radar_playlist_summary(definition, Some(&json!({"code":200,"playlist":{"id":1,"name":"wrong"}}))), fallback);
+            let metadata = json!({"code":200,"result":{"id":id,"name":"Current cycle","coverImgUrl":"http://cover/demo","playcount":12,"songCount":8}});
+            assert_eq!(radar_playlist_summary(definition, Some(&metadata)), json!({"id":id,"name":"Current cycle","picUrl":"https://cover/demo","playCount":12,"trackCount":8}));
+        }
+    }
+
+    #[test]
+    fn personalized_anonymous_retry_is_only_for_android_login_failure_codes() {
+        for code in [301, 50000005] {
+            assert!(should_retry_home_anonymously("personalized", true, &json!({"code":code})));
+            assert!(!should_retry_home_anonymously("personalized", false, &json!({"code":code})));
+            assert!(!should_retry_home_anonymously("daily_resource", true, &json!({"code":code})));
+        }
+        for body in [json!({"code":200}), json!({"code":500}), json!({})] {
+            assert!(!should_retry_home_anonymously("personalized", true, &body));
+        }
+        let anonymous = NeteaseClient::anonymous_home_client(true).unwrap();
+        assert!(!anonymous.has_login());
+        assert!(anonymous.csrf_token().is_empty());
+        assert!(anonymous.cookie_jar.is_none());
+    }
+
+    #[tokio::test]
+    async fn login_required_sources_and_unknown_sources_fail_before_network() {
+        let client = NeteaseClient::anonymous_home_client(true).unwrap();
+        for source in ["daily_recommend", "private_fm", "daily_resource", "unknown"] {
+            assert!(client.get_home_section(source, true).await.is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn anonymous_transport_neither_sends_nor_mutates_shared_login_cookies() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::time::Duration;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let local_url: reqwest::Url = format!("http://{}/", listener.local_addr().unwrap()).parse().unwrap();
+        let netease_url: reqwest::Url = BASE_URL.parse().unwrap();
+        let jar = Arc::new(Jar::default());
+        jar.add_cookie_str("MUSIC_U=fixture-shared; Path=/", &local_url);
+        jar.add_cookie_str("MUSIC_U=fixture-login; Path=/", &netease_url);
+        let http = Client::builder().cookie_provider(jar.clone()).no_proxy().build().unwrap();
+        let original = NeteaseClient::new(&http).with_cookie_jar(jar.clone());
+        let before_local = jar.cookies(&local_url);
+        let before_netease = jar.cookies(&netease_url);
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 1024];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let read = stream.read(&mut buffer).unwrap();
+                assert!(read > 0);
+                request.extend_from_slice(&buffer[..read]);
+                assert!(request.len() < 8192);
+            }
+            stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\nSet-Cookie: MUSIC_U=anonymous-response; Path=/\r\n\r\n{}").unwrap();
+            String::from_utf8(request).unwrap()
+        });
+
+        let anonymous = NeteaseClient::anonymous_home_client(true).unwrap();
+        anonymous.http.primary().get(local_url.clone()).send().await.unwrap().text().await.unwrap();
+        let request = server.join().unwrap();
+        assert!(!request.to_ascii_lowercase().contains("\r\ncookie:"));
+        assert_eq!(jar.cookies(&local_url), before_local);
+        assert_eq!(jar.cookies(&netease_url), before_netease);
+        assert!(original.has_login());
+        assert!(!anonymous.has_login());
     }
 }
