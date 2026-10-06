@@ -237,6 +237,7 @@
     "sort_ascending": "Ascending",
     "sort_descending": "Descending",
     "task_count": "Download tasks ({count})",
+    "batch_finished": "Download tasks finished: {completed} completed, {failed} failed, {cancelled} cancelled, {existing} already downloaded",
     "downloaded": "Downloaded",
     "downloaded_items": "Downloaded Files",
     "download_failed": "Download failed",

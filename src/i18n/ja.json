@@ -237,6 +237,7 @@
     "sort_ascending": "昇順",
     "sort_descending": "降順",
     "task_count": "ダウンロードタスク ({count})",
+    "batch_finished": "ダウンロード終了：成功 {completed} 曲、失敗 {failed} 曲、キャンセル {cancelled} 曲、保存済み {existing} 曲",
     "downloaded": "ダウンロード済み",
     "downloaded_items": "ダウンロード済みファイル",
     "download_failed": "ダウンロードに失敗",

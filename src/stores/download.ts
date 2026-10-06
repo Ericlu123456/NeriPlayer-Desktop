@@ -2,6 +2,7 @@ import { defineStore } from 'pinia'
 import { ref, computed, watch } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
+import { openPath } from '@tauri-apps/plugin-opener'
 import type { TrackInfo } from './player'
 import { useSettingsStore } from './settings'
 import { useToastStore } from './toast'
@@ -42,12 +43,25 @@ export interface ActiveDownloadTask {
   title: string
   artist: string
   source: string
+  coverUrl?: string
   status: 'queued' | 'resolving' | 'downloading' | 'processing' | 'cancelling' | 'cancelled' | 'error' | 'already_exists'
   progress?: number
   downloadedBytes?: number
   totalBytes?: number
   message?: string
   speedBytesPerSecond?: number
+}
+
+type DownloadOutcome = 'completed' | 'failed' | 'cancelled' | 'existing'
+interface DownloadBatch {
+  outcomes: Map<string, DownloadOutcome>
+  lastCompletedId?: string
+  usedDefaultDir: boolean
+}
+interface DownloadAttempt {
+  batch: DownloadBatch
+  queueId: string
+  outcome?: DownloadOutcome
 }
 
 export const useDownloadStore = defineStore('download', () => {
@@ -61,6 +75,14 @@ export const useDownloadStore = defineStore('download', () => {
   const queue = new DownloadQueue(() => settings.downloadParallelism)
   const requestedTracks = new Map<string, TrackInfo>()
   const speedSamples = new Map<string, { bytes: number; time: number }>()
+  const attempts = new Map<string, DownloadAttempt>()
+  const launching = new Set<DownloadAttempt>()
+  let batch: DownloadBatch | null = null
+  let completionCheck: Promise<void> | null = null
+  let batchRevision = 0
+  let attemptSequence = 0
+  let downloadsLoadGeneration = 0
+  let latestDownloadsLoad: Promise<void> | null = null
   watch(() => settings.downloadParallelism, () => queue.refresh())
 
   // resolving 阶段的请求 token 集合，后端尚无任务时先在前端取消（DL-7）
@@ -103,8 +125,8 @@ export const useDownloadStore = defineStore('download', () => {
       'download-progress',
       (e) => {
         const { trackId, status, message, downloadedBytes, totalBytes } = e.payload
-        const toast = useToastStore()
         const current = downloading.value.get(trackId)
+        if (attempts.get(trackId)?.outcome) return
 
         if (status === 'queued' || status === 'processing') {
           setTaskStatus(trackId, status)
@@ -115,6 +137,7 @@ export const useDownloadStore = defineStore('download', () => {
             title: current?.title || trackId,
             artist: current?.artist || '',
             source: current?.source || '',
+            coverUrl: current?.coverUrl,
             status: 'downloading',
             progress: current?.progress,
             downloadedBytes: current?.downloadedBytes,
@@ -138,6 +161,7 @@ export const useDownloadStore = defineStore('download', () => {
             title: current?.title || trackId,
             artist: current?.artist || '',
             source: current?.source || '',
+            coverUrl: current?.coverUrl,
             status: 'downloading',
             progress,
             downloadedBytes: downloadedBytes ?? current?.downloadedBytes,
@@ -150,21 +174,18 @@ export const useDownloadStore = defineStore('download', () => {
           downloading.value = new Map(downloading.value)
           requestedTracks.delete(trackId)
           speedSamples.delete(trackId)
-          queue.finish(trackId)
-          void handleCompletedDownload(trackId, toast)
+          finishAttempt(trackId, 'completed')
+          void loadDownloads({ silent: true })
         } else if (status === 'error') {
           setTaskTerminalStatus(trackId, 'error', message)
-          queue.finish(trackId)
-          toast.error((i18n.global as any).t('download.download_failed') + (message ? `: ${message}` : ''))
+          finishAttempt(trackId, 'failed')
         } else if (status === 'cancelled') {
           setTaskTerminalStatus(trackId, 'cancelled')
-          queue.finish(trackId)
-          toast.show((i18n.global as any).t('download.cancelled'), 'info')
+          finishAttempt(trackId, 'cancelled')
         } else if (status === 'already_exists') {
           setTaskTerminalStatus(trackId, 'already_exists')
           requestedTracks.delete(trackId)
-          queue.finish(trackId)
-          toast.show((i18n.global as any).t('download.already_exists'), 'info')
+          finishAttempt(trackId, 'existing')
         }
       },
     )
@@ -190,10 +211,9 @@ export const useDownloadStore = defineStore('download', () => {
         throw error
       })
 
-    // 自定义下载目录不可用回退默认目录时提示用户（DL-11），避免以为文件落在所选目录
+    // 下载目录回退信息合并到批次汇总，下载过程中保持安静
     const fallbackListening = listen<{ requestedDir: string }>('download-dir-fallback', () => {
-      const toast = useToastStore()
-      toast.show((i18n.global as any).t('download.dir_fallback'), 'info')
+      if (batch) batch.usedDefaultDir = true
     })
     void fallbackListening
       .then((un) => {
@@ -204,7 +224,7 @@ export const useDownloadStore = defineStore('download', () => {
         }
       })
       .catch((error) => log.error('Register download fallback listener failed:', error))
-    void listen('downloads-changed', () => { void loadDownloads() })
+    void listen('downloads-changed', () => { void loadDownloads({ silent: true }) })
       .then((unlisten) => {
         if (eventsGeneration === generation && eventsInitialized) unlistenDownloadsChanged = unlisten
         else unlisten()
@@ -231,6 +251,7 @@ export const useDownloadStore = defineStore('download', () => {
       title: current?.title || trackId,
       artist: current?.artist || '',
       source: current?.source || '',
+      coverUrl: current?.coverUrl ?? requestedTracks.get(trackId)?.coverUrl,
       status,
       progress: current?.progress,
       downloadedBytes: current?.downloadedBytes,
@@ -257,28 +278,83 @@ export const useDownloadStore = defineStore('download', () => {
     terminalCleanupTimers.set(trackId, timer)
   }
 
-  async function handleCompletedDownload(trackId: string, toast: ReturnType<typeof useToastStore>) {
-    await loadDownloads()
-    const downloaded = downloads.value.find(t => t.id === trackId)
-    const t = (key: string, params?: Record<string, unknown>) => (i18n.global as any).t(key, params)
-    if (downloaded?.filePath) {
-      toast.success(t('download.downloaded'), {
-        duration: 6000,
-        action: {
-          label: t('download.open_folder'),
-          handler: async () => {
-            await invoke('reveal_file', { path: downloaded.filePath })
-          },
-        },
-      })
-      return
+  function finishAttempt(trackId: string, outcome: DownloadOutcome, attempt = attempts.get(trackId)) {
+    if (!attempt || attempt.outcome) return
+    attempt.outcome = outcome
+    if (attempts.get(trackId) === attempt) {
+      attempt.batch.outcomes.set(trackId, outcome)
+      if (outcome === 'completed') attempt.batch.lastCompletedId = trackId
     }
-    toast.success(t('download.downloaded'))
+    batchRevision++
+    queue.finish(attempt.queueId)
+    scheduleBatchCompletion()
   }
 
-  async function loadDownloads() {
+  function scheduleBatchCompletion() {
+    if (!batch || !queue.isIdle || launching.size > 0 || completionCheck) return
+    const finished = batch
+    const revision = batchRevision
+    completionCheck = (async () => {
+      let refresh = loadDownloads({ silent: true })
+      // 后续刷新可能持有更晚的清单，汇总需等它提交后再选择最后下载文件
+      while (true) {
+        await refresh
+        const latest = latestDownloadsLoad
+        if (!latest || latest === refresh) break
+        refresh = latest
+      }
+      // 刷新期间追加或重试的任务仍属于当前批次，等待它们全部结束后再汇总
+      if (batch !== finished || batchRevision !== revision || !queue.isIdle || launching.size > 0) return
+      batch = null
+      attempts.clear()
+      const counts = { completed: 0, failed: 0, cancelled: 0, existing: 0 }
+      for (const outcome of finished.outcomes.values()) counts[outcome]++
+      if (counts.completed === 0) return
+      const toast = useToastStore()
+      const t = (key: string, params?: Record<string, unknown>) => (i18n.global as any).t(key, params)
+      const completedIds = Array.from(finished.outcomes).filter(([, outcome]) => outcome === 'completed').map(([id]) => id)
+      const lastCompletedId = finished.lastCompletedId && finished.outcomes.get(finished.lastCompletedId) === 'completed'
+        ? finished.lastCompletedId : completedIds[completedIds.length - 1]
+      const downloaded = downloads.value.find(track => track.id === lastCompletedId)
+      const configuredDir = finished.usedDefaultDir ? '' : settings.downloadDir
+      const summary = t('download.batch_finished', counts)
+      toast.show(
+        finished.usedDefaultDir ? `${summary} · ${t('download.dir_fallback')}` : summary,
+        counts.failed > 0 || counts.cancelled > 0 ? 'info' : 'success',
+        {
+          duration: 6000,
+          action: {
+            label: t('download.open_folder'),
+            handler: async () => {
+              try {
+                if (downloaded?.filePath) await invoke('reveal_file', { path: downloaded.filePath })
+                else await openPath(configuredDir || await invoke<string>('get_default_download_dir'))
+              } catch (error) {
+                log.error('Open completed download folder failed:', error)
+                toast.error(t('download.reveal_failed'))
+              }
+            },
+          },
+        },
+      )
+    })().finally(() => {
+      completionCheck = null
+      scheduleBatchCompletion()
+    })
+  }
+
+  function loadDownloads(options: { silent?: boolean } = {}): Promise<void> {
+    const generation = ++downloadsLoadGeneration
+    const startedDuringDownload = batch !== null || !queue.isIdle || launching.size > 0
+    const loading = refreshDownloads(generation, options, startedDuringDownload)
+    latestDownloadsLoad = loading
+    return loading
+  }
+
+  async function refreshDownloads(generation: number, options: { silent?: boolean }, startedDuringDownload: boolean) {
     try {
       const result = await invoke<DownloadValidationResult>('validate_downloads')
+      if (generation !== downloadsLoadGeneration) return
       const raw = result.tracks || []
       downloads.value = (raw || []).map((t: any) => ({
         id: t.id,
@@ -293,14 +369,15 @@ export const useDownloadStore = defineStore('download', () => {
         downloadedAt: t.downloaded_at,
       }))
       const removedCount = result.removed_count ?? result.removedCount ?? 0
-      if (removedCount > 0) {
+      const silent = options.silent || startedDuringDownload || batch !== null || !queue.isIdle || launching.size > 0
+      if (removedCount > 0 && !silent) {
         const toast = useToastStore()
         toast.show((i18n.global as any).t('download.missing_cleaned', { count: removedCount }), 'info')
       }
       const mismatchCount = result.integrity_mismatch_count
         ?? result.integrityMismatchCount
         ?? 0
-      if (mismatchCount > 0) {
+      if (mismatchCount > 0 && !silent) {
         const toast = useToastStore()
         toast.show(
           (i18n.global as any).t('download.integrity_mismatch', { count: mismatchCount }),
@@ -316,14 +393,17 @@ export const useDownloadStore = defineStore('download', () => {
    * 下载曲目：先解析音频 URL（按来源分支），再调用后端下载
    */
   async function downloadTrack(track: TrackInfo) {
-    const toast = useToastStore()
-
     if (isDownloaded(track.id)) {
-      toast.success((i18n.global as any).t('download.downloaded'))
+      downloading.value = new Map(downloading.value.set(track.id, {
+        trackId: track.id, title: track.title, artist: track.artist,
+        source: getDownloadedTrack(track.id)?.source || '', coverUrl: track.coverUrl,
+        status: 'already_exists',
+      }))
+      setTaskTerminalStatus(track.id, 'already_exists')
       return
     }
 
-    if (queue.has(track.id)) {
+    if (isDownloading(track.id)) {
       return // 正在下载中
     }
 
@@ -338,20 +418,30 @@ export const useDownloadStore = defineStore('download', () => {
           : 'local'
 
     if (source === 'local') {
-      toast.error((i18n.global as any).t('player.not_available'))
+      requestedTracks.set(track.id, { ...track })
+      downloading.value = new Map(downloading.value.set(track.id, {
+        trackId: track.id, title: track.title, artist: track.artist, source,
+        coverUrl: track.coverUrl, status: 'error', message: (i18n.global as any).t('player.not_available'),
+      }))
       return
     }
+    batch ??= { outcomes: new Map(), usedDefaultDir: false }
+    batch.outcomes.delete(track.id)
+    const attempt: DownloadAttempt = { batch, queueId: `${track.id}:${++attemptSequence}` }
+    attempts.set(track.id, attempt)
+    batchRevision++
     clearTerminalCleanup(track.id)
     requestedTracks.set(track.id, { ...track })
     downloading.value = new Map(downloading.value.set(track.id, {
       trackId: track.id, title: track.title, artist: track.artist, source,
+      coverUrl: track.coverUrl,
       status: 'queued', progress: 0, downloadedBytes: 0,
     }))
-    queue.enqueue(track.id, () => { void startDownload(track, source) })
+    queue.enqueue(attempt.queueId, () => { void startDownload(track, source, attempt) })
   }
 
-  async function startDownload(track: TrackInfo, source: string) {
-    const toast = useToastStore()
+  async function startDownload(track: TrackInfo, source: string, attempt: DownloadAttempt) {
+    launching.add(attempt)
     const requestToken = `${track.id}:${++resolvingTokenSequence}`
     resolvingRequestTokens.set(track.id, requestToken)
     downloading.value = new Map(downloading.value.set(track.id, {
@@ -359,18 +449,18 @@ export const useDownloadStore = defineStore('download', () => {
       title: track.title,
       artist: track.artist,
       source,
+      coverUrl: track.coverUrl,
       status: 'resolving',
       progress: 0,
       downloadedBytes: 0,
     }))
-    toast.success((i18n.global as any).t('download.downloading'))
 
     try {
       await initEvents()
       if (consumeResolvingCancellation(resolvingCancelled, requestToken)) {
-        resolvingRequestTokens.delete(track.id)
-        setTaskTerminalStatus(track.id, 'cancelled')
-        queue.finish(track.id)
+        if (resolvingRequestTokens.get(track.id) === requestToken) resolvingRequestTokens.delete(track.id)
+        if (attempts.get(track.id) === attempt) setTaskTerminalStatus(track.id, 'cancelled')
+        finishAttempt(track.id, 'cancelled', attempt)
         return
       }
       const follow = settings.downloadFollowPlaybackQuality
@@ -388,8 +478,8 @@ export const useDownloadStore = defineStore('download', () => {
         if (resolvingRequestTokens.get(track.id) === requestToken) {
           resolvingRequestTokens.delete(track.id)
         }
-        setTaskTerminalStatus(track.id, 'cancelled')
-        queue.finish(track.id)
+        if (attempts.get(track.id) === attempt) setTaskTerminalStatus(track.id, 'cancelled')
+        finishAttempt(track.id, 'cancelled', attempt)
         return
       }
 
@@ -435,15 +525,24 @@ export const useDownloadStore = defineStore('download', () => {
       resolvingCancelled.delete(requestToken)
       const msg = typeof e === 'string' ? e : e?.message || String(e)
       const lowerMsg = msg.toLowerCase()
+      if (attempts.get(track.id) !== attempt) {
+        finishAttempt(track.id, 'cancelled', attempt)
+        return
+      }
+      if (attempt.outcome) return
       if (wasCancelled || lowerMsg.includes('cancelled') || lowerMsg.includes('canceled')) {
         setTaskTerminalStatus(track.id, 'cancelled')
+        finishAttempt(track.id, 'cancelled', attempt)
+      } else if (lowerMsg.includes('already downloaded')) {
+        setTaskTerminalStatus(track.id, 'already_exists')
+        finishAttempt(track.id, 'existing', attempt)
       } else {
         setTaskTerminalStatus(track.id, 'error', msg)
+        finishAttempt(track.id, 'failed', attempt)
       }
-      queue.finish(track.id)
-      if (!wasCancelled && !msg.includes('already downloaded') && !lowerMsg.includes('cancelled') && !lowerMsg.includes('canceled')) {
-        toast.error((i18n.global as any).t('download.download_failed') + `: ${msg}`)
-      }
+    } finally {
+      launching.delete(attempt)
+      scheduleBatchCompletion()
     }
   }
 
@@ -486,8 +585,10 @@ export const useDownloadStore = defineStore('download', () => {
   async function cancelDownload(trackId: string) {
     const current = downloading.value.get(trackId)
     const resolvingToken = resolvingRequestTokens.get(trackId)
-    if (queue.cancelPending(trackId)) {
+    const attempt = attempts.get(trackId)
+    if (attempt && queue.cancelPending(attempt.queueId)) {
       setTaskTerminalStatus(trackId, 'cancelled')
+      finishAttempt(trackId, 'cancelled')
       return true
     }
     if (current?.status === 'cancelling') return true
@@ -530,12 +631,14 @@ export const useDownloadStore = defineStore('download', () => {
   }
 
   async function cancelAllDownloads() {
-    const toast = useToastStore()
-    const visibleActiveCount = Array.from(downloading.value.values())
-      .filter(task => isDownloading(task.trackId))
-      .length
+    const cancelledPending: string[] = []
     for (const task of activeDownloads.value) {
-      if (queue.cancelPending(task.trackId)) setTaskTerminalStatus(task.trackId, 'cancelled')
+      const attempt = attempts.get(task.trackId)
+      if (attempt && queue.cancelPending(attempt.queueId)) cancelledPending.push(task.trackId)
+    }
+    for (const trackId of cancelledPending) {
+      setTaskTerminalStatus(trackId, 'cancelled')
+      finishAttempt(trackId, 'cancelled')
     }
     const resolvingIds = markResolvingTasksCancelled(
       downloading.value.values(),
@@ -561,14 +664,6 @@ export const useDownloadStore = defineStore('download', () => {
         }
         downloading.value = next
       }
-      // 后端任务可能在快照和 cancel_all_downloads 之间注册，按可见任务数去重计数
-      const totalCancelled = Math.max(cancelled, visibleActiveCount)
-      toast.show(
-        totalCancelled > 0
-          ? (i18n.global as any).t('download.cancelled_count', { count: totalCancelled })
-          : (i18n.global as any).t('settings.no_active_downloads'),
-        'info',
-      )
     } catch (e) {
       log.error('Cancel downloads failed:', e)
       for (const { trackId, token } of resolvingIds) {
@@ -579,7 +674,9 @@ export const useDownloadStore = defineStore('download', () => {
           setTaskTerminalStatus(trackId, 'cancelled')
         }
       }
-      toast.error((i18n.global as any).t('download.cancel_failed'))
+      for (const task of activeDownloads.value) {
+        if (isDownloading(task.trackId)) setTaskStatus(task.trackId, task.status, (i18n.global as any).t('download.cancel_failed'))
+      }
     }
   }
 

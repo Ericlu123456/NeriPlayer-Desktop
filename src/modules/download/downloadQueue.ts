@@ -8,6 +8,10 @@ export class DownloadQueue {
     return this.pending.has(id) || this.running.has(id)
   }
 
+  get isIdle(): boolean {
+    return this.pending.size === 0 && this.running.size === 0
+  }
+
   enqueue(id: string, start: () => void): boolean {
     if (this.has(id)) return false
     this.pending.set(id, start)

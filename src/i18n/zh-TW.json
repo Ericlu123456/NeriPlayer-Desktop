@@ -237,6 +237,7 @@
     "sort_ascending": "升冪",
     "sort_descending": "降冪",
     "task_count": "下載任務 ({count})",
+    "batch_finished": "下載任務已結束：成功 {completed} 首，失敗 {failed} 首，取消 {cancelled} 首，已存在 {existing} 首",
     "downloaded": "已下載",
     "downloaded_items": "已下載檔案",
     "download_failed": "下載失敗",

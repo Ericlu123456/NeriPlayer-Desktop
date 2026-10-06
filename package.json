@@ -32,6 +32,7 @@
     "test:download-queue": "node scripts/test-download-queue.mjs",
     "test:download-settings": "node scripts/test-download-settings.mjs",
     "test:download-store": "node scripts/test-download-store.mjs",
+    "test:album-display": "node scripts/test-album-display.mjs",
     "test:local-playlists": "node scripts/test-local-playlists.mjs",
     "test:local-artists": "node scripts/test-local-artists.mjs",
     "test:local-scan-preview": "node scripts/test-local-scan-preview.mjs",

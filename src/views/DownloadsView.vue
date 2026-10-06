@@ -18,6 +18,7 @@ import {
 import { createLogger } from '@/utils/logger'
 import { useSettingsStore } from '@/stores/settings'
 import CustomSelect from '@/components/ui/CustomSelect.vue'
+import { displayAlbum } from '@/modules/library/albumDisplay'
 
 const log = createLogger('downloads-view')
 
@@ -72,7 +73,7 @@ const filteredDownloads = computed(() => {
   const keyword = searchQuery.value.trim().toLowerCase()
   if (!keyword) return sortedDownloads.value
   return sortedDownloads.value.filter((track) => {
-    return [track.title, track.artist, track.album, track.source, track.filePath]
+    return [track.title, track.artist, displayAlbum(track.album), track.source, track.filePath]
       .filter(Boolean)
       .some(value => String(value).toLowerCase().includes(keyword))
   })
@@ -479,8 +480,10 @@ function progressWidth(task: ActiveDownloadTask) {
           :class="`status-${task.status}`"
           @contextmenu.prevent.stop="handleActiveTaskContextMenu($event, task)"
         >
-          <div class="task-icon">
-            <span class="material-symbols-rounded">{{ statusIcon(task) }}</span>
+          <div class="task-icon cover-box">
+            <BilibiliCoverImage :src="task.coverUrl" :alt="task.title">
+              <span class="material-symbols-rounded">{{ statusIcon(task) }}</span>
+            </BilibiliCoverImage>
           </div>
           <div class="task-main">
             <div class="task-topline">
@@ -581,7 +584,7 @@ function progressWidth(task: ActiveDownloadTask) {
 
           <div class="track-info">
             <div class="track-title">{{ track.title }}</div>
-            <div class="track-meta">{{ track.artist || '—' }}<template v-if="track.album"> · {{ track.album }}</template></div>
+            <div class="track-meta">{{ track.artist || '—' }}<template v-if="displayAlbum(track.album)"> · {{ displayAlbum(track.album) }}</template></div>
           </div>
 
           <div class="track-source">{{ sourceLabel(track.source) }}</div>

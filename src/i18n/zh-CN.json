@@ -237,6 +237,7 @@
     "sort_ascending": "升序",
     "sort_descending": "降序",
     "task_count": "下载任务 ({count})",
+    "batch_finished": "下载任务已结束：成功 {completed} 首，失败 {failed} 首，取消 {cancelled} 首，已存在 {existing} 首",
     "downloaded": "已下载",
     "downloaded_items": "已下载文件",
     "download_failed": "下载失败",
