@@ -1194,16 +1194,7 @@ async fn perform_download(
         return Err(AppError::Other("Track already downloaded".into()));
     }
 
-    // 根据 URL 域名动态设置 Referer（复用 player_cmd 逻辑）
-    let referer = if url.contains("bilibili.com") || url.contains("bilivideo.") {
-        "https://www.bilibili.com"
-    } else if url.contains("youtube.com") || url.contains("googlevideo.com") {
-        "https://music.youtube.com"
-    } else if url.contains("qqmusic.qq.com") || url.contains("y.qq.com") {
-        "https://y.qq.com"
-    } else {
-        "https://music.163.com"
-    };
+    let referer = super::player_cmd::playback_referer(&url);
 
     // YouTube googlevideo CDN 校验拉流 UA 与直链 `c=` 客户端一致, 不一致 403;
     // 故 googlevideo 直链按客户端选匹配 UA, 其它平台用桌面 Chrome UA (对齐 player_cmd)

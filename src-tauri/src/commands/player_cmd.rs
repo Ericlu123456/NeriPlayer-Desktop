@@ -586,16 +586,7 @@ pub async fn play_url(
         duration_hint_ms
     );
 
-    // 根据 URL 域名动态设置 Referer
-    let referer = if url.contains("bilibili.com") || url.contains("bilivideo.") {
-        "https://www.bilibili.com"
-    } else if url.contains("youtube.com") || url.contains("googlevideo.com") {
-        "https://music.youtube.com"
-    } else if url.contains("qqmusic.qq.com") || url.contains("y.qq.com") {
-        "https://y.qq.com"
-    } else {
-        "https://music.163.com"
-    };
+    let referer = playback_referer(&url);
 
     let start = std::time::Instant::now();
     let resp = state.http().get(&url)
@@ -1551,8 +1542,22 @@ pub async fn crossfade_file(
     .await
 }
 
-fn playback_referer(url: &str) -> &'static str {
-    if url.contains("bilibili.com") || url.contains("bilivideo.") {
+/// B 站音频流：bilivideo CDN 与 `*.mountaintoys.cn` 边缘节点（对齐 Android BiliStreamUrls）
+fn is_bili_stream_url(url: &str) -> bool {
+    if url.contains("bilibili.com") {
+        return true;
+    }
+    match reqwest::Url::parse(url)
+        .ok()
+        .and_then(|parsed| parsed.host_str().map(str::to_ascii_lowercase))
+    {
+        Some(host) => host.contains("bilivideo.") || host.ends_with(".mountaintoys.cn"),
+        None => url.contains("bilivideo."),
+    }
+}
+
+pub(crate) fn playback_referer(url: &str) -> &'static str {
+    if is_bili_stream_url(url) {
         "https://www.bilibili.com"
     } else if url.contains("youtube.com") || url.contains("googlevideo.com") {
         "https://music.youtube.com"
@@ -2098,10 +2103,24 @@ pub async fn cycle_repeat(state: State<'_, AppState>) -> AppResult<crate::state:
 #[cfg(test)]
 mod tests {
     use super::{
-        claim_generation, is_generation_current, playback_trace_field, stream_length_matches,
-        CachedAudioPlaybackRequest, PlaybackUiTraceRequest,
+        claim_generation, is_generation_current, playback_referer, playback_trace_field,
+        stream_length_matches, CachedAudioPlaybackRequest, PlaybackUiTraceRequest,
     };
     use std::sync::atomic::AtomicU64;
+
+    #[test]
+    fn bilibili_edge_hosts_get_the_bilibili_referer() {
+        for url in [
+            "https://b-demo.edge.mountaintoys.cn/upgcxcode/demo.m4s",
+            "https://upos-sz-mirrorcos.bilivideo.com/upgcxcode/a.m4s",
+            "https://xy1x2x3x4xy.mcdn.bilivideo.cn:4483/upgcxcode/a.m4s",
+        ] {
+            assert_eq!(playback_referer(url), "https://www.bilibili.com", "{url}");
+        }
+        // 只看主机名：路径里出现 mountaintoys 的其他站点不算
+        assert_eq!(playback_referer("https://m701.music.126.net/x.mountaintoys.cn.flac"), "https://music.163.com");
+        assert_eq!(playback_referer("https://rr1.googlevideo.com/videoplayback"), "https://music.youtube.com");
+    }
 
     #[test]
     fn playback_generation_never_moves_backwards() {

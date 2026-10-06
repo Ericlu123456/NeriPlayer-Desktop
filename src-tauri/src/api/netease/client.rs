@@ -822,7 +822,11 @@ fn parse_song_url_response(body: &Value) -> NeteaseSongUrl {
         return unavailable_song_url(NeteasePlaybackUnavailableReason::NoPlayUrl);
     };
 
-    let url = clean_json_string(&data["url"]);
+    // 对齐 Android PlayerUrlResolver：网易云偶尔返回 http 直链，统一改走 https
+    let url = clean_json_string(&data["url"]).map(|url| match url.strip_prefix("http://") {
+        Some(rest) => format!("https://{rest}"),
+        None => url,
+    });
     let unavailable_reason = if url.is_none() {
         let data_code = json_i64(&data["code"]).unwrap_or(-1);
         let cannot_listen_reason = data["freeTrialPrivilege"]["cannotListenReason"]
@@ -1003,6 +1007,15 @@ mod tests {
             result.unavailable_reason,
             Some(NeteasePlaybackUnavailableReason::RequiresLogin)
         );
+    }
+
+    #[test]
+    fn playback_response_upgrades_http_urls_to_https() {
+        let result = parse_song_url_response(&json!({
+            "code": 200,
+            "data": [{ "url": "http://m701.music.126.net/x.flac" }]
+        }));
+        assert_eq!(result.url.as_deref(), Some("https://m701.music.126.net/x.flac"));
     }
 
     #[test]
