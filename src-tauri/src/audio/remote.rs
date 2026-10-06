@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
 use symphonia::core::audio::{AudioBufferRef, SampleBuffer, SignalSpec};
-use symphonia::core::codecs::{Decoder, DecoderOptions, CODEC_TYPE_NULL};
+use symphonia::core::codecs::{self, Decoder, DecoderOptions, CODEC_TYPE_NULL};
 use symphonia::core::errors::Error as SymphoniaError;
 use symphonia::core::formats::{FormatOptions, FormatReader, SeekMode, SeekTo, SeekedTo};
 use symphonia::core::io::{MediaSource, MediaSourceStream, MediaSourceStreamOptions};
@@ -2276,6 +2276,35 @@ fn detect_fragmented_mp4(data: &[u8]) -> bool {
     false
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceAudioInfo {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sample_rate_hz: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    channel_count: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bit_depth: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    codec: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bitrate: Option<u32>,
+}
+
+impl SourceAudioInfo {
+    pub(crate) fn with_encoded_bitrate(mut self, byte_length: Option<u64>, duration: Option<Duration>) -> Self {
+        if self.bitrate.is_none() {
+            if let (Some(bytes), Some(duration)) = (byte_length.filter(|bytes| *bytes > 0), duration.filter(|duration| !duration.is_zero())) {
+                // 压缩音频只能按完整编码文件和真实时长算平均码率，不能用解码后的 PCM 大小
+                let nanos = duration.as_nanos();
+                let kbps = (u128::from(bytes) * 8 * 1_000_000 + nanos / 2) / nanos;
+                self.bitrate = u32::try_from(kbps).ok().filter(|value| *value > 0);
+            }
+        }
+        self
+    }
+}
+
 pub struct SymphoniaAudioDecoder {
     decoder: Box<dyn Decoder>,
     current_frame_offset: usize,
@@ -2288,6 +2317,38 @@ pub struct SymphoniaAudioDecoder {
 }
 
 impl SymphoniaAudioDecoder {
+    pub fn source_audio_info(&self) -> SourceAudioInfo {
+        let params = self.decoder.codec_params();
+        let sample_rate_hz = Some(self.spec.rate).filter(|value| *value > 0);
+        let channel_count = u16::try_from(self.spec.channels.count()).ok().filter(|value| *value > 0);
+        let encoded_width = match params.codec {
+            codecs::CODEC_TYPE_PCM_S8 | codecs::CODEC_TYPE_PCM_U8
+            | codecs::CODEC_TYPE_PCM_ALAW | codecs::CODEC_TYPE_PCM_MULAW => Some(8u32),
+            codecs::CODEC_TYPE_PCM_S16LE | codecs::CODEC_TYPE_PCM_S16BE
+            | codecs::CODEC_TYPE_PCM_U16LE | codecs::CODEC_TYPE_PCM_U16BE => Some(16),
+            codecs::CODEC_TYPE_PCM_S24LE | codecs::CODEC_TYPE_PCM_S24BE
+            | codecs::CODEC_TYPE_PCM_U24LE | codecs::CODEC_TYPE_PCM_U24BE => Some(24),
+            codecs::CODEC_TYPE_PCM_S32LE | codecs::CODEC_TYPE_PCM_S32BE
+            | codecs::CODEC_TYPE_PCM_U32LE | codecs::CODEC_TYPE_PCM_U32BE
+            | codecs::CODEC_TYPE_PCM_F32LE | codecs::CODEC_TYPE_PCM_F32BE => Some(32),
+            codecs::CODEC_TYPE_PCM_F64LE | codecs::CODEC_TYPE_PCM_F64BE => Some(64),
+            _ => None,
+        };
+        let bitrate = encoded_width.and_then(|width| {
+            sample_rate_hz.zip(channel_count).and_then(|(rate, channels)| {
+                let bps = u64::from(rate) * u64::from(channels) * u64::from(width);
+                u32::try_from((bps + 500) / 1_000).ok().filter(|value| *value > 0)
+            })
+        });
+        SourceAudioInfo {
+            sample_rate_hz,
+            channel_count,
+            bit_depth: params.bits_per_sample.filter(|value| *value > 0),
+            codec: get_codecs().get_codec(params.codec).map(|descriptor| descriptor.short_name.to_string()),
+            bitrate,
+        }
+    }
+
     pub fn new(source: Box<dyn MediaSource>, extension: Option<&str>) -> Result<Self, String> {
         let options = MediaSourceStreamOptions {
             buffer_len: REMOTE_DECODER_BUFFER_BYTES,
@@ -4252,6 +4313,8 @@ fn seek_error(message: String) -> PcmSeekError {
 
 #[cfg(test)]
 mod tests {
+    use crate::audio::pcm::PcmSource;
+
     #[test]
     fn android_alignment_completed_aac_reaches_eof_without_virtual_body_waits() {
         let started = std::time::Instant::now();
@@ -4283,13 +4346,160 @@ mod tests {
     };
     use reqwest::header::HeaderValue;
     use std::collections::HashMap;
-    use std::io::{Cursor, Read};
+    use std::io::{Cursor, Read, Write};
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
     use std::sync::{Arc, Condvar, Mutex};
     use std::thread;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
     use symphonia::core::units::{Time, TimeBase};
+
+    fn silent_flac_24bit_stereo() -> Vec<u8> {
+        use symphonia::core::checksum::{Crc16Ansi, Crc8Ccitt};
+        use symphonia::core::io::Monitor;
+        // 单帧常量零 PCM，素材在测试中生成，不读取外部歌曲
+        let mut data = b"fLaC\x80\x00\x00\x22".to_vec();
+        data.extend_from_slice(&16u16.to_be_bytes());
+        data.extend_from_slice(&16u16.to_be_bytes());
+        data.extend_from_slice(&[0; 6]);
+        let stream_info = (96_000u64 << 44) | (1u64 << 41) | (23u64 << 36) | 16;
+        data.extend_from_slice(&stream_info.to_be_bytes());
+        data.extend_from_slice(&[0; 16]);
+        let mut frame = vec![0xff, 0xf8, 0x60, 0x10, 0x00, 0x0f];
+        let mut crc8 = Crc8Ccitt::new(0);
+        crc8.process_buf_bytes(&frame);
+        frame.push(crc8.crc());
+        frame.extend_from_slice(&[0; 8]);
+        let mut crc16 = Crc16Ansi::new(0);
+        crc16.process_buf_bytes(&frame);
+        frame.extend_from_slice(&crc16.crc().to_be_bytes());
+        data.extend(frame);
+        data
+    }
+
+    fn assert_flac_source_info(mut decoder: SymphoniaAudioDecoder) {
+        let info = serde_json::to_value(decoder.source_audio_info()).unwrap();
+        assert_eq!(info["sampleRateHz"], 96_000);
+        assert_eq!(info["channelCount"], 2);
+        assert_eq!(info["bitDepth"], 24);
+        assert_eq!(info["codec"], "flac");
+        assert!(!info.as_object().unwrap().contains_key("bitrate"));
+        let samples: Vec<f32> = decoder.by_ref().collect();
+        assert_eq!(samples.len(), 32);
+        assert!(samples.iter().all(|value| *value == 0.0));
+    }
+
+    #[test]
+    fn stream_audio_info_flac_bytes_preserves_source_bits_before_f32_conversion() {
+        let decoder = SymphoniaAudioDecoder::new(Box::new(Cursor::new(silent_flac_24bit_stereo())), None).unwrap();
+        assert_flac_source_info(decoder);
+    }
+
+    #[test]
+    fn stream_audio_info_file_and_growing_flac_match_the_source_header() {
+        let bytes = silent_flac_24bit_stereo();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("cache.audio");
+        std::fs::write(&path, &bytes).unwrap();
+        let decoder = SymphoniaAudioDecoder::new_file(&path).unwrap();
+        let cache_info = decoder.source_audio_info().with_encoded_bitrate(
+            Some(std::fs::metadata(&path).unwrap().len()), decoder.total_duration(),
+        );
+        assert_eq!(serde_json::to_value(cache_info).unwrap()["bitrate"], 2_832);
+        assert_flac_source_info(decoder);
+        let growing = crate::audio::growing::GrowingAudioBuffer::new();
+        for chunk in bytes.chunks(7) { growing.append(chunk); }
+        growing.finish();
+        assert_flac_source_info(SymphoniaAudioDecoder::new(Box::new(growing.reader()), None).unwrap());
+    }
+
+    #[test]
+    fn stream_audio_info_aac_reports_channels_and_rate_without_inventing_bit_depth() {
+        let growing = crate::audio::growing::GrowingAudioBuffer::new();
+        growing.append(include_bytes!("fixtures/hls-silence.aac"));
+        growing.finish();
+        let decoder = SymphoniaAudioDecoder::new(Box::new(growing.reader()), None).unwrap();
+        let info = serde_json::to_value(decoder.source_audio_info()).unwrap();
+        assert_eq!(info["sampleRateHz"], 48_000);
+        assert_eq!(info["channelCount"], 1);
+        assert_eq!(info["codec"], "aac");
+        assert!(!info.as_object().unwrap().contains_key("bitDepth"));
+        assert!(!info.as_object().unwrap().contains_key("bitrate"));
+        assert_eq!(decoder.count(), 9_216);
+    }
+
+    #[test]
+    fn stream_audio_info_pcm_bitrate_uses_encoded_width_instead_of_f32_output() {
+        let decoder = SymphoniaAudioDecoder::new(Box::new(Cursor::new(pcm_wav(8))), None).unwrap();
+        let info = serde_json::to_value(decoder.source_audio_info()).unwrap();
+        assert_eq!(info["sampleRateHz"], 8_000);
+        assert_eq!(info["channelCount"], 1);
+        assert_eq!(info["bitDepth"], 16);
+        assert_eq!(info["bitrate"], 128);
+        assert_eq!(info["codec"], "pcm_s16le");
+    }
+
+    #[test]
+    fn stream_audio_info_average_bitrate_requires_known_length_and_actual_duration() {
+        let decoder = SymphoniaAudioDecoder::new(Box::new(Cursor::new(silent_flac_24bit_stereo())), None).unwrap();
+        let source_info = decoder.source_audio_info();
+        for (length, duration) in [
+            (Some(59), None),
+            (None, Some(Duration::from_secs(1))),
+            (Some(59), Some(Duration::ZERO)),
+            (Some(0), Some(Duration::from_secs(1))),
+        ] {
+            let info = serde_json::to_value(source_info.clone().with_encoded_bitrate(length, duration)).unwrap();
+            assert!(!info.as_object().unwrap().contains_key("bitrate"));
+        }
+        let info = source_info.with_encoded_bitrate(Some(59), decoder.total_duration());
+        assert_eq!(serde_json::to_value(info).unwrap()["bitrate"], 2_832);
+        let pcm = SymphoniaAudioDecoder::new(Box::new(Cursor::new(pcm_wav(8))), None).unwrap();
+        let info = pcm.source_audio_info().with_encoded_bitrate(Some(1_000_000), Some(Duration::from_secs(1)));
+        assert_eq!(serde_json::to_value(info).unwrap()["bitrate"], 128);
+    }
+
+    #[test]
+    fn stream_audio_info_http_range_flac_uses_the_decoded_source() {
+        let body = silent_flac_24bit_stereo();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let url = format!("http://{}/source.flac", listener.local_addr().unwrap());
+        let server = thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock && Instant::now() < deadline => {
+                        thread::sleep(Duration::from_millis(2));
+                    }
+                    Err(error) => panic!("loopback range server did not receive a request: {error}"),
+                }
+            };
+            stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            let mut request = Vec::new();
+            let mut chunk = [0u8; 1024];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let count = stream.read(&mut chunk).unwrap();
+                assert!(count > 0);
+                request.extend_from_slice(&chunk[..count]);
+            }
+            assert!(String::from_utf8_lossy(&request).to_ascii_lowercase().contains("range: bytes=0-"));
+            let header = format!(
+                "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-{}/{}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len() - 1, body.len(), body.len(),
+            );
+            stream.write_all(header.as_bytes()).unwrap();
+            stream.write_all(&body).unwrap();
+        });
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let source = runtime.block_on(RemoteAudioSource::open(
+            reqwest::Client::builder().no_proxy().build().unwrap(), url,
+            String::new(), None, 0, Arc::new(AtomicU64::new(1)), 1,
+        ));
+        server.join().unwrap();
+        assert_flac_source_info(SymphoniaAudioDecoder::new_remote(source.unwrap()).unwrap());
+    }
 
     fn pcm_wav(sample_count: u32) -> Vec<u8> {
         let data_len = sample_count * 2;

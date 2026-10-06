@@ -53,6 +53,7 @@ import {
 } from '@/modules/playback/playerState'
 import { summarizeLogError } from '@/utils/logSanitizer'
 import { loadLocalAudioInfo } from '@/modules/playback/localAudioInfo'
+import { loadPlaybackAudioInfo, type PlaybackAudioProperties } from '@/modules/playback/playbackAudioInfo'
 
 const log = createLogger('player')
 const uiLog = createLogger('playback-ui')
@@ -372,6 +373,7 @@ export const usePlayerStore = defineStore('player', () => {
 
   // 当前音频质量信息
   const audioInfo = ref<AudioInfo | null>(null)
+  let decodedAudioInfo: { requestGeneration: number; properties: PlaybackAudioProperties } | null = null
   const isPlayingFromDownload = ref(false)
   // 当前会话是否命中播放缓存 (非下载文件)
   const isPlayingFromCache = ref(false)
@@ -1049,8 +1051,35 @@ export const usePlayerStore = defineStore('player', () => {
     void loadLocalAudioInfo(
       path,
       () => requestGeneration === playbackRequestToken && hasPlaybackSession.value,
-      info => { audioInfo.value = info },
+      info => {
+        // 文件属性探测可能晚于解码器信息返回，保留当前会话的真实参数
+        const decoded = decodedAudioInfo?.requestGeneration === requestGeneration
+          ? decodedAudioInfo.properties
+          : undefined
+        if (decoded && typeof info.bitrate === 'number' && Number.isFinite(info.bitrate) && info.bitrate > 0) {
+          delete decoded.bitrate
+        }
+        audioInfo.value = { ...info, ...decoded }
+      },
     ).catch(error => log.warn('local audio properties unavailable:', error))
+  }
+
+  function readPlaybackAudioInfo(requestGeneration: number) {
+    void loadPlaybackAudioInfo(
+      requestGeneration,
+      () => requestGeneration === playbackRequestToken
+        && requestGeneration === loadedPlaybackRequestToken
+        && hasPlaybackSession.value && !isLoadingAudio.value && !_needsReload,
+      info => {
+        const properties = { ...info }
+        const existingBitrate = audioInfo.value?.bitrate
+        if (typeof existingBitrate === 'number' && Number.isFinite(existingBitrate) && existingBitrate > 0) {
+          delete properties.bitrate
+        }
+        decodedAudioInfo = { requestGeneration, properties }
+        audioInfo.value = { ...audioInfo.value, ...properties }
+      },
+    ).catch(error => log.warn('decoded audio properties unavailable:', error))
   }
 
   async function play(
@@ -1227,6 +1256,7 @@ export const usePlayerStore = defineStore('player', () => {
       let playedFromPlaybackCache = false
       playError.value = null
       audioInfo.value = null
+      decodedAudioInfo = null
       isPlayingFromDownload.value = false
       isPlayingFromCache.value = false
 
@@ -1606,6 +1636,7 @@ export const usePlayerStore = defineStore('player', () => {
       }
       // 标记已加载（取消 restore 重载标记）
       _needsReload = false
+      readPlaybackAudioInfo(token)
 
       // 记录播放历史
       if (commandSource === 'local') {

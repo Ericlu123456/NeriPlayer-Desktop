@@ -1160,6 +1160,16 @@ pub async fn release_audio_file(path: String, state: State<'_, AppState>) -> App
 }
 
 #[tauri::command]
+pub async fn get_playback_audio_info(
+    request_generation: u64,
+    state: State<'_, AppState>,
+) -> AppResult<Option<crate::audio::remote::SourceAudioInfo>> {
+    run_player_blocking(Arc::clone(&state.player), move |player| {
+        Ok(player.playback_audio_info(request_generation))
+    }).await
+}
+
+#[tauri::command]
 pub async fn set_speed(speed: f32, state: State<'_, AppState>) -> AppResult<()> {
     state.player.lock().set_speed(speed);
     Ok(())

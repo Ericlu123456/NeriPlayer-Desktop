@@ -15,7 +15,7 @@ use crate::audio::effects::{AudioEffectsParams, EqualizerSource, LoudnessSource}
 use crate::audio::growing::GrowingAudioReader;
 use crate::audio::pcm::PcmSource;
 use crate::audio::remote::{
-    RemoteAudioSource, RemoteReadCancellation, SymphoniaAudioDecoder,
+    RemoteAudioSource, RemoteReadCancellation, SourceAudioInfo, SymphoniaAudioDecoder,
 };
 use crate::error::{AppError, AppResult};
 
@@ -84,6 +84,15 @@ impl AudioSource {
             | Self::File(_, hint)
             | Self::Growing(_, hint, _)
             | Self::Remote(_, hint) => *hint,
+        }
+    }
+
+    fn encoded_byte_length(&self) -> Option<u64> {
+        match self {
+            Self::Bytes(bytes, _) => u64::try_from(bytes.len()).ok(),
+            Self::File(path, _) => std::fs::metadata(path).ok().map(|metadata| metadata.len()),
+            Self::Growing(reader, _, _) => symphonia::core::io::MediaSource::byte_len(reader),
+            Self::Remote(source, _) => Some(source.byte_len()),
         }
     }
 
@@ -195,6 +204,7 @@ enum AudioCmd {
 pub struct PlaybackStarted {
     pub duration_ms: u64,
     pub clock: Arc<PlaybackClock>,
+    pub audio_info: SourceAudioInfo,
 }
 
 pub struct PlaybackClock {
@@ -309,6 +319,7 @@ struct PlaybackSession {
     shared: Arc<PlaybackShared>,
     worker: Option<JoinHandle<()>>,
     duration_ms: u64,
+    audio_info: SourceAudioInfo,
     playback_generation: u64,
 }
 
@@ -650,6 +661,7 @@ pub struct PlayerEngine {
     transition_generation: Arc<AtomicU64>,
     loaded_generation: Option<u64>,
     clock: Option<Arc<PlaybackClock>>,
+    audio_info: Option<SourceAudioInfo>,
 }
 
 impl Default for PlayerEngine {
@@ -690,6 +702,7 @@ impl PlayerEngine {
             transition_generation,
             loaded_generation: None,
             clock: None,
+            audio_info: None,
         }
     }
 
@@ -772,7 +785,17 @@ impl PlayerEngine {
         self.duration_ms = result.duration_ms;
         self.loaded_generation = Some(expected_generation);
         self.clock = Some(result.clock);
+        self.audio_info = Some(result.audio_info);
         Ok(result.duration_ms)
+    }
+
+    pub fn playback_audio_info(&self, request_generation: u64) -> Option<SourceAudioInfo> {
+        if self.loaded_generation == Some(request_generation)
+            && self.playback_generation.load(Ordering::Acquire) == request_generation {
+            self.audio_info.clone()
+        } else {
+            None
+        }
     }
 
     /// 便捷方法：发送命令并阻塞等待（持锁整个过程，仅限内部无并发要求场景）
@@ -934,6 +957,7 @@ impl PlayerEngine {
         self.duration_ms = 0;
         self.loaded_generation = None;
         self.clock = None;
+        self.audio_info = None;
         SharedAudioLevel::reset(&self.shared_audio_level);
     }
 
@@ -1575,6 +1599,7 @@ fn audio_control_loop(
                 let started = PlaybackStarted {
                     duration_ms: next.duration_ms,
                     clock: Arc::clone(&next.shared.clock),
+                    audio_info: next.audio_info.clone(),
                 };
                 let mut previous = current.take();
                 current = Some(next);
@@ -2343,6 +2368,8 @@ fn prepare_session(
         .map(|duration| duration.as_millis() as u64)
         .filter(|duration| *duration > 0)
         .unwrap_or_else(|| source.duration_hint_ms());
+    let audio_info = decoder.source_audio_info()
+        .with_encoded_bitrate(source.encoded_byte_length(), decoder.total_duration());
     let start_position_ms = clamp_position(start_position_ms, duration_ms);
     // 字节跳转路径已经在目标附近顺序打开，不再走 format.seek（它会扫全文件）
     if start_position_ms > 0 && !use_byte_seek {
@@ -2454,6 +2481,7 @@ fn prepare_session(
         shared,
         worker: Some(worker),
         duration_ms,
+        audio_info,
         playback_generation: expected_generation,
     })
 }
@@ -2462,18 +2490,18 @@ fn make_decoder_for_position(
     source: &AudioSource,
     start_position_ms: u64,
     use_byte_seek: bool,
-) -> Result<Box<dyn PcmSource>, String> {
+) -> Result<Box<SymphoniaAudioDecoder>, String> {
     match source {
         AudioSource::Bytes(data, _) => SymphoniaAudioDecoder::new(
             Box::new(Cursor::new(Arc::clone(data))),
             None,
         )
-        .map(|decoder| Box::new(decoder) as Box<dyn PcmSource>),
+        .map(Box::new),
         AudioSource::File(path, _) => SymphoniaAudioDecoder::new_file(Path::new(path))
-            .map(|decoder| Box::new(decoder) as Box<dyn PcmSource>),
+            .map(Box::new),
         AudioSource::Growing(reader, _, _) => {
             SymphoniaAudioDecoder::new(Box::new(reader.clone()), None)
-                .map(|decoder| Box::new(decoder) as Box<dyn PcmSource>)
+                .map(Box::new)
         }
         AudioSource::Remote(reader, _) => {
             if use_byte_seek && start_position_ms > 0 {
@@ -2481,12 +2509,12 @@ fn make_decoder_for_position(
                     .configure_virtual_body_for_time(start_position_ms)
                     .map_err(|error| format!("Could not prepare remote virtual body: {error}"))?;
                 let decoder = SymphoniaAudioDecoder::new_remote_virtual(reader.clone(), true)?;
-                Ok(Box::new(decoder) as Box<dyn PcmSource>)
+                Ok(Box::new(decoder))
             } else {
                 // 普通远程：demuxer open 可隐藏 seekable；无虚拟 body
                 reader.clear_virtual_body();
                 let decoder = SymphoniaAudioDecoder::new_remote(reader.clone())?;
-                Ok(Box::new(decoder) as Box<dyn PcmSource>)
+                Ok(Box::new(decoder))
             }
         }
     }
@@ -3116,6 +3144,7 @@ mod tests {
             seek_generation: Arc::new(AtomicU64::new(0)),
             transition_generation: Arc::new(AtomicU64::new(0)),
             loaded_generation: Some(generation), clock: Some(Arc::new(PlaybackClock::new(42))),
+            audio_info: None,
         }, receiver)
     }
 
@@ -3144,11 +3173,53 @@ mod tests {
         let (mut player, _) = player_without_output(7);
         super::invalidate_released_generation(&player.playback_generation, 7);
         assert_eq!(player.playback_generation.load(Ordering::Acquire), 8);
-        let started = super::PlaybackStarted { duration_ms: 192, clock: Arc::new(PlaybackClock::new(0)) };
+        let started = super::PlaybackStarted {
+            duration_ms: 192, clock: Arc::new(PlaybackClock::new(0)), audio_info: super::SourceAudioInfo::default(),
+        };
         assert!(player.complete_start(started, 7, "released.aac".into()).is_err());
         assert_eq!(player.current_path.as_deref(), Some("other.aac"));
         super::invalidate_released_generation(&player.playback_generation, 7);
         assert_eq!(player.playback_generation.load(Ordering::Acquire), 8);
+    }
+
+    #[test]
+    fn stream_audio_info_commits_only_for_the_current_playback_generation() {
+        let (mut player, _) = player_without_output(8);
+        let decoder = crate::audio::remote::SymphoniaAudioDecoder::new(
+            Box::new(std::io::Cursor::new(include_bytes!("fixtures/hls-silence.aac").as_slice())), None,
+        ).unwrap();
+        let source_audio_info = decoder.source_audio_info();
+        assert!(player.playback_audio_info(8).is_none());
+        let started = super::PlaybackStarted {
+            duration_ms: 192, clock: Arc::new(PlaybackClock::new(0)),
+            audio_info: source_audio_info.clone(),
+        };
+        player.complete_start(started, 8, "__remote__".into()).unwrap();
+        let info = player.playback_audio_info(8).unwrap();
+        assert_eq!(info, source_audio_info);
+        assert!(player.playback_audio_info(7).is_none());
+        player.playback_generation.store(9, Ordering::Release);
+        assert!(player.playback_audio_info(8).is_none());
+        assert!(player.playback_audio_info(9).is_none());
+    }
+
+    #[test]
+    fn stream_audio_info_stop_and_file_release_remove_loaded_properties() {
+        let (mut player, _) = player_without_output(8);
+        let decoder = crate::audio::remote::SymphoniaAudioDecoder::new(
+            Box::new(std::io::Cursor::new(include_bytes!("fixtures/hls-silence.aac").as_slice())), None,
+        ).unwrap();
+        let started = super::PlaybackStarted {
+            duration_ms: 192, clock: Arc::new(PlaybackClock::new(0)),
+            audio_info: decoder.source_audio_info(),
+        };
+        player.complete_start(started.clone(), 8, "__remote__".into()).unwrap();
+        assert!(player.playback_audio_info(8).is_some());
+        player.stop();
+        assert!(player.playback_audio_info(8).is_none());
+        player.complete_start(started, 8, "cached.audio".into()).unwrap();
+        assert!(player.complete_file_release(Some(8)));
+        assert!(player.playback_audio_info(8).is_none());
     }
 
     #[test]
