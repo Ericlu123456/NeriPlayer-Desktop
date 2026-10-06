@@ -5,6 +5,7 @@ use tauri::{AppHandle, Emitter, State};
 use crate::error::{AppError, AppResult};
 use crate::settings::store::{self, AppSettings};
 use crate::state::AppState;
+use crate::sync::failure::{GitHubCooldown, SyncFailure};
 use crate::sync::models::*;
 use crate::sync::manager;
 use crate::library::playlist;
@@ -894,6 +895,14 @@ pub async fn sync_github(
     if !github_sync_configured(&config) {
         return Err(AppError::Api("GitHub sync not configured".into()));
     }
+    // 冷却期内不发任何请求：GitHub 对限流期间的继续请求会延长封禁
+    let cooldown_target = github_cooldown_target(&config);
+    let previous_cooldown = load_github_cooldown(&app);
+    if let Some(cooldown) = previous_cooldown.as_ref().filter(|cooldown| {
+        cooldown.blocks(&cooldown_target, chrono::Utc::now().timestamp_millis())
+    }) {
+        return Err(cooldown.failure().into());
+    }
 
     let (local_data, playlist_epoch) = build_local_sync_snapshot(
         &app,
@@ -934,7 +943,13 @@ pub async fn sync_github(
             })
         },
     )
-    .await)?;
+    .await)
+    .map_err(|error| {
+        github_sync_failed(&app, &config, previous_cooldown.as_ref(), &cooldown_target, error)
+    })?;
+    if previous_cooldown.is_some() {
+        save_github_cooldown(&app, None);
+    }
     let Some(outcome) = outcome else {
         return Ok(deferred_sync_result());
     };
@@ -964,6 +979,92 @@ fn deferred_sync_result() -> SyncResult {
         deferred: true,
         ..Default::default()
     }
+}
+
+const GITHUB_COOLDOWN_KEY: &str = "githubRateLimit";
+
+fn github_cooldown_target(config: &GitHubSyncConfig) -> String {
+    format!("{}/{}", config.owner.trim(), config.repo.trim()).to_ascii_lowercase()
+}
+
+fn load_github_cooldown(app: &AppHandle) -> Option<GitHubCooldown> {
+    app.store(SYNC_STORE)
+        .ok()?
+        .get(GITHUB_COOLDOWN_KEY)
+        .and_then(|value| serde_json::from_value(value).ok())
+}
+
+fn save_github_cooldown(app: &AppHandle, cooldown: Option<&GitHubCooldown>) {
+    let Ok(store) = app.store(SYNC_STORE) else {
+        return;
+    };
+    match cooldown {
+        Some(cooldown) => store.set(GITHUB_COOLDOWN_KEY, serde_json::json!(cooldown)),
+        None => {
+            store.delete(GITHUB_COOLDOWN_KEY);
+        }
+    }
+    let _ = store.save();
+}
+
+/// 限流时记一次冷却，交给前端的错误带上冷却后的重试时间和是否还自动重试
+fn classify_github_sync_failure(
+    error: AppError,
+    previous: Option<&GitHubCooldown>,
+    target: &str,
+    now_ms: i64,
+) -> (AppError, Option<GitHubCooldown>) {
+    match error {
+        AppError::Sync(SyncFailure::GitHubRateLimited { status, retry_at_ms, .. }) => {
+            let cooldown = GitHubCooldown::record(previous, target, status, retry_at_ms, now_ms);
+            (cooldown.failure().into(), Some(cooldown))
+        }
+        error => (error, None),
+    }
+}
+
+/// 只清掉这次被拒的 token：同步途中用户可能已经换上了新 token。owner/repo 保留，方便重新登录
+fn clear_rejected_github_token(current: &mut GitHubSyncConfig, rejected: &GitHubSyncConfig) -> bool {
+    if current.token.is_empty() || current.token != rejected.token {
+        return false;
+    }
+    current.token.clear();
+    true
+}
+
+fn github_sync_failed(
+    app: &AppHandle,
+    config: &GitHubSyncConfig,
+    previous: Option<&GitHubCooldown>,
+    target: &str,
+    error: AppError,
+) -> AppError {
+    if matches!(error, AppError::Sync(SyncFailure::GitHubTokenExpired)) {
+        // 对齐 Android：失效 token 不会自己恢复，清掉后自动同步不再反复请求
+        let cleared = with_config_generations(|generations| {
+            let mut current = load_github_config_unlocked(app);
+            if !clear_rejected_github_token(&mut current, config) {
+                return Ok(());
+            }
+            generations.invalidate(ConfigProvider::GitHub)?;
+            save_github_config_unlocked(app, &current);
+            Ok::<_, AppError>(())
+        });
+        if let Err(clear_error) = cleared {
+            log::warn!(target: "sync", "clearing the rejected GitHub token failed: {clear_error}");
+        }
+        return error;
+    }
+    let (error, cooldown) = classify_github_sync_failure(
+        error,
+        previous,
+        target,
+        chrono::Utc::now().timestamp_millis(),
+    );
+    if let Some(cooldown) = cooldown {
+        save_github_cooldown(app, Some(&cooldown));
+    }
+    error
 }
 
 /// 断开 GitHub 同步
@@ -1555,6 +1656,62 @@ mod tests {
     use crate::auth::state::AuthState;
     use crate::settings::store::AppSettings;
     use crate::sync::models::{GitHubSyncConfig, SyncPreferencesConfig, WebDavSyncConfig};
+
+    #[test]
+    fn github_rate_limits_persist_a_cooldown_but_token_expiry_does_not() {
+        use crate::error::AppError;
+        use crate::sync::failure::SyncFailure;
+        let now = 1_800_000_000_000;
+        let limited = AppError::Sync(SyncFailure::GitHubRateLimited {
+            status: 429,
+            retry_at_ms: now + 30_000,
+            automatic: true,
+        });
+        let (error, cooldown) = super::classify_github_sync_failure(limited, None, "owner/repo", now);
+        let cooldown = cooldown.expect("a rate limit must persist a cooldown");
+        assert_eq!(cooldown.retry_at_ms, now + 60_000, "the first backoff is one minute");
+        assert_eq!(error.to_string(), format!("GITHUB_RATE_LIMITED:{}:1", now + 60_000));
+
+        let (error, cooldown) = super::classify_github_sync_failure(
+            AppError::Sync(SyncFailure::GitHubTokenExpired),
+            Some(&cooldown),
+            "owner/repo",
+            now,
+        );
+        assert!(cooldown.is_none());
+        assert_eq!(error.to_string(), "GITHUB_TOKEN_EXPIRED");
+        assert_eq!(
+            super::github_cooldown_target(&GitHubSyncConfig {
+                owner: " Owner ".into(),
+                repo: "Repo".into(),
+                ..Default::default()
+            }),
+            "owner/repo"
+        );
+    }
+
+    #[test]
+    fn only_the_rejected_github_token_is_cleared() {
+        let rejected = GitHubSyncConfig {
+            token: "old".into(),
+            owner: "owner".into(),
+            repo: "repo".into(),
+            auto_sync: true,
+            ..Default::default()
+        };
+        let mut current = rejected.clone();
+        assert!(super::clear_rejected_github_token(&mut current, &rejected));
+        assert!(current.token.is_empty());
+        assert_eq!((current.owner.as_str(), current.repo.as_str()), ("owner", "repo"));
+        assert!(!super::github_sync_configured(&current));
+
+        let mut replaced = GitHubSyncConfig {
+            token: "new".into(),
+            ..rejected.clone()
+        };
+        assert!(!super::clear_rejected_github_token(&mut replaced, &rejected));
+        assert_eq!(replaced.token, "new", "a token replaced during the sync must survive");
+    }
 
     #[test]
     fn validated_token_without_a_repository_is_not_a_configured_sync_target() {

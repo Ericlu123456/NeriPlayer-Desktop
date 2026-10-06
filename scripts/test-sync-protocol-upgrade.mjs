@@ -40,10 +40,15 @@ const invoke = async (command, args) => {
   if (command === 'import_config') return { success: true, settings: {} }
 }
 const notices = []
+const errors = []
+let errorsExpected = false
 const toast = {
   success() {},
   show(message) { notices.push(message) },
-  error(message) { throw new Error(`Unexpected toast: ${message}`) },
+  error(message) {
+    if (!errorsExpected) throw new Error(`Unexpected toast: ${message}`)
+    errors.push(message)
+  },
 }
 const historyApplications = []
 const historyCommits = []
@@ -597,6 +602,83 @@ for (const provider of ['github', 'webdav']) {
     }
   })
 }
+
+assert.deepEqual(exports.parseSyncFailure('GITHUB_RATE_LIMITED:1234:1'), { code: 'GITHUB_RATE_LIMITED', retryAt: 1234, automatic: true })
+assert.deepEqual(exports.parseSyncFailure('GITHUB_RATE_LIMITED:1234:0'), { code: 'GITHUB_RATE_LIMITED', retryAt: 1234, automatic: false })
+assert.deepEqual(exports.parseSyncFailure('GITHUB_TOKEN_EXPIRED'), { code: 'GITHUB_TOKEN_EXPIRED' })
+assert.equal(exports.parseSyncFailure('GitHub API request failed (403): token lacks repo scope'), null,
+  'ordinary failures that merely mention a token are not treated as expiry')
+
+async function expectingErrors(run) {
+  errorsExpected = true
+  errors.length = 0
+  try {
+    await run()
+  } finally {
+    errorsExpected = false
+  }
+}
+
+await regression('a silent GitHub rate limit stays quiet and retries when the cooldown ends', async current => {
+  approved.add('github')
+  current.github.configured = true
+  current.github.autoSync = true
+  const clock = captureTimers()
+  try {
+    const retryAt = Date.now() + 120_000
+    const transfer = delayInvoke('sync_github')
+    const pending = current.syncGitHub(true)
+    transfer.reject(`GITHUB_RATE_LIMITED:${retryAt}:1`)
+    await pending
+    assert.equal(clock.timers.length, 1)
+    assert.ok(Math.abs(clock.timers[0].delay - 120_000) < 5_000, 'the retry waits for the cooldown')
+    const before = calls.length
+    clock.timers[0].callback()
+    await new Promise(resolve => setImmediate(resolve))
+    assert.ok(calls.slice(before).some(call => call.command === 'sync_github'))
+  } finally {
+    clock.restore()
+  }
+})
+
+await regression('exhausted automatic rate-limit retries notify once in silent mode', async current => {
+  approved.add('github')
+  current.github.configured = true
+  current.github.autoSync = true
+  const clock = captureTimers()
+  try {
+    await expectingErrors(async () => {
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const transfer = delayInvoke('sync_github')
+        const pending = current.syncGitHub(true)
+        transfer.reject('GITHUB_RATE_LIMITED:5000:0')
+        await pending
+      }
+      assert.deepEqual(errors, ['settings.github_rate_limited_stopped'])
+    })
+    assert.equal(clock.timers.length, 0, 'no automatic retry once the budget is spent')
+  } finally {
+    clock.restore()
+  }
+})
+
+await regression('an expired GitHub token is reported even with silent failures and refreshes the config', async current => {
+  approved.add('github')
+  current.github.configured = true
+  current.github.silentFailures = true
+  await vue.nextTick()
+  await expectingErrors(async () => {
+    const transfer = delayInvoke('sync_github')
+    const read = delayInvoke('get_github_sync_config')
+    read.resolve({ configured: false, owner: 'owner', repo: 'repo', autoSync: true })
+    const pending = current.syncGitHub(true)
+    transfer.reject('GITHUB_TOKEN_EXPIRED')
+    await pending
+    assert.deepEqual(errors, ['settings.github_token_expired'])
+  })
+  assert.equal(current.github.configured, false)
+  assert.equal(current.github.repo, 'repo', 'owner and repo survive so the user can reconnect')
+})
 
 await regression('a follow-up requested mid-sync waits for that sync to finish', async current => {
   approved.add('github')

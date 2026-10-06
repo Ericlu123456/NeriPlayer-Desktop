@@ -1,7 +1,8 @@
 // GitHub Contents API 客户端
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
-use reqwest::{Client, RequestBuilder, StatusCode};
+use reqwest::{header::HeaderMap, Client, RequestBuilder, StatusCode};
 
+use super::failure::{github_rate_limit_resume_at, github_rate_limit_retry_at, SyncFailure};
 use crate::error::AppError;
 
 const GITHUB_API_BASE: &str = "https://api.github.com";
@@ -20,6 +21,8 @@ pub enum GitHubApiError {
     ContentConflict { status: u16, message: String },
     #[error("GitHub API request failed ({status}): {message}")]
     Api { status: u16, message: String },
+    #[error("GitHub API rate limited ({status})")]
+    RateLimited { status: u16, retry_at_ms: i64 },
     #[error("Invalid GitHub API response: {0}")]
     InvalidResponse(String),
     #[error("GitHub network error: {0}")]
@@ -43,7 +46,10 @@ impl GitHubApiError {
 impl From<GitHubApiError> for AppError {
     fn from(error: GitHubApiError) -> Self {
         match error {
-            GitHubApiError::TokenExpired => AppError::Api("GitHub token expired or invalid".into()),
+            GitHubApiError::TokenExpired => SyncFailure::GitHubTokenExpired.into(),
+            GitHubApiError::RateLimited { status, retry_at_ms } => {
+                SyncFailure::GitHubRateLimited { status, retry_at_ms, automatic: true }.into()
+            }
             GitHubApiError::NotFound(message) => AppError::NotFound(message),
             GitHubApiError::ContentConflict { status, message } => {
                 AppError::Api(format!("GitHub content conflict ({}): {}", status, message))
@@ -89,9 +95,10 @@ impl GitHubApiClient {
     async fn archive_json(&self, request: RequestBuilder) -> GitHubResult<serde_json::Value> {
         let response = self.request(request).send().await?;
         let status = response.status();
+        let headers = response.headers().clone();
         let body = Self::bounded_body(response, 4 * 1024 * 1024).await?;
         if status == StatusCode::UNAUTHORIZED { return Err(GitHubApiError::TokenExpired); }
-        if !status.is_success() { return Err(api_error(status, String::from_utf8_lossy(&body).into(), "sync archive", true)); }
+        if !status.is_success() { return Err(api_error(status, &headers, String::from_utf8_lossy(&body).into(), "sync archive", true)); }
         serde_json::from_slice(&body).map_err(|error| GitHubApiError::InvalidResponse(format!("invalid archive JSON: {error}")))
     }
 
@@ -114,9 +121,10 @@ impl GitHubApiClient {
             .send().await?;
         let status = response.status();
         if status == StatusCode::NOT_FOUND { return Ok(None); }
+        let headers = response.headers().clone();
         let body = Self::bounded_body(response,maximum).await?;
         if status == StatusCode::UNAUTHORIZED { return Err(GitHubApiError::TokenExpired); }
-        if !status.is_success() { return Err(api_error(status,String::from_utf8_lossy(&body).into(),"read fixed archive",false)); }
+        if !status.is_success() { return Err(api_error(status,&headers,String::from_utf8_lossy(&body).into(),"read fixed archive",false)); }
         Ok(Some(body))
     }
 
@@ -157,15 +165,16 @@ impl GitHubApiClient {
             "variables":{"input":{"repositoryId":head.repository_id,"refUpdates":[{"name":format!("refs/heads/{}",head.branch),"beforeOid":head.sha,"afterOid":commit_sha,"force":false}],"clientMutationId":commit_sha}}
         })).send().await?;
         if response.url()!=&endpoint {return Err(GitHubApiError::InvalidResponse("atomic publication response redirected".into()));}
-        let status=response.status(); let body=Self::bounded_body(response,64*1024).await?;
+        let status=response.status(); let headers=response.headers().clone(); let body=Self::bounded_body(response,64*1024).await?;
         if status==StatusCode::UNAUTHORIZED {return Err(GitHubApiError::TokenExpired);}
-        if !status.is_success() {return Err(api_error(status,String::from_utf8_lossy(&body).into(),"atomic archive publication",true));}
+        if !status.is_success() {return Err(api_error(status,&headers,String::from_utf8_lossy(&body).into(),"atomic archive publication",true));}
         let result:serde_json::Value=serde_json::from_slice(&body).map_err(|_|GitHubApiError::InvalidResponse("invalid GraphQL publication response".into()))?;
         if let Some(errors)=result.get("errors") {
             let errors=errors.as_array().ok_or_else(||GitHubApiError::InvalidResponse("invalid GraphQL errors".into()))?;
             if !errors.is_empty() {
                 let stale=errors.iter().any(|error|error["type"].as_str()==Some("STALE_DATA") || error["extensions"]["code"].as_str()==Some("STALE_DATA"));
                 if stale {return Err(GitHubApiError::ContentConflict{status:409,message:"branch changed before atomic publication".into()});}
+                if errors.iter().any(|error|error["type"].as_str()==Some("RATE_LIMITED")) {return Err(GitHubApiError::RateLimited{status:status.as_u16(),retry_at_ms:github_rate_limit_resume_at(&headers,now_ms())});}
                 return Err(GitHubApiError::Api{status:status.as_u16(),message:"GitHub atomic archive publication failed".into()});
             }
         }
@@ -207,13 +216,14 @@ impl GitHubApiClient {
             .send()
             .await?;
         let status = response.status();
+        let headers = response.headers().clone();
         let body = response.text().await?;
 
         if status == StatusCode::UNAUTHORIZED {
             return Err(GitHubApiError::TokenExpired);
         }
         if !status.is_success() {
-            return Err(api_error(status, body, "validate token", false));
+            return Err(api_error(status, &headers, body, "validate token", false));
         }
 
         let value: serde_json::Value = serde_json::from_str(&body).map_err(|error| {
@@ -240,6 +250,7 @@ impl GitHubApiClient {
             .send()
             .await?;
         let status = response.status();
+        let headers = response.headers().clone();
         let response_body = response.text().await?;
 
         if status == StatusCode::UNAUTHORIZED {
@@ -251,7 +262,7 @@ impl GitHubApiClient {
         {
             return Ok(());
         }
-        Err(api_error(status, response_body, "create repository", false))
+        Err(api_error(status, &headers, response_body, "create repository", false))
     }
 
     /// 检查仓库是否存在，返回默认分支名
@@ -264,6 +275,7 @@ impl GitHubApiClient {
             .send()
             .await?;
         let status = response.status();
+        let headers = response.headers().clone();
         let body = response.text().await?;
 
         if status == StatusCode::UNAUTHORIZED {
@@ -273,7 +285,7 @@ impl GitHubApiClient {
             return Err(GitHubApiError::NotFound(format!("{}/{}", owner, repo)));
         }
         if !status.is_success() {
-            return Err(api_error(status, body, "check repository", false));
+            return Err(api_error(status, &headers, body, "check repository", false));
         }
 
         let value: serde_json::Value = serde_json::from_str(&body).map_err(|error| {
@@ -305,6 +317,7 @@ impl GitHubApiClient {
             .send()
             .await?;
         let status = response.status();
+        let headers = response.headers().clone();
         let body = response.text().await?;
 
         if status == StatusCode::NOT_FOUND {
@@ -314,7 +327,7 @@ impl GitHubApiClient {
             return Err(GitHubApiError::TokenExpired);
         }
         if !status.is_success() {
-            return Err(api_error(status, body, "get file", false));
+            return Err(api_error(status, &headers, body, "get file", false));
         }
 
         let value: serde_json::Value = serde_json::from_str(&body).map_err(|error| {
@@ -389,8 +402,9 @@ impl GitHubApiClient {
             return Err(GitHubApiError::NotFound(path.to_string()));
         }
         if !status.is_success() {
+            let headers = response.headers().clone();
             let body = response.text().await?;
-            return Err(api_error(status, body, "get raw file", false));
+            return Err(api_error(status, &headers, body, "get raw file", false));
         }
 
         let bytes = response.bytes().await?;
@@ -435,13 +449,14 @@ impl GitHubApiClient {
             .send()
             .await?;
         let status = response.status();
+        let headers = response.headers().clone();
         let response_body = response.text().await?;
 
         if status == StatusCode::UNAUTHORIZED {
             return Err(GitHubApiError::TokenExpired);
         }
         if !status.is_success() {
-            return Err(api_error(status, response_body, "update file", true));
+            return Err(api_error(status, &headers, response_body, "update file", true));
         }
 
         let value: serde_json::Value = serde_json::from_str(&response_body).map_err(|error| {
@@ -462,12 +477,20 @@ fn required_json_string(value:&serde_json::Value,key:&str)->GitHubResult<String>
     value.get(key).and_then(serde_json::Value::as_str).filter(|text|!text.is_empty()).map(String::from).ok_or_else(||GitHubApiError::InvalidResponse(format!("missing {key}")))
 }
 
+fn now_ms() -> i64 {
+    chrono::Utc::now().timestamp_millis()
+}
+
 fn api_error(
     status: StatusCode,
+    headers: &HeaderMap,
     body: String,
     operation: &str,
     detect_content_conflict: bool,
 ) -> GitHubApiError {
+    if let Some(retry_at_ms) = github_rate_limit_retry_at(status.as_u16(), headers, &body, now_ms()) {
+        return GitHubApiError::RateLimited { status: status.as_u16(), retry_at_ms };
+    }
     let message = safe_api_error_message(status, &body, operation);
     let status = status.as_u16();
     if detect_content_conflict

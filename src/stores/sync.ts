@@ -109,6 +109,39 @@ export function parseSyncProtocolUpgrade(error: unknown): SyncProtocolUpgrade | 
   }
 }
 
+/** Rust 侧 SyncFailure 的稳定代码（src-tauri/src/sync/failure.rs） */
+export type SyncFailure =
+  | { code: 'GITHUB_TOKEN_EXPIRED' }
+  | { code: 'GITHUB_RATE_LIMITED', retryAt: number, automatic: boolean }
+
+export function parseSyncFailure(error: unknown): SyncFailure | null {
+  const message = String(error ?? '')
+  if (message.includes('GITHUB_TOKEN_EXPIRED')) return { code: 'GITHUB_TOKEN_EXPIRED' }
+  const limited = /GITHUB_RATE_LIMITED:(\d+):([01])/.exec(message)
+  if (limited) return { code: 'GITHUB_RATE_LIMITED', retryAt: Number(limited[1]), automatic: limited[2] === '1' }
+  return null
+}
+
+function formatRetryTime(at: number): string {
+  const locale = String((i18n.global as any).locale?.value ?? '') || undefined
+  return new Date(at).toLocaleTimeString(locale, { hour: '2-digit', minute: '2-digit' })
+}
+
+/** 带稳定代码的失败换成本地化文案，其余保留后端原文 */
+export function describeSyncError(error: unknown, fallback = 'Sync failed'): string {
+  const failure = parseSyncFailure(error)
+  switch (failure?.code) {
+    case 'GITHUB_TOKEN_EXPIRED':
+      return t('settings.github_token_expired')
+    case 'GITHUB_RATE_LIMITED':
+      return t(failure.automatic ? 'settings.github_rate_limited' : 'settings.github_rate_limited_stopped', {
+        time: formatRetryTime(failure.retryAt),
+      })
+    default:
+      return String(error || fallback)
+  }
+}
+
 export const useSyncStore = defineStore('sync', () => {
   const github = ref<GitHubSyncConfig>({
     configured: false, owner: '', repo: '',
@@ -165,7 +198,7 @@ export const useSyncStore = defineStore('sync', () => {
 
   function configurationFailed(backend: SyncProtocolUpgrade['backend'], generation: number, error: unknown, fallback: string) {
     if (isCurrentConfiguration(backend, generation) && dialogOwner === backend) {
-      dialogError.value = String(error || fallback)
+      dialogError.value = describeSyncError(error, fallback)
     }
   }
 
@@ -453,11 +486,25 @@ export const useSyncStore = defineStore('sync', () => {
         rememberProtocolUpgrade(upgrade)
         return
       }
+      const failure = parseSyncFailure(e)
+      if (failure?.code === 'GITHUB_TOKEN_EXPIRED') {
+        // 后端已清掉失效的 token：这类失败不会自己恢复，静默同步也要提示，再刷新成未连接状态
+        toast.error(describeSyncError(e))
+        await loadConfigs()
+        return
+      }
+      if (failure?.code === 'GITHUB_RATE_LIMITED') {
+        if (failure.automatic) scheduleRateLimitRetry(failure.retryAt)
+        // 自动同步撞上限流不打扰用户，自动重试用完时只提示一次
+        if (!silent || (!failure.automatic && rateLimitNoticeAt !== failure.retryAt)) {
+          rateLimitNoticeAt = failure.retryAt
+          toast.error(describeSyncError(e))
+        }
+        return
+      }
       // 错误始终显示（除非 silentFailures 开启）
-      const message = e?.toString() || 'Sync failed'
-      const tokenExpired = /token|unauthorized|401|expired/i.test(message)
-      if (!silent || !github.value.silentFailures || tokenExpired) {
-        toast.error(message)
+      if (!silent || !github.value.silentFailures) {
+        toast.error(describeSyncError(e))
       }
     } finally {
       isSyncing.value = false
@@ -559,7 +606,7 @@ export const useSyncStore = defineStore('sync', () => {
         return
       }
       if (!webdav.value.autoSync || !silent) {
-        toast.error(e?.toString() || 'Sync failed')
+        toast.error(describeSyncError(e))
       }
     } finally {
       isSyncing.value = false
@@ -593,6 +640,23 @@ export const useSyncStore = defineStore('sync', () => {
     if (webdav.value.configured && webdav.value.autoSync) {
       await syncWebDav(silent)
     }
+  }
+
+  let rateLimitTimer: ReturnType<typeof setTimeout> | null = null
+  let rateLimitRetryAt = 0
+  let rateLimitNoticeAt = 0
+
+  /** 限流冷却结束时自动重试 GitHub 同步（对齐 Android GitHubRateLimitedWorkerHost） */
+  function scheduleRateLimitRetry(retryAt: number) {
+    if (rateLimitTimer && rateLimitRetryAt >= retryAt) return
+    if (rateLimitTimer) clearTimeout(rateLimitTimer)
+    rateLimitRetryAt = retryAt
+    rateLimitTimer = setTimeout(() => {
+      rateLimitTimer = null
+      if (!github.value.configured || !github.value.autoSync) return
+      if (isSyncing.value) requestFollowUpSync(['github'])
+      else void syncGitHub(true)
+    }, Math.max(1_000, retryAt - Date.now()))
   }
 
   const followUpBackends = new Set<SyncBackend>()
@@ -637,7 +701,7 @@ export const useSyncStore = defineStore('sync', () => {
       else await syncWebDav()
     } catch (error) {
       if (!isCurrentConfiguration(challenge.backend, generation)) return
-      useToastStore().error(String(error))
+      useToastStore().error(describeSyncError(error))
     } finally {
       isSyncing.value = false
       scheduleFollowUpSync()

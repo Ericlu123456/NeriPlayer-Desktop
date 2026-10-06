@@ -30,6 +30,9 @@ pub enum AppError {
     Api(String),
 
     #[error("{0}")]
+    Sync(#[from] crate::sync::failure::SyncFailure),
+
+    #[error("{0}")]
     Other(String),
 }
 
