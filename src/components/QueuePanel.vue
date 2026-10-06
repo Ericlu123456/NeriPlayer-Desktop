@@ -140,7 +140,7 @@ function handleQueueContextMenuClick(item: ContextMenuActionItem) {
       <div v-else class="queue-list">
         <div
           v-for="(track, index) in player.queue"
-          :key="track.id + index"
+          :key="`${index}:${track.id}`"
           class="queue-item"
           :class="{ active: index === player.queueIndex }"
           @click="playFromQueue(index)"

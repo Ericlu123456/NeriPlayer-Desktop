@@ -19,6 +19,7 @@ import AddToPlaylistDialog from '@/components/AddToPlaylistDialog.vue'
 import BilibiliCoverImage from '@/components/BilibiliCoverImage.vue'
 import ContextMenu from '@/components/ui/ContextMenu.vue'
 import LocateTrackFab from '@/components/LocateTrackFab.vue'
+import TrackSelectionToolbar from '@/components/TrackSelectionToolbar.vue'
 import { useLocateCurrentTrack } from '@/composables/useLocateCurrentTrack'
 import {
   createContextMenuItem,
@@ -152,8 +153,14 @@ const renderCount = ref(RENDER_CHUNK)
 const visibleTracks = computed(() => filteredTracks.value.slice(0, renderCount.value))
 const hasMoreTracks = computed(() => renderCount.value < filteredTracks.value.length)
 
+// 删除、重排、收藏触发的静默刷新都会替换列表：保留已展开的行数，只有换关键词才回到首批
+let renderedQuery = searchQuery.value
 watch(filteredTracks, (list) => {
-  renderCount.value = Math.min(RENDER_CHUNK, list.length)
+  const queryChanged = searchQuery.value !== renderedQuery
+  renderedQuery = searchQuery.value
+  renderCount.value = queryChanged
+    ? Math.min(RENDER_CHUNK, list.length)
+    : Math.min(list.length, Math.max(renderCount.value, RENDER_CHUNK))
 })
 
 function expandVisibleTracks(extra = RENDER_CHUNK) {
@@ -371,7 +378,7 @@ async function confirmRemove() {
       const ids = [...selectedIds.value]
       await invoke('remove_tracks_from_playlist', { playlistId: id, trackIds: ids })
       tracks.value = tracks.value.filter(t => !selectedIds.value.has(trackSelectionKey(t)))
-      toast.success(`已移除 ${ids.length} 首歌曲`)
+      toast.success(t('library.removed_tracks', { count: ids.length }))
       leaveSelectionMode()
     } else if (removeTarget.value) {
       const trackKey = trackSelectionKey(removeTarget.value)
@@ -380,6 +387,7 @@ async function confirmRemove() {
     }
   } catch (e) {
     log.error('Remove failed:', e)
+    toast.error(t('library.remove_tracks_failed'))
   } finally {
     isBatchRemoving.value = false
     showRemoveDialog.value = false
@@ -741,7 +749,7 @@ async function onTrackDragPointerUp(e: PointerEvent) {
   } catch (e) {
     tracks.value = previousTracks
     log.error('Reorder playlist tracks failed:', e)
-    toast.error(t('player.load_failed'))
+    toast.error(t('library.track_order_save_failed'))
   } finally {
     isPersistingTrackOrder.value = false
   }
@@ -754,7 +762,7 @@ function playSelected() {
 
 function addSelectedToQueueEnd() {
   for (const track of selectedTracks.value) player.addToQueueEnd(track)
-  toast.success(`已添加 ${selectedTracks.value.length} 首到队列`)
+  toast.success(t('player.added_to_queue_count', { count: selectedTracks.value.length }))
 }
 
 function downloadSelected() {
@@ -897,41 +905,26 @@ onUnmounted(() => {
       </div>
 
       <div v-if="filteredTracks.length === 0" class="state-center">
-        <p>{{ t('player.empty_playlist') }}</p>
+        <p>{{ searchQuery.trim() && tracks.length > 0 ? t('player.no_results') : t('player.empty_playlist') }}</p>
       </div>
       <template v-else>
-        <div v-if="selectionMode" class="selection-toolbar">
-          <div class="selection-count">{{ t('common.selected_count', { count: selectedCount }) }}</div>
-          <button class="selection-btn" @click="toggleSelectAllVisible">
-            <span class="material-symbols-rounded">{{ allVisibleSelected ? 'deselect' : 'select_all' }}</span>
-            {{ allVisibleSelected ? '取消全选' : '全选当前' }}
-          </button>
-          <button class="selection-btn" @click="invertSelectionVisible">
-            <span class="material-symbols-rounded">flip</span>
-            {{ t('common.invert_selection') }}
-          </button>
-          <button class="selection-btn" :disabled="selectedCount === 0" @click="playSelected">
-            <span class="material-symbols-rounded filled">play_arrow</span>
-            播放
-          </button>
-          <button class="selection-btn" :disabled="selectedCount === 0" @click="addSelectedToQueueEnd">
-            <span class="material-symbols-rounded">add_to_queue</span>
-            加到队尾
-          </button>
-          <button class="selection-btn" :disabled="selectedCount === 0" @click="openBatchAddToPlaylist">
-            <span class="material-symbols-rounded">playlist_add</span>
-            加到歌单
-          </button>
-          <button class="selection-btn" :disabled="selectedCount === 0" @click="downloadSelected">
-            <span class="material-symbols-rounded">download</span>
-            下载
-          </button>
-          <button class="selection-btn danger" :disabled="selectedCount === 0" @click="requestBatchRemove">
-            <span class="material-symbols-rounded">delete</span>
-            移除
-          </button>
-          <button class="selection-btn ghost" @click="leaveSelectionMode">取消</button>
-        </div>
+        <TrackSelectionToolbar
+          v-if="selectionMode"
+          class="sticky-selection-toolbar"
+          :selected-count="selectedCount"
+          :visible-selected-count="visibleSelectedCount"
+          :all-visible-selected="allVisibleSelected"
+          show-delete
+          :delete-label="t('common.remove_selected')"
+          @select-all="toggleSelectAllVisible"
+          @invert-selection="invertSelectionVisible"
+          @play="playSelected"
+          @queue="addSelectedToQueueEnd"
+          @playlist="openBatchAddToPlaylist"
+          @download="downloadSelected"
+          @delete="requestBatchRemove"
+          @exit="leaveSelectionMode"
+        />
         <div ref="trackListRef" class="track-list">
         <div
           class="drop-indicator"
@@ -1023,14 +1016,14 @@ onUnmounted(() => {
     <!-- 删除确认对话框 -->
     <M3Dialog
       v-model:open="showRemoveDialog"
-      :title="removeMode === 'batch' ? '批量移除歌曲' : t('library.remove_from_playlist')"
+      :title="removeMode === 'batch' ? t('library.batch_remove_title') : t('library.remove_from_playlist')"
       icon="delete"
-      :confirm-text="removeMode === 'batch' ? '移除选中' : t('library.remove_from_playlist')"
+      :confirm-text="removeMode === 'batch' ? t('common.remove_selected') : t('library.remove_from_playlist')"
       :confirm-disabled="isBatchRemoving"
       confirm-danger
       @confirm="confirmRemove"
     >
-      <p class="dialog-msg">{{ removeMode === 'batch' ? `确定要从当前歌单移除选中的 ${selectedCount} 首歌曲吗？` : t('library.remove_confirm_msg', { name: removeTarget?.title || '' }) }}</p>
+      <p class="dialog-msg">{{ removeMode === 'batch' ? t('library.batch_remove_confirm', { count: selectedCount }) : t('library.remove_confirm_msg', { name: removeTarget?.title || '' }) }}</p>
     </M3Dialog>
 
     <AddToPlaylistDialog v-model:open="showAddToPlaylist" :track="addToPlaylistTarget" :tracks="addToPlaylistTargets" />
@@ -1041,65 +1034,11 @@ onUnmounted(() => {
 @use '@/styles/detail-view.scss' as *;
 
 
-.selection-toolbar {
+.sticky-selection-toolbar {
   position: sticky;
   /* 排在常驻 detail-header（56px 高）之下，避免两个 sticky 叠死在同一位置 */
   top: 60px;
   z-index: 10;
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 8px;
-  padding: 10px 12px;
-  margin: 0 0 10px;
-  border-radius: 18px;
-  /* 与常驻顶栏同一套毛玻璃配方，两块浮动卡片叠放时质感一致 */
-  background: color-mix(in srgb, var(--md-surface-container-high) 70%, transparent);
-  -webkit-backdrop-filter: blur(24px) saturate(1.5);
-  backdrop-filter: blur(24px) saturate(1.5);
-}
-/* Linux WebKitGTK 无 backdrop-filter 时给不透明底色，避免列表穿透 */
-@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
-  .selection-toolbar {
-    background: var(--md-surface-container-high);
-  }
-}
-
-.selection-count {
-  padding: 0 8px;
-  margin-right: auto;
-  font-size: 13px;
-  font-weight: 700;
-  color: var(--md-primary);
-}
-
-.selection-btn {
-  height: 34px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 5px;
-  padding: 0 12px;
-  border-radius: var(--radius-full);
-  background: var(--md-surface-container-highest);
-  color: var(--md-on-surface-variant);
-  font-size: 12px;
-  font-weight: 700;
-  transition: background var(--duration-short), color var(--duration-short), opacity var(--duration-short), transform var(--duration-short);
-
-  .material-symbols-rounded { font-size: 18px; }
-  &:hover:not(:disabled) { background: var(--md-secondary-container); color: var(--md-on-secondary-container); }
-  &:active:not(:disabled) { transform: scale(0.97); }
-  &:disabled { opacity: 0.42; cursor: not-allowed; }
-
-  &.danger {
-    color: var(--md-error);
-    background: color-mix(in srgb, var(--md-error) 10%, transparent);
-  }
-
-  &.ghost {
-    background: transparent;
-  }
 }
 
 .track-select {

@@ -451,7 +451,7 @@ onMounted(() => {
 
       <!-- 歌曲列表 -->
       <div v-if="filteredTracks.length === 0" class="state-center">
-        <p>{{ t('player.empty_playlist') }}</p>
+        <p>{{ searchQuery.trim() && tracks.length > 0 ? t('player.no_results') : t('player.empty_playlist') }}</p>
       </div>
       <div v-else>
         <TrackSelectionToolbar

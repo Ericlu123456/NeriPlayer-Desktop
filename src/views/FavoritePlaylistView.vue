@@ -25,6 +25,7 @@ const player = usePlayerStore()
 const { t } = useI18n()
 
 const loading = ref(true)
+const loadFailed = ref(false)
 const name = ref('')
 const source = ref('')
 const coverUrl = ref('')
@@ -43,6 +44,7 @@ function platformLabel(value: string): string {
 
 async function load() {
   loading.value = true
+  loadFailed.value = false
   try {
     const raw = await invoke<any[]>('list_favorite_playlists')
     const found = (raw || []).find((item: any) => String(item?.id ?? '') === favoriteId.value)
@@ -62,6 +64,7 @@ async function load() {
   } catch (e) {
     log.error('load favorite playlist failed:', e)
     tracks.value = []
+    loadFailed.value = true
   } finally {
     loading.value = false
   }
@@ -146,6 +149,12 @@ onMounted(load)
 
     <div v-if="loading" class="empty-state">
       <span class="material-symbols-rounded spinning">progress_activity</span>
+    </div>
+
+    <div v-else-if="loadFailed" class="empty-state">
+      <span class="material-symbols-rounded">error</span>
+      <p>{{ t('player.load_failed') }}</p>
+      <button class="retry-btn" @click="load">{{ t('player.retry') }}</button>
     </div>
 
     <div v-else-if="tracks.length === 0" class="empty-state">

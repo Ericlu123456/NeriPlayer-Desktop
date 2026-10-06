@@ -265,6 +265,7 @@ function handleTrackMenuClick(item: ContextMenuActionItem) {
         @download="downloadSelected"
         @exit="leaveSelectionMode"
       />
+      <div v-if="filteredEntries.length === 0" class="search-empty">{{ t('player.no_results') }}</div>
       <div class="track-list">
         <div
           v-for="(entry, index) in filteredEntries"
@@ -349,6 +350,13 @@ function handleTrackMenuClick(item: ContextMenuActionItem) {
   align-items: center;
   gap: 8px;
   margin-bottom: 16px;
+}
+
+.search-empty {
+  padding: 40px 0;
+  text-align: center;
+  font-size: 14px;
+  color: var(--md-on-surface-variant);
 }
 
 .action-btn {

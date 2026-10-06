@@ -52,8 +52,11 @@ const {
   toggleSelected, toggleSelectAllVisible, invertSelectionVisible, leaveSelectionMode, pruneSelection,
 } = useTrackSelection(tracks, filteredTracks)
 
-watch(filteredTracks, () => {
+// 标签保存、歌单索引刷新也会替换结果；只有筛选条件变化才收起「显示更多」
+watch([query, metadataOnly, hideExisting, hideDuplicates], () => {
   visibleLimit.value = 100
+})
+watch(filteredTracks, () => {
   // 隐藏后的文件不应继续被导入，否则筛选按钮的含义会变得不明确
   const visibleIds = new Set(filteredTracks.value.map(track => track.id))
   selectedIds.value = new Set([...selectedIds.value].filter(id => visibleIds.has(id)))
