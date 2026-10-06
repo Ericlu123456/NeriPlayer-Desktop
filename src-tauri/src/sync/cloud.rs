@@ -92,22 +92,46 @@ async fn github_snapshot(
             )
             .await?
         {
-            let data = serializer::deserialize(&content)?;
-            let challenge = Some(SyncProtocolUpgrade::new(
-                "github",
-                github_target(config, head),
-                &content,
-                0,
-            ));
-            return Ok(Some(Snapshot {
-                data,
-                paths: HashSet::new(),
-                protocol: 0,
-                challenge,
-            }));
+            let snapshot = legacy_snapshot("github", github_target(config, head), &content, |path| async move {
+                api.get_file_at_ref(&config.owner, &config.repo, &path, &head.sha, archive::MAX_OBJECT_BYTES)
+                    .await?
+                    .ok_or_else(|| AppError::Other("GitHub archive closure has a missing object".into()))
+            })
+            .await?;
+            return Ok(Some(snapshot));
         }
     }
     Ok(None)
+}
+
+/// 旧文件名下读到的内容：通常是旧版单文件备份，也可能是 Android 写在旧文件名下的归档清单。
+/// 后者按归档读出，并一律当作旧协议，强制发布到正式的清单文件名（对齐 Android）
+async fn legacy_snapshot<F, Fut>(
+    backend: &str,
+    target: String,
+    content: &[u8],
+    fetch: F,
+) -> AppResult<Snapshot>
+where
+    F: Fn(String) -> Fut,
+    Fut: std::future::Future<Output = AppResult<Vec<u8>>>,
+{
+    if archive::is_manifest(content) {
+        let loaded = archive::load(content, fetch).await?;
+        return Ok(Snapshot {
+            challenge: (loaded.protocol != 4)
+                .then(|| SyncProtocolUpgrade::new(backend, target, content, loaded.protocol)),
+            protocol: loaded.protocol.min(3),
+            data: loaded.data,
+            paths: loaded.paths,
+        });
+    }
+    Ok(Snapshot {
+        data: serializer::deserialize(content)?,
+        paths: HashSet::new(),
+        protocol: 0,
+        challenge: Some(SyncProtocolUpgrade::new(backend, target, content, 0)),
+    })
 }
 
 async fn webdav_snapshot(
@@ -139,22 +163,14 @@ async fn webdav_snapshot(
         return Ok((Some(file), Some(snapshot)));
     }
     if let Some(file) = api.get("neriplayer-sync.json", lease, LEGACY_BYTES).await? {
-        let data = serializer::deserialize(&file.content)?;
-        let challenge = Some(SyncProtocolUpgrade::new(
-            "webdav",
-            api.target(),
-            &file.content,
-            0,
-        ));
-        return Ok((
-            None,
-            Some(Snapshot {
-                data,
-                paths: HashSet::new(),
-                protocol: 0,
-                challenge,
-            }),
-        ));
+        let snapshot = legacy_snapshot("webdav", api.target(), &file.content, |path| async move {
+            api.get(&path, lease, archive::MAX_OBJECT_BYTES)
+                .await?
+                .map(|file| file.content)
+                .ok_or_else(|| AppError::Other("WebDAV archive closure has a missing object".into()))
+        })
+        .await?;
+        return Ok((None, Some(snapshot)));
     }
     Ok((None, None))
 }
@@ -459,11 +475,8 @@ async fn webdav_with_epoch_guard(
                         verified,
                     ));
                 }
-                Err(error)
-                    if webdav_archive::is_conflict(&error)
-                        && lease.is_none()
-                        && attempt < RETRIES =>
-                {
+                // 持锁时也可能遇到不认锁的写入者，同样重读重合并（对齐 Android SyncUploadRetryExecutor）
+                Err(error) if webdav_archive::is_conflict(&error) && attempt < RETRIES => {
                     tokio::time::sleep(std::time::Duration::from_millis(200 * (attempt as u64 + 1)))
                         .await
                 }
@@ -631,6 +644,34 @@ mod tests {
             LegacyServerResult { requests, files }
         });
         LegacyServer { http, config, challenge, shutdown, task }
+    }
+
+    #[tokio::test]
+    async fn a_manifest_under_a_legacy_name_is_loaded_as_an_archive_and_republished() {
+        let prepared = archive::prepare(&SyncData::default(), None).unwrap();
+        let objects = prepared.objects.clone();
+        let snapshot = legacy_snapshot("webdav", "target".into(), &prepared.content, |path| {
+            std::future::ready(
+                objects
+                    .get(&path)
+                    .cloned()
+                    .ok_or_else(|| AppError::Other("fixture closure missing".into())),
+            )
+        })
+        .await
+        .unwrap();
+        assert_eq!(snapshot.protocol, 3, "a misplaced manifest must be republished under the real name");
+        assert!(snapshot.challenge.is_none(), "current-format content needs no upgrade confirmation");
+        assert_eq!(snapshot.paths, prepared.objects.keys().cloned().collect::<HashSet<_>>());
+
+        let legacy = serde_json::to_vec(&SyncData::default()).unwrap();
+        let snapshot = legacy_snapshot("webdav", "target".into(), &legacy, |_| {
+            std::future::ready(Err(AppError::Other("a JSON backup has no closure".into())))
+        })
+        .await
+        .unwrap();
+        assert_eq!(snapshot.protocol, 0);
+        assert_eq!(snapshot.challenge.map(|challenge| challenge.source_protocol), Some(0));
     }
 
     #[tokio::test]
