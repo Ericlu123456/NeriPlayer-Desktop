@@ -12,6 +12,11 @@ function cacheKey(track: TrackInfo) {
   return `${LYRICS_CACHE_VERSION}:${lyricsIdentity(track)}`
 }
 
+// 本地文件每次都重新读取 .lrc / 内嵌歌词（对齐 Android），否则编辑后的歌词最长 30 天都看不到
+function bypassesCache(track: TrackInfo): boolean {
+  return track.source === 'local' || track.id.startsWith('local:')
+}
+
 function normalizeLyricLine(line: LyricLine): LyricLine {
   return {
     startMs: Number(line.startMs || 0),
@@ -37,6 +42,7 @@ function hasVisibleLyric(lines: LyricLine[]): boolean {
 }
 
 export async function getCachedLyrics(track: TrackInfo): Promise<LyricLine[] | null> {
+  if (bypassesCache(track)) return null
   const cached = await getCachedValue<LyricLine[]>('lyrics', cacheKey(track), LYRICS_CACHE_MAX_AGE_MS)
   if (!Array.isArray(cached)) return null
 
@@ -45,6 +51,7 @@ export async function getCachedLyrics(track: TrackInfo): Promise<LyricLine[] | n
 }
 
 export async function saveCachedLyrics(track: TrackInfo, lines: LyricLine[]) {
+  if (bypassesCache(track)) return
   const normalized = lines.map(normalizeLyricLine)
   if (!hasVisibleLyric(normalized)) {
     await clearCachedLyrics(track)

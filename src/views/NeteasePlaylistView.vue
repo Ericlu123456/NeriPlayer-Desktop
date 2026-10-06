@@ -2,6 +2,7 @@
 import { ref, computed, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { usePlayerStore, type TrackInfo } from '@/stores/player'
+import { useAuthStore } from '@/stores/auth'
 import { useDownloadStore } from '@/stores/download'
 import { useDelayedFlag } from '@/composables/useDelayedFlag'
 import { useI18n } from 'vue-i18n'
@@ -30,6 +31,7 @@ const props = defineProps<{ isAlbum?: boolean }>()
 const route = useRoute()
 const router = useRouter()
 const player = usePlayerStore()
+const auth = useAuthStore()
 const downloadStore = useDownloadStore()
 const { t, locale } = useI18n()
 
@@ -133,7 +135,11 @@ async function loadDetail() {
   const id = Number(route.params.id)
   if (!id) return
 
-  const cacheKey = playlistDetailCacheKey(props.isAlbum ? 'netease-album' : 'netease-playlist', id)
+  const cacheKey = playlistDetailCacheKey(
+    props.isAlbum ? 'netease-album' : 'netease-playlist',
+    id,
+    auth.netease.loggedIn ? auth.netease.nickname : null,
+  )
   isLoading.value = true
   error.value = null
   const cached = previewCachedDetail<NeteaseDetailCache>(cacheKey, (detail) => {

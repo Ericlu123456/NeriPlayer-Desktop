@@ -64,8 +64,23 @@ export async function saveCachedPlaylistDetail(key: string, value: PlaylistDetai
   })
 }
 
-export function playlistDetailCacheKey(kind: string, id: string | number): string {
-  return `${kind}:${id}`
+// 网易云私人雷达歌单因人而异：按账号区分缓存（对齐 Android NeteaseRadarCacheContext），
+// 切换账号后不会先看到上一个账号的雷达
+const NETEASE_RADAR_PLAYLIST_IDS = new Set(['5320167908', '5362359247', '5300458264', '5327906368', '5341776086'])
+
+function shortHash(value: string): string {
+  let hash = 0x811c9dc5
+  for (let index = 0; index < value.length; index++) {
+    hash ^= value.charCodeAt(index)
+    hash = Math.imul(hash, 0x01000193)
+  }
+  return (hash >>> 0).toString(16).padStart(8, '0')
+}
+
+export function playlistDetailCacheKey(kind: string, id: string | number, account?: string | null): string {
+  const key = `${kind}:${id}`
+  if (kind !== 'netease-playlist' || !NETEASE_RADAR_PLAYLIST_IDS.has(String(id))) return key
+  return `${key}:${account ? `account-${shortHash(account)}` : 'public'}`
 }
 
 export async function readPlaylistDetailCache<T extends PlaylistDetailCacheValue>(key: string): Promise<T | null> {
