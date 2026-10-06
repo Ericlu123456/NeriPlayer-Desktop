@@ -393,13 +393,13 @@ const filteredYoutubePlaylists = computed(() =>
 // 本地库分类：歌单 / 歌手（对齐 Android LOCAL_CATEGORY_ARTIST）
 type LocalCategory = 'playlists' | 'artists' | 'files'
 const localCategory = ref<LocalCategory>('playlists')
-const localArtistSort = ref<LocalArtistSortMode>('name')
+const localArtistSort = ref<LocalArtistSortMode>('song_count')
 const localArtistQuery = ref('')
 const localArtistTracks = ref<TrackInfo[]>([])
 const localArtistsLoading = ref(false)
 const showLocalArtistSort = ref(false)
 
-const localArtistSortModes: LocalArtistSortMode[] = ['name', 'song_count', 'recent']
+const localArtistSortModes: LocalArtistSortMode[] = ['song_count', 'name', 'recent']
 
 const localArtists = computed(() =>
   sortLocalArtists(
