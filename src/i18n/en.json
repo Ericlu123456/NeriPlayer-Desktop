@@ -660,6 +660,7 @@
     "storage_loading": "Calculating storage usage...",
     "storage_total": "Total",
     "storage_file_count": "{count} files",
+    "storage_record_count": "{count} records",
     "storage_clear_title": "Clear Cache",
     "storage_clear_warning": "Only regenerable cache is removed. Downloads, lyrics, and app settings are kept",
     "storage_select_cache_types": "Select cache types to clear",

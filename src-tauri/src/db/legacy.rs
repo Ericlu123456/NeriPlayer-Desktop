@@ -97,6 +97,12 @@ pub fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> AppResult<Optio
 }
 
 fn move_to_backup(directory: &Path, file: &Path) {
+    let Some(name) = file.file_name().and_then(|name| name.to_str()) else { return };
+    move_to_backup_as(directory, file, name);
+}
+
+/// 把已导入的旧文件移入 `<directory>/legacy-json-backup/<backup_name>`
+pub(crate) fn move_to_backup_as(directory: &Path, file: &Path, backup_name: &str) {
     if !file.exists() {
         return;
     }
@@ -105,12 +111,9 @@ fn move_to_backup(directory: &Path, file: &Path) {
         log::warn!(target: "database", "无法创建旧数据备份目录 {backup_dir:?}: {error}");
         return;
     }
-    let Some(name) = file.file_name() else { return };
-    let mut target = backup_dir.join(name);
+    let mut target = backup_dir.join(backup_name);
     if target.exists() {
-        let mut unique = name.to_os_string();
-        unique.push(format!(".{}", chrono::Utc::now().timestamp_millis()));
-        target = backup_dir.join(unique);
+        target = backup_dir.join(format!("{backup_name}.{}", chrono::Utc::now().timestamp_millis()));
     }
     if let Err(error) = std::fs::rename(file, &target) {
         // 标记已经提交，留在原处的旧文件不会再被读取

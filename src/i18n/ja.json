@@ -660,6 +660,7 @@
     "storage_loading": "ストレージ使用量を計算中...",
     "storage_total": "合計",
     "storage_file_count": "{count} ファイル",
+    "storage_record_count": "{count} 件のレコード",
     "storage_clear_title": "キャッシュを消去",
     "storage_clear_warning": "再生成可能なキャッシュのみ消去します。ダウンロード、歌詞、設定は保持されます",
     "storage_select_cache_types": "消去するキャッシュの種類を選択",

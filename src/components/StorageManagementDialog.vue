@@ -116,7 +116,8 @@ function cacheOptionDescription(kind: string) {
             </div>
             <div class="storage-row-value">
               <strong>{{ formatStorageSize(item.sizeBytes) }}</strong>
-              <span>{{ t('settings.storage_file_count', { count: item.fileCount }) }}</span>
+              <span v-if="item.recordCount != null">{{ t('settings.storage_record_count', { count: item.recordCount }) }}</span>
+              <span v-else>{{ t('settings.storage_file_count', { count: item.fileCount }) }}</span>
             </div>
           </div>
         </div>

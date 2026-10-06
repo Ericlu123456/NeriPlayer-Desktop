@@ -26,6 +26,8 @@ pub struct StorageUsageItem {
     pub file_count: u64,
     pub path: Option<String>,
     pub cache_kind: Option<String>,
+    /// 存在用户数据库里的条目按记录数展示（对齐 Android databaseRecordCount）
+    pub record_count: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -137,13 +139,23 @@ pub async fn get_storage_usage(
         ],
     }];
 
+    let user_database = crate::db::database_files(
+        &crate::db::user_data_dir().join(crate::db::DATABASE_FILE),
+    );
+    let database_stats = user_database.iter().fold(FileStats::default(), |mut total, path| {
+        total += stats_for_path(path, &[]);
+        total
+    });
+    let (index_bytes, index_records) = download_index_usage();
+    let index_bytes = index_bytes.min(database_stats.size_bytes);
+
     let downloads = scan_download_roots(&download_roots);
     sections.push(StorageUsageSection {
         id: "downloads".into(),
         items: vec![
             stats_item("downloaded_music", downloads.music, None, None),
             stats_item("downloaded_lyrics", downloads.lyrics, None, None),
-            aggregate_item("download_index", &download_index_paths(&download_roots), None),
+            database_item("download_index", index_bytes, index_records),
         ],
     });
 
@@ -165,9 +177,6 @@ pub async fn get_storage_usage(
 
     let local_covers = app_data_dir.as_ref().map(|dir| dir.join("local-covers"));
     let custom_background = app_data_dir.as_ref().map(|dir| dir.join("background"));
-    let user_database = crate::db::database_files(
-        &crate::db::user_data_dir().join(crate::db::DATABASE_FILE),
-    );
     let known_data = known_data_paths(
         &image_cache,
         &download_staging,
@@ -183,7 +192,16 @@ pub async fn get_storage_usage(
         items: vec![
             usage_item("local_covers", local_covers.as_deref(), None),
             usage_item("custom_background", custom_background.as_deref(), None),
-            aggregate_item("playlist_data", &user_database, None),
+            // 已归属到下载索引的页面不再重复计入用户数据库，合计才不会双算
+            StorageUsageItem {
+                size_bytes: database_stats.size_bytes.saturating_sub(index_bytes),
+                ..stats_item(
+                    "playlist_data",
+                    database_stats,
+                    Some(user_database[0].to_string_lossy().into_owned()),
+                    None,
+                )
+            },
             other_app_data_item(app_data_dir.as_deref(), &known_data),
         ],
     });
@@ -319,7 +337,25 @@ fn stats_item(
         file_count: stats.file_count,
         path,
         cache_kind: cache_kind.map(str::to_string),
+        record_count: None,
     }
+}
+
+fn database_item(id: &str, size_bytes: u64, record_count: u64) -> StorageUsageItem {
+    StorageUsageItem {
+        record_count: Some(record_count),
+        ..stats_item(id, FileStats { size_bytes, file_count: 0 }, None, None)
+    }
+}
+
+/// 下载目录在用户数据库中的估算占用与记录数；数据库不可用时按空计
+fn download_index_usage() -> (u64, u64) {
+    crate::db::user_db()
+        .and_then(|database| database.read(super::download_cmd::catalog::usage))
+        .unwrap_or_else(|error| {
+            log::warn!(target: "storage", "下载索引占用统计失败: {error}");
+            (0, 0)
+        })
 }
 
 fn other_cache_item(app_cache_dir: Option<&Path>, excluded: &[PathBuf]) -> StorageUsageItem {
@@ -426,14 +462,6 @@ fn download_roots(default_root: Option<&Path>, custom_root: Option<&str>) -> Vec
         }
     }
     roots
-}
-
-fn download_index_paths(roots: &[PathBuf]) -> Vec<PathBuf> {
-    roots
-        .iter()
-        .map(|root| root.join("manifest.json"))
-        .filter(|path| path.exists())
-        .collect()
 }
 
 #[derive(Default)]

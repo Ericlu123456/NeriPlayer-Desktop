@@ -660,6 +660,7 @@
     "storage_loading": "正在統計儲存空間...",
     "storage_total": "總計",
     "storage_file_count": "{count} 個檔案",
+    "storage_record_count": "{count} 筆記錄",
     "storage_clear_title": "清除快取",
     "storage_clear_warning": "只會刪除可重新產生的快取，不會刪除已下載音樂、歌詞或應用程式設定",
     "storage_select_cache_types": "選擇要清除的快取類型",

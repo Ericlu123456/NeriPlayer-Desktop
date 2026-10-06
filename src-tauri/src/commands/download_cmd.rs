@@ -20,6 +20,9 @@ mod recovery;
 #[path = "download_metadata.rs"]
 pub(crate) mod metadata;
 
+#[path = "download_catalog.rs"]
+pub(crate) mod catalog;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DownloadedTrack {
     pub id: String,
@@ -598,13 +601,15 @@ where
     unreachable!("the third download attempt returns its result")
 }
 
-/// manifest.json 路径（始终存储在默认下载目录，与自定义目录无关）
-fn manifest_path(app: &AppHandle) -> AppResult<PathBuf> {
-    let dir = legacy_downloads_dir(app)?;
-    if !dir.exists() {
-        std::fs::create_dir_all(&dir).map_err(AppError::Io)?;
-    }
-    Ok(dir.join("manifest.json"))
+/// 旧版下载清单位置（始终在默认下载目录，与自定义目录无关），仅用于一次性导入
+fn legacy_manifest_path(app: &AppHandle) -> AppResult<PathBuf> {
+    Ok(legacy_downloads_dir(app)?.join("manifest.json"))
+}
+
+fn catalog_database(app: &AppHandle) -> AppResult<&'static crate::db::UserDatabase> {
+    let database = crate::db::user_db()?;
+    catalog::ensure_imported(database, &legacy_manifest_path(app)?)?;
+    Ok(database)
 }
 
 fn download_sidecar_path(audio_path: &std::path::Path, suffix: &str) -> Option<PathBuf> {
@@ -764,31 +769,14 @@ fn reserve_download_path(
     }
 }
 
-/// 读取 manifest
+/// 读取下载目录；数据库不可用时报错，绝不能当成空表（后续写入会抹掉全部下载记录）
 fn read_manifest(app: &AppHandle) -> AppResult<Vec<DownloadedTrack>> {
-    let path = manifest_path(app)?;
-    if !path.exists() {
-        return Ok(vec![]);
-    }
-    let data = std::fs::read_to_string(&path)?;
-    match serde_json::from_str::<Vec<DownloadedTrack>>(&data) {
-        Ok(tracks) => Ok(tracks),
-        Err(e) => {
-            // manifest 解析失败不能静默当空表：后续任一次 write_manifest 会用空表覆盖，
-            // 全部历史下载记录永久丢失。隔离损坏文件后返回错误，保留磁盘上的原始现场（DL-6）
-            log::error!(target: "download", "manifest 解析失败, 已隔离: {e}");
-            let _ = crate::fsutil::quarantine_corrupt_file(&path);
-            Err(AppError::Other(format!("下载清单损坏，已隔离原文件: {e}")))
-        }
-    }
+    catalog_database(app)?.read(catalog::load_from)
 }
 
-/// 写入 manifest（原子写：半截 manifest 会让全部下载记录判损坏丢失）
+/// 整表替换下载目录（单事务提交，不会留下半截清单）
 fn write_manifest(app: &AppHandle, tracks: &[DownloadedTrack]) -> AppResult<()> {
-    let path = manifest_path(app)?;
-    let json = serde_json::to_string_pretty(tracks)?;
-    crate::fsutil::atomic_write(&path, json)?;
-    Ok(())
+    catalog_database(app)?.write(|transaction| catalog::save_into(transaction, tracks))
 }
 
 fn manifest_lock() -> std::sync::MutexGuard<'static, ()> {

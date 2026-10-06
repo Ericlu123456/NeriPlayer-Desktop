@@ -660,6 +660,7 @@
     "storage_loading": "正在统计存储占用...",
     "storage_total": "总计",
     "storage_file_count": "{count} 个文件",
+    "storage_record_count": "{count} 条记录",
     "storage_clear_title": "清除缓存",
     "storage_clear_warning": "只会删除可重新生成的缓存，不会删除已下载音乐、歌词或应用配置",
     "storage_select_cache_types": "选择要清除的缓存类型",

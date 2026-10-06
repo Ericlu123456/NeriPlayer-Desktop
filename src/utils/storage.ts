@@ -4,6 +4,8 @@ export interface StorageUsageItem {
   fileCount: number
   path?: string | null
   cacheKind?: string | null
+  /** 存在用户数据库中的条目按记录数展示 */
+  recordCount?: number | null
 }
 
 export interface StorageUsageSection {
