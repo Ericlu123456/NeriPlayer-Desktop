@@ -34,7 +34,13 @@ async function mountPage(name, params, cached = null) {
     useI18n: () => ({ t: key => key }), usePlayerStore: () => ({ playAll: (...args) => played.push(args) }),
     useToastStore: () => ({ error: message => errors.push(message) }), normalizeTrack: track => track,
     useArtistFavorite: () => ({ following: ref(false), changing: ref(false), toggle: async () => {} }),
-    playlistDetailCacheKey: () => 'cache-key', readPlaylistDetailCache: () => structuredClone(cached),
+    playlistDetailCacheKey: () => 'cache-key',
+    // 与 previewCachedDetail 相同的语义：缓存异步读到后只在新数据到达前展示
+    previewCachedDetail: (_key, show) => {
+      let fresh = false
+      const read = Promise.resolve(structuredClone(cached)).then(value => !!value && !fresh && show(value) !== false)
+      return { markFresh() { fresh = true }, shown: () => read }
+    },
     writePlaylistDetailCache() {}, formatTrackDuration: () => '',
     parseYouTubeArtistDetail: raw => raw, parseYouTubeArtistItems: raw => raw,
     youtubeArtistItemTrack: item => item.videoId ? { id: `youtube:${item.videoId}` } : null,

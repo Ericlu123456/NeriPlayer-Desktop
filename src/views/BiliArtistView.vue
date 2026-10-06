@@ -7,7 +7,7 @@ import { normalizeTrack, usePlayerStore, type TrackInfo } from '@/stores/player'
 import { useToastStore } from '@/stores/toast'
 import BilibiliCoverImage from '@/components/BilibiliCoverImage.vue'
 import { useArtistFavorite } from '@/modules/library/favoriteArtistState'
-import { playlistDetailCacheKey, readPlaylistDetailCache, writePlaylistDetailCache } from '@/modules/library/playlistDetailCache'
+import { playlistDetailCacheKey, previewCachedDetail, writePlaylistDetailCache, type CachedDetailPreview } from '@/modules/library/playlistDetailCache'
 import { formatTrackDuration } from '@/utils/timeFormat'
 
 interface ArtistHeader { name: string; coverUrl: string; bannerUrl: string; description: string }
@@ -37,6 +37,8 @@ const collectionError = ref('')
 let generation = 0
 let contentsGeneration = 0
 let collectionGeneration = 0
+// detail 当前属于哪位 UP 主
+let detailMid = ''
 const header = computed(() => detail.value?.header || {
   name: String(route.query.name || ''), coverUrl: String(route.query.cover || ''), bannerUrl: '', description: '',
 })
@@ -55,13 +57,21 @@ async function load(more = false) {
   if (!/^[1-9]\d*$/.test(id) || (more && (loadingMore.value || !detail.value?.hasMore))) return
   const request = more ? generation : ++generation
   const cacheKey = playlistDetailCacheKey('bili-artist-v1', id)
+  let cached: CachedDetailPreview | null = null
   if (!more) {
-    detail.value = readPlaylistDetailCache<ArtistDetail>(cacheKey)
+    // 换了 UP 主就先撤下上一位的内容，同一位重试时保留已显示的列表
+    if (detailMid !== id) { detail.value = null; detailMid = '' }
     loading.value = true
+    cached = previewCachedDetail<ArtistDetail>(cacheKey, (value) => {
+      if (request !== generation || mid.value !== id) return false
+      detail.value = value
+      detailMid = id
+    })
   } else loadingMore.value = true
   error.value = ''
   try {
     const loaded = await invoke<ArtistDetail>('get_bili_artist_detail', { mid: Number(id), page: more ? (detail.value?.page || 1) + 1 : 1 })
+    cached?.markFresh()
     if (request !== generation || mid.value !== id) return
     const parsed = loaded.tracks.map(normalizeTrack)
     const seen = new Set<string>()
@@ -73,6 +83,7 @@ async function load(more = false) {
     loaded.header.name ||= header.value.name
     loaded.header.coverUrl ||= header.value.coverUrl
     detail.value = loaded
+    detailMid = id
     writePlaylistDetailCache(cacheKey, loaded)
   } catch (cause) {
     if (request === generation) {

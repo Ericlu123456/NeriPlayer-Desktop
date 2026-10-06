@@ -2,7 +2,7 @@ import type { LyricLine, TrackInfo } from '@/stores/player'
 
 interface DesktopLyricsDependencies {
   materialize: (track: TrackInfo) => Promise<LyricLine[] | null>
-  cached: (track: TrackInfo) => LyricLine[] | null
+  cached: (track: TrackInfo) => Promise<LyricLine[] | null> | LyricLine[] | null
   fetch: (track: TrackInfo) => Promise<LyricLine[]>
   cache: (track: TrackInfo, lines: LyricLine[]) => void
   canUpgrade: (track: TrackInfo, lines: LyricLine[]) => boolean
@@ -37,7 +37,8 @@ export function createDesktopLyricsLoader(deps: DesktopLyricsDependencies) {
       return
     }
 
-    let baseline = existing.length ? existing : deps.cached(track) || []
+    let baseline = existing.length ? existing : (await deps.cached(track)) || []
+    if (!isCurrent()) return
     deps.onChange(baseline)
     if (!baseline.length) {
       try {
@@ -46,7 +47,8 @@ export function createDesktopLyricsLoader(deps: DesktopLyricsDependencies) {
         deps.onChange(baseline)
         if (baseline.length) deps.cache(track, baseline)
       } catch {
-        if (isCurrent()) deps.onChange(deps.cached(track) || baseline)
+        const restored = await deps.cached(track)
+        if (isCurrent()) deps.onChange(restored || baseline)
         return
       }
     }

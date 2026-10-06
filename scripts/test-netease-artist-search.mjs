@@ -65,7 +65,7 @@ async function mountArtist(data = fixture) {
     useToastStore: () => ({ error() {} }),
     useArtistFavorite: () => ({ following: ref(false), changing: ref(false), toggle: async () => {} }),
     playlistDetailCacheKey: (_kind, id) => String(id),
-    readPlaylistDetailCache: () => null,
+    previewCachedDetail: () => ({ markFresh() {}, shown: async () => false }),
     writePlaylistDetailCache() {},
     resolveNeteaseCover: () => '',
     formatTrackDuration: () => '1:00',

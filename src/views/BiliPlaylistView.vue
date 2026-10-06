@@ -20,7 +20,7 @@ import {
 } from '@/utils/contextMenu'
 import {
   playlistDetailCacheKey,
-  readPlaylistDetailCache,
+  previewCachedDetail,
   writePlaylistDetailCache,
 } from '@/modules/library/playlistDetailCache'
 import { formatTrackDuration as formatDuration } from '@/utils/timeFormat'
@@ -104,18 +104,17 @@ async function loadDetail() {
   if (!mediaId) return
 
   const cacheKey = playlistDetailCacheKey('bilibili-favorite', mediaId)
-  const cached = readPlaylistDetailCache<BiliDetailCache>(cacheKey)
-  if (cached) {
-    applyDetailCache(cached)
-    isLoading.value = false
-  } else {
-    isLoading.value = true
-  }
+  isLoading.value = true
   error.value = null
+  const cached = previewCachedDetail<BiliDetailCache>(cacheKey, (detail) => {
+    applyDetailCache(detail)
+    isLoading.value = false
+  })
 
   try {
     // 获取收藏夹信息
     const infoData = await invoke<any>('get_bili_fav_folder_info', { mediaId })
+    cached.markFresh()
     const info = infoData?.data || {}
     folderName.value = info.title || ''
     coverUrl.value = info.cover || ''
@@ -148,7 +147,7 @@ async function loadDetail() {
       }))
     saveDetailCache(cacheKey)
   } catch (e: any) {
-    if (!cached) {
+    if (!(await cached.shown())) {
       error.value = e?.toString() || t('player.load_failed')
     }
   } finally {

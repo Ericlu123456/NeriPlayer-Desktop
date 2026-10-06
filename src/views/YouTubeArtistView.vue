@@ -8,7 +8,7 @@ import { useToastStore } from '@/stores/toast'
 import BilibiliCoverImage from '@/components/BilibiliCoverImage.vue'
 import { useArtistFavorite } from '@/modules/library/favoriteArtistState'
 import { parseYouTubeArtistDetail, parseYouTubeArtistItems, youtubeArtistItemTrack, type YouTubeArtistDetail, type YouTubeArtistItem, type YouTubeArtistSection } from '@/modules/library/youtubeArtistDetail'
-import { playlistDetailCacheKey, readPlaylistDetailCache, writePlaylistDetailCache } from '@/modules/library/playlistDetailCache'
+import { playlistDetailCacheKey, previewCachedDetail, writePlaylistDetailCache } from '@/modules/library/playlistDetailCache'
 import { formatTrackDuration } from '@/utils/timeFormat'
 
 const route = useRoute()
@@ -25,6 +25,8 @@ const queueLoading = ref(false)
 const query = ref('')
 const sectionPages = ref<Record<string, { items: YouTubeArtistItem[]; continuation: string }>>({})
 let generation = 0
+// detail 当前属于哪位创作者
+let detailId = ''
 const header = computed(() => detail.value?.header || {
   name: String(route.query.name || ''), coverUrl: String(route.query.cover || ''), subtitle: String(route.query.subtitle || ''), description: '', subscribers: '', listeners: '',
 })
@@ -49,7 +51,13 @@ async function load() {
   if (!id) return
   const request = ++generation
   const cacheKey = playlistDetailCacheKey('youtube-artist-v1', id)
-  detail.value = readPlaylistDetailCache<YouTubeArtistDetail>(cacheKey)
+  // 换了创作者就先撤下上一位的内容，同一位重试时保留已显示的列表
+  if (detailId !== id) { detail.value = null; detailId = '' }
+  const cached = previewCachedDetail<YouTubeArtistDetail>(cacheKey, (value) => {
+    if (request !== generation) return false
+    detail.value = value
+    detailId = id
+  })
   sectionPages.value = {}
   query.value = ''
   loading.value = true
@@ -58,8 +66,10 @@ async function load() {
   error.value = ''
   try {
     const raw = await invoke('get_youtube_artist_detail', { browseId: id })
+    cached.markFresh()
     if (request !== generation) return
     detail.value = parseYouTubeArtistDetail(raw, header.value)
+    detailId = id
     writePlaylistDetailCache(cacheKey, detail.value)
   } catch (cause) {
     if (request === generation) error.value = String(cause)

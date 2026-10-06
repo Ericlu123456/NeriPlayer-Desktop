@@ -7,7 +7,7 @@ import { usePlayerStore, type TrackInfo } from '@/stores/player'
 import BilibiliCoverImage from '@/components/BilibiliCoverImage.vue'
 import {
   playlistDetailCacheKey,
-  readPlaylistDetailCache,
+  previewCachedDetail,
   writePlaylistDetailCache,
 } from '@/modules/library/playlistDetailCache'
 import { formatTrackDuration as formatDuration } from '@/utils/timeFormat'
@@ -122,19 +122,18 @@ async function load() {
   const request = ++generation
 
   const cacheKey = playlistDetailCacheKey('netease-artist-v2', id)
-  const cached = readPlaylistDetailCache<ArtistDetailCache>(cacheKey)
-  if (cached) {
-    header.value = cached.header
-    tracks.value = cached.tracks
-    albums.value = cached.albums
-    isLoading.value = false
-  } else {
-    header.value = parseHeader(null)
-    tracks.value = []
-    albums.value = []
-    isLoading.value = true
-  }
+  header.value = parseHeader(null)
+  tracks.value = []
+  albums.value = []
+  isLoading.value = true
   error.value = null
+  const cached = previewCachedDetail<ArtistDetailCache>(cacheKey, (detail) => {
+    if (request !== generation) return false
+    header.value = detail.header
+    tracks.value = detail.tracks
+    albums.value = detail.albums
+    isLoading.value = false
+  })
 
   try {
     // 头部/歌曲/专辑并行加载 (对齐 Android loadInitial)
@@ -143,6 +142,7 @@ async function load() {
       invoke<any>('get_netease_artist_songs', { artistId: id }),
       invoke<any>('get_netease_artist_albums', { artistId: id }),
     ])
+    cached.markFresh()
     if (request !== generation) return
 
     if (detailRes.status === 'fulfilled') {
@@ -178,7 +178,7 @@ async function load() {
         }))
     }
 
-    if (songsRes.status === 'rejected' && albumsRes.status === 'rejected' && !cached) {
+    if (songsRes.status === 'rejected' && albumsRes.status === 'rejected' && !(await cached.shown())) {
       error.value = String(songsRes.reason || albumsRes.reason)
       return
     }
@@ -192,7 +192,7 @@ async function load() {
     }
   } catch (e: any) {
     if (request !== generation) return
-    if (!cached) error.value = e?.toString() || t('player.load_failed')
+    if (!(await cached.shown())) error.value = e?.toString() || t('player.load_failed')
     log.error('load artist failed:', e)
   } finally {
     if (request === generation) isLoading.value = false

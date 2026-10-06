@@ -5,6 +5,7 @@
 //! 连接上的 IMMEDIATE 事务内完成，崩溃或断电只会回滚到上一次完整提交，
 //! 不会再出现「半截 JSON 被误判为空库再覆盖」的数据丢失
 
+pub mod cache;
 pub mod legacy;
 pub mod meta;
 mod schema;

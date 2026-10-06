@@ -106,9 +106,10 @@ const guarded = createDesktopLyricsLoader({
   onChange: value => changes.push(value),
 })
 const old = guarded.load(track)
-await Promise.resolve()
+// 让旧曲目的请求先真正发出，再切到新曲目
+await flushMicrotasks()
 const fresh = guarded.load({ ...track, id: 'youtube:new' })
-await Promise.resolve()
+await flushMicrotasks()
 resolveFetch([lines[0]])
 await old
 assert.equal(changes.at(-1).length, 0, 'old request cannot display on a new song')
@@ -227,7 +228,8 @@ try {
   player.currentTrack = { ...track, id: 'youtube:late' }
   player.lyrics = []
   watchers[0].callback()
-  await Promise.resolve()
+  // 缓存读取是异步的，等在线请求真正发出后再关窗
+  await flushMicrotasks()
   const firstSession = invocations.find(([command]) => command === 'open_desktop_lyrics')[1].sessionId
   listener({ payload: { sessionId: firstSession } })
   assert.equal(intervals.size, 0)

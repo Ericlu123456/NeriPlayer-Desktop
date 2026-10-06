@@ -123,6 +123,28 @@ pub async fn get_storage_usage(
         classified_cache_paths.push(path.clone());
     }
 
+    // 数据库内的缓存与下载索引按估算字节归属到各自条目，剩余部分才计入用户数据库
+    let user_database = crate::db::database_files(
+        &crate::db::user_data_dir().join(crate::db::DATABASE_FILE),
+    );
+    let database_stats = user_database.iter().fold(FileStats::default(), |mut total, path| {
+        total += stats_for_path(path, &[]);
+        total
+    });
+    let mut unattributed = database_stats.size_bytes;
+    let mut attribute = |(bytes, records): (u64, u64)| {
+        let bytes = bytes.min(unattributed);
+        unattributed -= bytes;
+        (bytes, records)
+    };
+    let (detail_bytes, detail_records) =
+        attribute(database_usage(|connection| crate::db::cache::usage(connection, crate::db::cache::PLATFORM_DETAIL_BUCKET)));
+    let (lyrics_bytes, _) =
+        attribute(database_usage(|connection| crate::db::cache::usage(connection, crate::db::cache::LYRICS_BUCKET)));
+    let (index_bytes, index_records) = attribute(database_usage(super::download_cmd::catalog::usage));
+
+    let platform_list_files = aggregate_item("platform_list_cache", &platform_list, Some("platform_list"));
+    let other_cache = other_cache_item(app_cache_dir.as_deref(), &classified_cache_paths);
     let mut sections = vec![StorageUsageSection {
         id: "cleanable_cache".into(),
         items: vec![
@@ -134,20 +156,17 @@ pub async fn get_storage_usage(
                 Some("download_staging"),
             ),
             aggregate_item("shared_media", &shared_media, Some("shared_media")),
-            aggregate_item("platform_list_cache", &platform_list, Some("platform_list")),
-            other_cache_item(app_cache_dir.as_deref(), &classified_cache_paths),
+            StorageUsageItem {
+                size_bytes: platform_list_files.size_bytes.saturating_add(detail_bytes),
+                record_count: Some(detail_records),
+                ..platform_list_files
+            },
+            StorageUsageItem {
+                size_bytes: other_cache.size_bytes.saturating_add(lyrics_bytes),
+                ..other_cache
+            },
         ],
     }];
-
-    let user_database = crate::db::database_files(
-        &crate::db::user_data_dir().join(crate::db::DATABASE_FILE),
-    );
-    let database_stats = user_database.iter().fold(FileStats::default(), |mut total, path| {
-        total += stats_for_path(path, &[]);
-        total
-    });
-    let (index_bytes, index_records) = download_index_usage();
-    let index_bytes = index_bytes.min(database_stats.size_bytes);
 
     let downloads = scan_download_roots(&download_roots);
     sections.push(StorageUsageSection {
@@ -192,9 +211,9 @@ pub async fn get_storage_usage(
         items: vec![
             usage_item("local_covers", local_covers.as_deref(), None),
             usage_item("custom_background", custom_background.as_deref(), None),
-            // 已归属到下载索引的页面不再重复计入用户数据库，合计才不会双算
+            // 已归属到缓存与下载索引的页面不再重复计入用户数据库，合计才不会双算
             StorageUsageItem {
-                size_bytes: database_stats.size_bytes.saturating_sub(index_bytes),
+                size_bytes: unattributed,
                 ..stats_item(
                     "playlist_data",
                     database_stats,
@@ -297,6 +316,24 @@ pub async fn clear_storage_cache(
         }
     }
 
+    if options.platform_list {
+        let cleared = crate::db::user_db().and_then(|database| {
+            database.write(|transaction| {
+                crate::db::cache::clear(transaction, crate::db::cache::PLATFORM_DETAIL_BUCKET)
+            })
+        });
+        match cleared {
+            Ok((bytes, records)) => {
+                result.cleared_bytes = result.cleared_bytes.saturating_add(bytes);
+                result.deleted_files = result.deleted_files.saturating_add(records);
+            }
+            Err(error) => {
+                log::warn!(target: "storage", "清除平台详情缓存失败: {error}");
+                result.failed_count = result.failed_count.saturating_add(1);
+            }
+        }
+    }
+
     Ok(result)
 }
 
@@ -348,12 +385,14 @@ fn database_item(id: &str, size_bytes: u64, record_count: u64) -> StorageUsageIt
     }
 }
 
-/// 下载目录在用户数据库中的估算占用与记录数；数据库不可用时按空计
-fn download_index_usage() -> (u64, u64) {
+/// 用户数据库内某类数据的估算占用与记录数；数据库不可用时按空计
+fn database_usage(
+    measure: impl FnOnce(&rusqlite::Connection) -> AppResult<(u64, u64)>,
+) -> (u64, u64) {
     crate::db::user_db()
-        .and_then(|database| database.read(super::download_cmd::catalog::usage))
+        .and_then(|database| database.read(measure))
         .unwrap_or_else(|error| {
-            log::warn!(target: "storage", "下载索引占用统计失败: {error}");
+            log::warn!(target: "storage", "数据库占用统计失败: {error}");
             (0, 0)
         })
 }

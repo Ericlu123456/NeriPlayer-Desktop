@@ -84,7 +84,7 @@ assert.match(
 )
 assert.match(
   nowPlayingSource,
-  /readCachedLyrics\(track\) \|\| cachedLyrics \|\| \[\]/,
+  /const restored = await readCachedLyrics\(track\)\s+if \(requestId === lyricFetchRequestId\) \{\s+fetchedLyrics\.value = restored \|\| cachedLyrics \|\| \[\]/,
   'a failed refresh must restore the latest cached lyrics',
 )
 

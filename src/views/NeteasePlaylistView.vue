@@ -20,7 +20,7 @@ import {
 } from '@/utils/contextMenu'
 import {
   playlistDetailCacheKey,
-  readPlaylistDetailCache,
+  previewCachedDetail,
   writePlaylistDetailCache,
 } from '@/modules/library/playlistDetailCache'
 import { formatTrackDuration as formatDuration } from '@/utils/timeFormat'
@@ -134,18 +134,17 @@ async function loadDetail() {
   if (!id) return
 
   const cacheKey = playlistDetailCacheKey(props.isAlbum ? 'netease-album' : 'netease-playlist', id)
-  const cached = readPlaylistDetailCache<NeteaseDetailCache>(cacheKey)
-  if (cached) {
-    applyDetailCache(cached)
-    isLoading.value = false
-  } else {
-    isLoading.value = true
-  }
+  isLoading.value = true
   error.value = null
+  const cached = previewCachedDetail<NeteaseDetailCache>(cacheKey, (detail) => {
+    applyDetailCache(detail)
+    isLoading.value = false
+  })
 
   try {
     if (props.isAlbum) {
       const data = await invoke<any>('get_album_detail', { albumId: id })
+      cached.markFresh()
       const album = data?.album || {}
       playlistName.value = album.name || ''
       const albumCover = resolveNeteaseCover(
@@ -173,6 +172,7 @@ async function loadDetail() {
       trackCount.value = tracks.value.length
     } else {
       const data = await invoke<any>('get_netease_playlist_detail', { playlistId: id })
+      cached.markFresh()
       const pl = data?.playlist || {}
       playlistName.value = pl.name || ''
       coverUrl.value = resolveNeteaseCover(pl.coverImgUrl, pl.picUrl, pl.cover)
@@ -194,7 +194,7 @@ async function loadDetail() {
     }
     saveDetailCache(cacheKey)
   } catch (e: any) {
-    if (!cached) {
+    if (!(await cached.shown())) {
       error.value = e?.toString() || t('player.load_failed')
     }
   } finally {

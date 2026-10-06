@@ -4,7 +4,7 @@ use neri_player_desktop::audio::analyzer::SharedAudioLevel;
 use neri_player_desktop::audio::media_session::{MediaAction, MediaSessionController};
 use neri_player_desktop::auth;
 use neri_player_desktop::commands::{
-    auth_cmd, debug_cmd, desktop_lyrics_cmd, download_cmd, image_cmd, library_cmd, local_files_cmd,
+    auth_cmd, cache_cmd, debug_cmd, desktop_lyrics_cmd, download_cmd, image_cmd, library_cmd, local_files_cmd,
     listen_together_cmd, lyrics_cmd, player_cmd, playback_fallback_cmd, recommend_cmd, search_cmd, settings_cmd,
     stats_cmd, storage_cmd, sync_cmd, user_data_cmd,
 };
@@ -572,6 +572,9 @@ fn main() {
             user_data_cmd::replace_play_history,
             user_data_cmd::set_lyric_offset,
             user_data_cmd::replace_lyric_offsets,
+            cache_cmd::cache_get,
+            cache_cmd::cache_put,
+            cache_cmd::cache_remove,
             ]);
             move |invoke: tauri::ipc::Invoke<tauri::Wry>| {
                 let label = invoke.message.webview().label().to_string();

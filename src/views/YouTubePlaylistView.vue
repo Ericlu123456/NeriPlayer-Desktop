@@ -20,7 +20,7 @@ import {
 } from '@/utils/contextMenu'
 import {
   playlistDetailCacheKey,
-  readPlaylistDetailCache,
+  previewCachedDetail,
   writePlaylistDetailCache,
 } from '@/modules/library/playlistDetailCache'
 import { parseYouTubePlaylistTracks, parseYouTubePlaylistMeta } from '@/modules/youtube/youtubePlaylistParse'
@@ -121,17 +121,16 @@ async function loadDetail() {
 
   // v3：时长解析修复后必须废弃旧缓存，否则 durationMs=0 的旧详情会一直钉死列表
   const cacheKey = playlistDetailCacheKey('youtube-playlist-v3', browseId)
-  const cached = readPlaylistDetailCache<YouTubeDetailCache>(cacheKey)
-  if (cached) {
-    applyDetailCache(cached)
-    isLoading.value = false
-  } else {
-    isLoading.value = true
-  }
+  isLoading.value = true
   error.value = null
+  const cached = previewCachedDetail<YouTubeDetailCache>(cacheKey, (detail) => {
+    applyDetailCache(detail)
+    isLoading.value = false
+  })
 
   try {
     const data = await invoke<any>('get_youtube_playlist_detail', { browseId })
+    cached.markFresh()
     tracks.value = parsePlaylistTracks(data)
     // header 封面偶发缺失时用首曲封面兜底, 避免大图占位空白
     if (!coverUrl.value) {
@@ -140,7 +139,7 @@ async function loadDetail() {
     }
     saveDetailCache(cacheKey)
   } catch (e: any) {
-    if (!cached) {
+    if (!(await cached.shown())) {
       error.value = e?.toString() || t('player.load_failed')
     }
   } finally {

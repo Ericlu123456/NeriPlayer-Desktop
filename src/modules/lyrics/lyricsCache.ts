@@ -2,10 +2,15 @@ import type { LyricLine, TrackInfo } from '@/stores/player'
 import { getCachedValue, removeCachedValue, setCachedValue } from '@/utils/persistentCache'
 import { lyricsIdentity } from './lyricsRequest'
 
-// v3: 跨平台优先 LRCLIB+时长硬门槛, 失效错误同名歌词缓存
-const LYRICS_CACHE_KEY = 'neri:lyrics-cache:v3'
+// 键带版本：跨平台优先 LRCLIB+时长硬门槛后，旧的错误同名歌词缓存一律失效
+const LYRICS_CACHE_VERSION = 'v3'
 const LYRICS_CACHE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000
-const LYRICS_CACHE_MAX_ENTRIES = 200
+const LYRICS_CACHE_MAX_ENTRIES = 500
+const LYRICS_CACHE_MAX_BYTES = 32 * 1024 * 1024
+
+function cacheKey(track: TrackInfo) {
+  return `${LYRICS_CACHE_VERSION}:${lyricsIdentity(track)}`
+}
 
 function normalizeLyricLine(line: LyricLine): LyricLine {
   return {
@@ -31,31 +36,28 @@ function hasVisibleLyric(lines: LyricLine[]): boolean {
   )
 }
 
-export function getCachedLyrics(track: TrackInfo): LyricLine[] | null {
-  const cached = getCachedValue<LyricLine[]>(
-    LYRICS_CACHE_KEY,
-    lyricsIdentity(track),
-    LYRICS_CACHE_MAX_AGE_MS,
-  )
+export async function getCachedLyrics(track: TrackInfo): Promise<LyricLine[] | null> {
+  const cached = await getCachedValue<LyricLine[]>('lyrics', cacheKey(track), LYRICS_CACHE_MAX_AGE_MS)
   if (!Array.isArray(cached)) return null
 
   const lines = cached.map(normalizeLyricLine)
   return hasVisibleLyric(lines) ? lines : null
 }
 
-export function saveCachedLyrics(track: TrackInfo, lines: LyricLine[]) {
+export async function saveCachedLyrics(track: TrackInfo, lines: LyricLine[]) {
   const normalized = lines.map(normalizeLyricLine)
   if (!hasVisibleLyric(normalized)) {
-    clearCachedLyrics(track)
+    await clearCachedLyrics(track)
     return
   }
 
-  setCachedValue(LYRICS_CACHE_KEY, lyricsIdentity(track), normalized, {
+  await setCachedValue('lyrics', cacheKey(track), normalized, {
     maxAgeMs: LYRICS_CACHE_MAX_AGE_MS,
     maxEntries: LYRICS_CACHE_MAX_ENTRIES,
+    maxBytes: LYRICS_CACHE_MAX_BYTES,
   })
 }
 
-export function clearCachedLyrics(track: TrackInfo) {
-  removeCachedValue(LYRICS_CACHE_KEY, lyricsIdentity(track))
+export async function clearCachedLyrics(track: TrackInfo) {
+  await removeCachedValue('lyrics', cacheKey(track))
 }

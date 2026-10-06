@@ -1,4 +1,5 @@
 pub mod auth_cmd;
+pub mod cache_cmd;
 pub mod debug_cmd;
 pub mod desktop_lyrics_cmd;
 pub mod download_cmd;

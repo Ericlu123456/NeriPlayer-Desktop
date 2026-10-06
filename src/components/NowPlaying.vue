@@ -205,12 +205,12 @@ async function materializeSyncedLyrics(track: TrackInfo): Promise<LyricLine[] | 
 
 function cacheLyricsForTrack(track: TrackInfo | null | undefined, lines: LyricLine[]) {
   if (!track || lines.length === 0) return
-  saveCachedLyrics(track, lines)
+  void saveCachedLyrics(track, lines)
 }
 
 function removeCachedLyricsForCurrentTrack() {
   if (!player.currentTrack) return
-  clearCachedLyrics(player.currentTrack)
+  void clearCachedLyrics(player.currentTrack)
 }
 
 /** 编辑后的歌词写回 syncPayload + 本地歌单, 供同步上传 (对齐 Android) */
@@ -884,12 +884,13 @@ watch(nowPlayingTrackKey, async (trackKey) => {
 
   // 换曲瞬间立即撤下旧词：此刻播放位置已归零而旧词还挂着，
   // LyricsView 会判定大幅回跳、在旧词上硬跳回第一行——开播歌词
-  // 「有概率抽一下」就是这个窗口。缓存命中走同步路径，同一批次
-  // 更新内就把新词赋回，肉眼无感；在线获取则显示空态而不是旧词。
+  // 「有概率抽一下」就是这个窗口。缓存命中只需一次本地数据库读取，
+  // 随后赋回新词；在线获取则显示空态而不是旧词。
   fetchedLyrics.value = []
 
   const started = performance.now()
-  const cachedLyrics = readCachedLyrics(track)
+  const cachedLyrics = await readCachedLyrics(track)
+  if (requestId !== lyricFetchRequestId) return
   const reusedRequest = hasLyricsRequestInFlight(track)
   fetchedLyrics.value = cachedLyrics || []
   isFetchingLyrics.value = true
@@ -991,8 +992,9 @@ watch(nowPlayingTrackKey, async (trackKey) => {
       elapsedMs: Math.round(performance.now() - started),
       error: summarizeLogError(e),
     })
+    const restored = await readCachedLyrics(track)
     if (requestId === lyricFetchRequestId) {
-      fetchedLyrics.value = readCachedLyrics(track) || cachedLyrics || []
+      fetchedLyrics.value = restored || cachedLyrics || []
       log.info('lyrics cache restored after failure:', {
         requestId,
         trackId: track.id,
