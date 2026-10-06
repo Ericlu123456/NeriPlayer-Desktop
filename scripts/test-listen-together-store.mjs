@@ -248,7 +248,7 @@ async function harness(options = {}) {
   const scope = vue.effectScope()
   const store = scope.run(() => module.useListenTogetherStore())
   return {
-    store, player, playback, commands, timers, events, toasts, logs, playGates, pauseGates, seekGates,
+    store, player, settings, playback, commands, timers, events, toasts, logs, playGates, pauseGates, seekGates,
     emit,
     async join() { await store.joinRoom('ABC234', 'test-invite-secret'); await flush() },
     async create() { await store.createRoom(); await flush() },
@@ -750,6 +750,52 @@ const disablePendingLinks = async h => {
 disablePendingLinks.options = { role: 'controller', invoke: (command, args) =>
   command === 'lt_send_event' && args?.event?.track?.stableKey === 'netease:3' ? false : undefined }
 await test('disabling sharing redacts queued snapshots and their HTTP fallback candidates', disablePendingLinks)
+
+await test('room state from a joined room does not rewrite local room defaults', async h => {
+  await h.join()
+  await h.message({ type: 'welcome', role: 'listener', state: room([wireTrack(1)], {
+    settings: { allowMemberControl: false, autoPauseOnMemberChange: false, shareAudioLinks: true },
+  }) })
+  assert.equal(h.store.roomSettings.value.allowMemberControl, false)
+  assert.equal(h.store.roomSettings.value.shareAudioLinks, true)
+  assert.deepEqual(
+    [h.settings.ltAllowMemberControl, h.settings.ltAutoPauseOnMemberChange, h.settings.ltShareAudioLinks],
+    [true, true, false],
+  )
+  // 听众修改的是自己的默认值，不能改房间设置
+  await h.store.updateRoomSettings({ allowMemberControl: true })
+  await flush()
+  assert.equal(h.settings.ltAllowMemberControl, true)
+  assert.equal(h.store.roomSettings.value.allowMemberControl, false)
+  assert.ok(!h.commands.some(entry => entry.args?.event?.type === 'UPDATE_SETTINGS'))
+  await h.store.leaveRoom()
+  assert.equal(h.store.roomSettings.value.shareAudioLinks, false, 'outside a room the defaults apply again')
+})
+
+const hostSettings = async h => {
+  await h.create()
+  await h.store.updateRoomSettings({ shareAudioLinks: true })
+  await flush()
+  assert.equal(h.settings.ltShareAudioLinks, true)
+  assert.equal(h.store.roomSettings.value.shareAudioLinks, true)
+  const update = h.commands.find(entry => entry.args?.event?.type === 'UPDATE_SETTINGS')
+  assert.ok(update, 'the host sends the change to the room')
+  assert.equal(update.args.event.roomSettings.shareAudioLinks, true)
+  assert.equal(update.args.event.roomSettings.allowMemberControl, true)
+}
+hostSettings.options = { role: 'controller', initialState: room([wireTrack(1)], { controllerUserUuid: '11111111-1111-4111-8111-111111111111' }) }
+await test('settings changed while hosting are sent to the room', hostSettings)
+
+await test('identity reset is immediate and refused inside a room', async h => {
+  const before = h.store.userUuid.value
+  assert.equal(h.store.resetIdentity(), true)
+  assert.notEqual(h.store.userUuid.value, before)
+  assert.match(h.store.userUuid.value, /^[0-9a-f-]{36}$/)
+  await h.join()
+  const inRoom = h.store.userUuid.value
+  assert.equal(h.store.resetIdentity(), false)
+  assert.equal(h.store.userUuid.value, inRoom)
+})
 
 if (failures.length) {
   console.error(`${passed} store tests passed; ${failures.length} failed: ${failures.join('; ')}`)

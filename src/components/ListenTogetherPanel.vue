@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { useListenTogetherStore } from '@/stores/listenTogether'
+import { LT_NICKNAME_MAX_LENGTH } from '@/stores/listenTogether/protocol'
 import { useI18n } from 'vue-i18n'
 
 const props = defineProps<{ open: boolean }>()
@@ -215,7 +216,7 @@ onUnmounted(() => {
     <div v-if="!lt.isConnected && lt.connectionState !== 'connecting'" class="lt-body">
       <div class="lt-field">
         <label>{{ t('listen_together.nickname') }}</label>
-        <input v-model="lt.nickname" type="text" class="lt-input" maxlength="20" />
+        <input v-model.trim="lt.nickname" type="text" class="lt-input" :maxlength="LT_NICKNAME_MAX_LENGTH" />
       </div>
 
       <div class="lt-field">

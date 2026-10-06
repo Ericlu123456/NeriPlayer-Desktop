@@ -88,18 +88,18 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
       || `NERIPC${userUuid.value.replace(/-/g, '').slice(0, 4).toUpperCase()}`,
     set: (v: string) => { settings.ltNickname = v },
   })
-  const roomSettings = computed({
-    get: () => ({
+  // 设置页里的房间选项是「新建房间的默认值」；进房后生效的是房间自己的设置
+  // （建房时取默认值，加入时取房主下发的）。房间状态同步不得改写用户偏好，
+  // 只有用户主动修改（updateRoomSettings）才写回 settings（对齐 Android ListenTogetherPreferences）
+  function preferredRoomSettings(): ListenTogetherRoomSettings {
+    return {
       allowMemberControl: settings.ltAllowMemberControl,
       autoPauseOnMemberChange: settings.ltAutoPauseOnMemberChange,
       shareAudioLinks: settings.ltShareAudioLinks,
-    }),
-    set: (v: ListenTogetherRoomSettings) => {
-      settings.ltAllowMemberControl = v.allowMemberControl
-      settings.ltAutoPauseOnMemberChange = v.autoPauseOnMemberChange
-      settings.ltShareAudioLinks = v.shareAudioLinks
-    },
-  })
+    }
+  }
+  const liveRoomSettings = ref<ListenTogetherRoomSettings | null>(null)
+  const roomSettings = computed<ListenTogetherRoomSettings>(() => liveRoomSettings.value ?? preferredRoomSettings())
 
   // 内部状态
   let _heartbeatTimer: ReturnType<typeof setInterval> | null = null
@@ -173,6 +173,7 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
         throw new Error(t('listen_together.invalid_nickname'))
       }
       connectionState.value = 'connecting'
+      liveRoomSettings.value = preferredRoomSettings()
 
       // 构建初始快照
       const currentStreamUrl = player.currentTrack
@@ -236,6 +237,7 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
       const msg = e instanceof Error ? e.message : String(e)
       sessionError.value = msg
       connectionState.value = 'disconnected'
+      liveRoomSettings.value = null
       toast.error(t('listen_together.create_failed', { msg }))
     }
   }
@@ -278,7 +280,7 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
       if (resp.state) {
         roomState.value = resp.state
         _lastAppliedRoomVersion = resp.state.version || 0
-        roomSettings.value = resp.state.settings || roomSettings.value
+        if (resp.state.settings) liveRoomSettings.value = { ...resp.state.settings }
         markSync('INITIAL_STATE', resp.state.updatedAt || Date.now())
         // 将服务端状态应用到本地播放器
         applyRoomStateToPlayer(resp.state, 'join')
@@ -296,6 +298,7 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
       const msg = e instanceof Error ? e.message : String(e)
       sessionError.value = msg
       connectionState.value = 'disconnected'
+      liveRoomSettings.value = null
       toast.error(t('listen_together.join_failed', { msg }))
     }
   }
@@ -333,6 +336,7 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
     _joinSecret = null
     role.value = null
     roomState.value = null
+    liveRoomSettings.value = null
     _lastAppliedRoomVersion = 0
     sessionError.value = null
     connectionState.value = 'disconnected'
@@ -584,7 +588,7 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
     if (!accepted) return
     roomState.value = accepted
     _lastAppliedRoomVersion = accepted.version
-    roomSettings.value = accepted.settings
+    if (accepted.settings) liveRoomSettings.value = { ...accepted.settings }
     markSync(causeType, accepted.updatedAt || Date.now())
     if (apply) applyRoomStateToPlayer(accepted, causeType, expectedPositionMs)
   }
@@ -1638,17 +1642,40 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
     }, delay)
   }
 
-  // 房间设置更新
+  // 用户主动修改房间选项：总是写回默认值；正在主持房间时同步给房间（听众无权改房间设置）
   async function updateRoomSettings(newSettings: Partial<ListenTogetherRoomSettings>) {
     if (newSettings.allowMemberControl !== undefined) settings.ltAllowMemberControl = newSettings.allowMemberControl
     if (newSettings.autoPauseOnMemberChange !== undefined) settings.ltAutoPauseOnMemberChange = newSettings.autoPauseOnMemberChange
     if (newSettings.shareAudioLinks !== undefined) settings.ltShareAudioLinks = newSettings.shareAudioLinks
-    if (isController.value && connectionState.value === 'connected') {
+    if (!liveRoomSettings.value || !isController.value) return
+    liveRoomSettings.value = { ...liveRoomSettings.value, ...newSettings }
+    if (connectionState.value === 'connected') {
       sendEvent({
         type: 'UPDATE_SETTINGS',
-        roomSettings: roomSettings.value,
+        roomSettings: liveRoomSettings.value,
       })
     }
+  }
+
+  /** 是否在房间会话中（含连接中 / 断线重连） */
+  const isInSession = computed(() => roomId.value !== null || connectionState.value !== 'disconnected')
+
+  /**
+   * 重新生成身份 UUID，立即生效。房间内拒绝执行（对齐 Android：先离开房间），返回是否成功。
+   * 昵称保持不变；未设置昵称时默认名随新 UUID 变化。
+   */
+  function resetIdentity(): boolean {
+    if (isInSession.value) return false
+    const next = crypto.randomUUID()
+    localStorage.setItem(LT_UUID_KEY, next)
+    userUuid.value = next
+    return true
+  }
+
+  /** 配置导入改写了持久化的 UUID 后重新读取（会话中不切换身份） */
+  function reloadIdentity() {
+    if (isInSession.value) return
+    userUuid.value = loadOrCreateUuid()
   }
 
   // 邀请链接
@@ -1753,10 +1780,10 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
     roomState, sessionError, baseUrl, roomSettings,
     lastSyncEventType, lastSyncAt, lastReconnectAt,
     // 计算属性
-    isConnected, isController, members,
+    isConnected, isController, isInSession, members,
     // 方法
     createRoom, joinRoom, leaveRoom,
-    updateRoomSettings, copyInviteLink, getInviteLink,
+    updateRoomSettings, resetIdentity, reloadIdentity, copyInviteLink, getInviteLink,
     checkClipboardInvite,
     // 暴露给外部（seek 上报）
     reportSeekEvent,

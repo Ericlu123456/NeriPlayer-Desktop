@@ -25,6 +25,8 @@ import {
 import { useAuthStore } from '@/stores/auth'
 import { useSyncStore, type SyncFrequency } from '@/stores/sync'
 import { useDownloadStore } from '@/stores/download'
+import { useListenTogetherStore } from '@/stores/listenTogether'
+import { isValidLtNickname, LT_NICKNAME_MAX_LENGTH } from '@/stores/listenTogether/protocol'
 import { usePlayerStore } from '@/stores/player'
 import { useToastStore } from '@/stores/toast'
 import BilibiliCoverImage from '@/components/BilibiliCoverImage.vue'
@@ -53,6 +55,7 @@ const auth = useAuthStore()
 const syncStore = useSyncStore()
 const downloadStore = useDownloadStore()
 const player = usePlayerStore()
+const lt = useListenTogetherStore()
 const toast = useToastStore()
 const {
   darkMode, themeColor: selectedColor, coverStyle,
@@ -630,8 +633,21 @@ const showResetLtIdentityConfirm = ref(false)
 
 function confirmResetLtIdentity() {
   showResetLtIdentityConfirm.value = false
-  localStorage.removeItem('neri:lt-uuid')
-  toast.success(t('listen_together.identity_reset'))
+  if (lt.resetIdentity()) toast.success(t('listen_together.identity_reset'))
+  else toast.error(t('listen_together.reset_identity_in_room'))
+}
+
+// 与协议校验同一规则：去首尾空白，空值回到默认昵称，非法值不保存
+function handleLtNicknameChange(event: Event) {
+  const input = event.target as HTMLInputElement
+  const value = input.value.trim()
+  if (value && !isValidLtNickname(value)) {
+    toast.error(t('listen_together.invalid_nickname'))
+    input.value = ltNickname.value
+    return
+  }
+  ltNickname.value = value
+  input.value = value
 }
 
 const showConfigExportWarning = ref(false)
@@ -647,6 +663,7 @@ async function importConfig() {
   if (!result?.success) return
   applyTheme(darkMode.value, false)
   if (!dynamicColor.value) applyThemeColor(selectedColor.value, undefined, false)
+  lt.reloadIdentity()
   await player.applyPersistedSettings()
 }
 
@@ -1640,8 +1657,8 @@ useEscapeClose(
           class="lt-url-input lt-input-left"
           style="width: 140px"
           :value="ltNickname"
-          @change="ltNickname = ($event.target as HTMLInputElement).value"
-          maxlength="20"
+          @change="handleLtNicknameChange"
+          :maxlength="LT_NICKNAME_MAX_LENGTH"
           :placeholder="t('listen_together.nickname_placeholder')"
           :aria-label="t('listen_together.nickname')"
         />
@@ -1653,7 +1670,7 @@ useEscapeClose(
           <div class="setting-title">{{ t('listen_together.allow_member_control') }}</div>
         </div>
         <label class="m3-switch">
-          <input type="checkbox" v-model="ltAllowMemberControl" />
+          <input type="checkbox" :checked="ltAllowMemberControl" @change="lt.updateRoomSettings({ allowMemberControl: ($event.target as HTMLInputElement).checked })" />
           <span class="track"><span class="thumb"><span v-if="ltAllowMemberControl" class="material-symbols-rounded" style="font-size: 14px">check</span></span></span>
         </label>
       </div>
@@ -1664,7 +1681,7 @@ useEscapeClose(
           <div class="setting-title">{{ t('listen_together.auto_pause_on_change') }}</div>
         </div>
         <label class="m3-switch">
-          <input type="checkbox" v-model="ltAutoPauseOnMemberChange" />
+          <input type="checkbox" :checked="ltAutoPauseOnMemberChange" @change="lt.updateRoomSettings({ autoPauseOnMemberChange: ($event.target as HTMLInputElement).checked })" />
           <span class="track"><span class="thumb"><span v-if="ltAutoPauseOnMemberChange" class="material-symbols-rounded" style="font-size: 14px">check</span></span></span>
         </label>
       </div>
@@ -1675,7 +1692,7 @@ useEscapeClose(
           <div class="setting-title">{{ t('listen_together.share_audio_links') }}</div>
         </div>
         <label class="m3-switch">
-          <input type="checkbox" v-model="ltShareAudioLinks" />
+          <input type="checkbox" :checked="ltShareAudioLinks" @change="lt.updateRoomSettings({ shareAudioLinks: ($event.target as HTMLInputElement).checked })" />
           <span class="track"><span class="thumb"><span v-if="ltShareAudioLinks" class="material-symbols-rounded" style="font-size: 14px">check</span></span></span>
         </label>
       </div>
@@ -1686,7 +1703,12 @@ useEscapeClose(
           <div class="setting-title">{{ t('listen_together.reset_identity') }}</div>
           <div class="setting-desc">{{ t('listen_together.reset_identity_desc') }}</div>
         </div>
-        <button class="m3-chip sm danger" @click="showResetLtIdentityConfirm = true">{{ t('listen_together.reset_btn') }}</button>
+        <button
+          class="m3-chip sm danger"
+          :disabled="lt.isInSession"
+          :title="lt.isInSession ? t('listen_together.reset_identity_in_room') : undefined"
+          @click="showResetLtIdentityConfirm = true"
+        >{{ t('listen_together.reset_btn') }}</button>
       </div>
     </div></Transition>
         </div>
