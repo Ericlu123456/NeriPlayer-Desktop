@@ -28,6 +28,53 @@ fn playlists_path() -> std::path::PathBuf {
     path
 }
 
+#[tauri::command]
+pub async fn get_playlist_usage_stats() -> AppResult<Value> {
+    tokio::task::spawn_blocking(|| read_playlist_usage_stats(&manager::sync_extensions_path()))
+        .await
+        .map_err(|error| AppError::Other(error.to_string()))?
+}
+
+fn read_playlist_usage_stats(path: &std::path::Path) -> AppResult<Value> {
+    let content = match std::fs::read(path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(serde_json::json!([]));
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let metadata: Value = serde_json::from_slice(&content)?;
+    let metadata = metadata.as_object()
+        .ok_or_else(|| AppError::Other("Android sync metadata must be an object".into()))?;
+    let Some(extensions) = metadata.get("extensions") else {
+        return Ok(serde_json::json!([]));
+    };
+    let extensions = extensions.as_object()
+        .ok_or_else(|| AppError::Other("Android sync extensions must be an object".into()))?;
+    let Some(usage) = extensions.get("playlistUsageStats") else {
+        return Ok(serde_json::json!([]));
+    };
+    let mut usage = usage.clone();
+    let entries = usage.as_array_mut()
+        .ok_or_else(|| AppError::Other("Playlist usage stats must be an array".into()))?;
+    for entry in entries {
+        let entry = entry.as_object_mut()
+            .ok_or_else(|| AppError::Other("Playlist usage entries must be objects".into()))?;
+        // Android 的 Long 身份字段可能超过 JavaScript 安全整数范围
+        for field in ["id", "fid", "mid"] {
+            let Some(value) = entry.get_mut(field) else { continue; };
+            match value {
+                Value::Number(number) if number.is_i64() || number.is_u64() => {
+                    *value = Value::String(number.to_string());
+                }
+                Value::String(_) | Value::Null => {}
+                _ => return Err(AppError::Other(format!("Playlist usage {field} must be an integer or string"))),
+            }
+        }
+    }
+    Ok(usage)
+}
+
 #[derive(Serialize)]
 pub struct PlaylistInfo {
     pub id: i64,
@@ -35,6 +82,38 @@ pub struct PlaylistInfo {
     pub track_count: usize,
     pub modified_at: u64,
     pub cover_url: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+pub enum PlaylistId {
+    Number(i64),
+    Decimal(String),
+}
+
+impl PlaylistId {
+    fn into_i64(self) -> AppResult<i64> {
+        match self {
+            Self::Number(id) => Ok(id),
+            Self::Decimal(id) => id.parse::<i64>()
+                .map_err(|_| AppError::Other("Playlist id must be a signed 64-bit decimal integer".into())),
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn get_home_local_playlists() -> AppResult<Value> {
+    home_local_playlists_value(list_playlists().await?)
+}
+
+fn home_local_playlists_value(playlists: Vec<PlaylistInfo>) -> AppResult<Value> {
+    let items = playlists.into_iter().map(|playlist| {
+        let id = playlist.id.to_string();
+        let mut item = serde_json::to_value(playlist)?;
+        item["id"] = Value::String(id);
+        Ok(item)
+    }).collect::<AppResult<Vec<_>>>()?;
+    Ok(Value::Array(items))
 }
 
 #[tauri::command]
@@ -160,7 +239,8 @@ pub async fn rename_playlist(app: AppHandle, id: i64, name: String) -> AppResult
 }
 
 #[tauri::command]
-pub async fn get_playlist_tracks(id: i64) -> AppResult<Vec<TrackInfo>> {
+pub async fn get_playlist_tracks(id: PlaylistId) -> AppResult<Vec<TrackInfo>> {
+    let id = id.into_i64()?;
     let started = Instant::now();
     log::info!(target: "playlist-io", "tracks begin playlist_id={}", id);
     let queued_at = Instant::now();
@@ -325,9 +405,10 @@ fn next_track_added_at(tracks: &[TrackInfo], count: usize) -> i64 {
 #[tauri::command]
 pub async fn update_playlist_track(
     app: AppHandle,
-    playlist_id: Option<i64>,
+    playlist_id: Option<PlaylistId>,
     track: TrackInfo,
 ) -> AppResult<usize> {
+    let playlist_id = playlist_id.map(PlaylistId::into_i64).transpose()?;
     let path = playlists_path();
     let mut store = PlaylistStore::load_strict(&path)?;
     let target_key = playlist_track_key(&track);
@@ -383,7 +464,8 @@ pub async fn update_playlist_track(
 }
 
 #[tauri::command]
-pub async fn remove_from_playlist(app: AppHandle, playlist_id: i64, track_id: String) -> AppResult<()> {
+pub async fn remove_from_playlist(app: AppHandle, playlist_id: PlaylistId, track_id: String) -> AppResult<()> {
+    let playlist_id = playlist_id.into_i64()?;
     let path = playlists_path();
     let mut store = PlaylistStore::load_strict(&path)?;
     let removed_track = {
@@ -422,7 +504,8 @@ pub async fn remove_from_playlist(app: AppHandle, playlist_id: i64, track_id: St
 
 
 #[tauri::command]
-pub async fn remove_tracks_from_playlist(app: AppHandle, playlist_id: i64, track_ids: Vec<String>) -> AppResult<usize> {
+pub async fn remove_tracks_from_playlist(app: AppHandle, playlist_id: PlaylistId, track_ids: Vec<String>) -> AppResult<usize> {
+    let playlist_id = playlist_id.into_i64()?;
     let path = playlists_path();
     let mut store = PlaylistStore::load_strict(&path)?;
     if !store.playlists.iter().any(|playlist| playlist.id == playlist_id) {
@@ -479,9 +562,10 @@ pub async fn remove_tracks_from_playlist(app: AppHandle, playlist_id: i64, track
 #[tauri::command]
 pub async fn reorder_playlist_tracks(
     app: AppHandle,
-    playlist_id: i64,
+    playlist_id: PlaylistId,
     ordered_keys: Vec<String>,
 ) -> AppResult<usize> {
+    let playlist_id = playlist_id.into_i64()?;
     let path = playlists_path();
     let mut store = PlaylistStore::load_strict(&path)?;
 
@@ -1049,5 +1133,131 @@ mod artist_tests {
         assert_eq!(archive.tracks[0].id, "bilibili:BVcollection");
         assert_eq!(archive.tracks[0].duration_ms, 201000);
         assert!(archive.has_more);
+    }
+}
+
+#[cfg(test)]
+mod playlist_usage_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn playlist_ids_accept_legacy_numbers_and_precise_decimal_strings() {
+        for (value, expected) in [
+            (json!(42), 42),
+            (json!(-1001), -1001),
+            (json!("9007199254740993"), 9007199254740993),
+            (json!("9223372036854775807"), i64::MAX),
+            (json!("-9223372036854775808"), i64::MIN),
+        ] {
+            let id = serde_json::from_value::<PlaylistId>(value).unwrap();
+            assert_eq!(id.into_i64().unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn playlist_ids_reject_invalid_and_out_of_range_values() {
+        for value in ["", "invalid", "1.5", "9223372036854775808", "-9223372036854775809"] {
+            let id = serde_json::from_value::<PlaylistId>(json!(value)).unwrap();
+            assert!(id.into_i64().is_err());
+        }
+        for value in [json!(true), json!(null), json!(1.5), json!(9223372036854775808_u64)] {
+            assert!(serde_json::from_value::<PlaylistId>(value).is_err());
+        }
+    }
+
+    #[test]
+    fn home_local_playlists_preserve_long_ids_and_snake_case_summary_fields() {
+        let playlist = PlaylistInfo {
+            id: 9007199254740993,
+            name: "Local playlist".into(),
+            track_count: 12,
+            modified_at: 1720000000000,
+            cover_url: Some("https://example.test/cover".into()),
+        };
+        let original = serde_json::to_value(&playlist).unwrap();
+        let home = home_local_playlists_value(vec![playlist]).unwrap();
+
+        assert_eq!(original["id"].as_i64(), Some(9007199254740993));
+        assert_eq!(home, json!([{
+            "id": "9007199254740993",
+            "name": "Local playlist",
+            "track_count": 12,
+            "modified_at": 1720000000000_u64,
+            "cover_url": "https://example.test/cover",
+        }]));
+    }
+
+    #[test]
+    fn missing_metadata_returns_empty_usage_without_creating_a_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("sync-android-metadata.json");
+
+        assert_eq!(read_playlist_usage_stats(&path).unwrap(), json!([]));
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn metadata_without_playlist_usage_returns_an_empty_array() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("sync-android-metadata.json");
+        for metadata in [json!({}), json!({"extensions": {}})] {
+            std::fs::write(&path, metadata.to_string()).unwrap();
+            assert_eq!(read_playlist_usage_stats(&path).unwrap(), json!([]));
+        }
+    }
+
+    #[test]
+    fn corrupt_metadata_returns_an_error_without_quarantining_the_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("sync-android-metadata.json");
+        let content = b"{invalid metadata";
+        std::fs::write(&path, content).unwrap();
+
+        assert!(read_playlist_usage_stats(&path).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), content);
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn unreadable_metadata_returns_an_error() {
+        let directory = tempfile::tempdir().unwrap();
+        assert!(read_playlist_usage_stats(directory.path()).is_err());
+    }
+
+    #[test]
+    fn synced_usage_preserves_android_long_ids_and_camel_case_fields() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("sync-android-metadata.json");
+        let content = br#"{"extensions":{"playlistUsageStats":[{"playlistKey":"youtubeMusic:VLdemo","source":"youtubeMusic","id":9223372036854775807,"fid":9007199254740993,"mid":-9223372036854775808,"browseId":"VLdemo","playlistId":"demo","name":"Music","coverUrl":"https://example.test/cover","trackCount":12,"firstOpenedAt":1710000000000,"lastOpenedAt":1720000000000,"openCount":3,"counterShards":[]}],"localPlaylistPlaybackStats":[{"playlistId":7,"totalPlayCount":8}]},"playbackStats":[]}"#;
+        std::fs::write(&path, content).unwrap();
+
+        let usage = read_playlist_usage_stats(&path).unwrap();
+        assert_eq!(usage.as_array().unwrap().len(), 1);
+        assert_eq!(usage[0]["id"], "9223372036854775807");
+        assert_eq!(usage[0]["fid"], "9007199254740993");
+        assert_eq!(usage[0]["mid"], "-9223372036854775808");
+        assert_eq!(usage[0]["browseId"], "VLdemo");
+        assert_eq!(usage[0]["playlistId"], "demo");
+        assert_eq!(usage[0]["trackCount"], 12);
+        assert_eq!(usage[0]["lastOpenedAt"], 1720000000000_i64);
+        assert_eq!(usage[0]["openCount"], 3);
+        assert_eq!(std::fs::read(&path).unwrap(), content);
+    }
+
+    #[test]
+    fn invalid_usage_shapes_return_an_error() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("sync-android-metadata.json");
+        for metadata in [
+            json!([]),
+            json!({"extensions": []}),
+            json!({"extensions": {"playlistUsageStats": {}}}),
+            json!({"extensions": {"playlistUsageStats": [null]}}),
+            json!({"extensions": {"playlistUsageStats": [{"id": 1.5}]}}),
+        ] {
+            std::fs::write(&path, metadata.to_string()).unwrap();
+            assert!(read_playlist_usage_stats(&path).is_err());
+        }
     }
 }

@@ -11,6 +11,8 @@
     "greeting_afternoon": "こんにちは",
     "greeting_evening": "こんばんは",
     "recent_play": "最近再生",
+    "continue_play": "続きを聴く",
+    "continue_load_failed": "続きを聴くの読み込みに失敗しました",
     "favorites": "お気に入り",
     "local_music": "ローカル音楽",
     "downloads": "ダウンロード",

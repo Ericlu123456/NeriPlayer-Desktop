@@ -11,6 +11,8 @@
     "greeting_afternoon": "Good Afternoon",
     "greeting_evening": "Good Evening",
     "recent_play": "Recent Plays",
+    "continue_play": "Continue listening",
+    "continue_load_failed": "Failed to load continue listening",
     "favorites": "Favorites",
     "local_music": "Local Music",
     "downloads": "Downloads",

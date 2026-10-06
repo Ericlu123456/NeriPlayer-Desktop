@@ -430,6 +430,8 @@ fn main() {
             player_cmd::cycle_repeat,
             library_cmd::scan_music_directory,
             library_cmd::list_playlists,
+            library_cmd::get_playlist_usage_stats,
+            library_cmd::get_home_local_playlists,
             library_cmd::create_playlist,
             library_cmd::delete_playlist,
             library_cmd::rename_playlist,

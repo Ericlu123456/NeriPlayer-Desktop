@@ -11,6 +11,8 @@
     "greeting_afternoon": "下午好",
     "greeting_evening": "晚上好",
     "recent_play": "最近播放",
+    "continue_play": "继续播放",
+    "continue_load_failed": "继续播放加载失败",
     "favorites": "我的收藏",
     "local_music": "本地音乐",
     "downloads": "下载管理",

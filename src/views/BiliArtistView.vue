@@ -152,7 +152,7 @@ function selectTab(tab: 'videos' | 'collections' | 'series') {
   loadingCollection.value = false
   query.value = ''
 }
-watch(mid, () => {
+watch(() => [mid.value, route.query.contentId, route.query.kind], () => {
   contentsGeneration++
   contents.value = null
   selectedContent.value = null
@@ -162,6 +162,15 @@ watch(mid, () => {
   loadingCollection.value = false
   void load()
   void loadContents()
+  const contentId = String(route.query.contentId || '')
+  const kind = route.query.kind
+  if (/^[1-9]\d*$/.test(contentId) && (kind === 'collection' || kind === 'series')) {
+    activeTab.value = kind === 'collection' ? 'collections' : 'series'
+    void loadCollection({
+      id: contentId, kind, name: String(route.query.name || ''), coverUrl: String(route.query.cover || ''),
+      description: '', total: Number(route.query.count || 0),
+    })
+  }
 }, { immediate: true })
 onUnmounted(() => { generation++; contentsGeneration++; collectionGeneration++ })
 </script>

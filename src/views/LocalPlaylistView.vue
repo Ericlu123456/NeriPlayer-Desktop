@@ -214,8 +214,8 @@ function formatTotalDuration(ms: number): string {
 }
 
 async function loadDetail(options: { silent?: boolean } = {}) {
-  const id = Number(route.params.id)
-  if (!id) return
+  const id = String(route.params.id || '')
+  if (!/^-?[1-9]\d*$/.test(id)) return
 
   const loadStarted = performance.now()
   const silent = options.silent === true
@@ -233,7 +233,7 @@ async function loadDetail(options: { silent?: boolean } = {}) {
 
   try {
     const listStarted = performance.now()
-    const playlists = await invoke<{ id: number; name: string }[]>('list_playlists')
+    const playlists = await invoke<{ id: string; name: string }[]>('get_home_local_playlists')
     log.info('playlist list returned:', {
       playlistId: id,
       count: playlists.length,
@@ -358,7 +358,7 @@ function requestBatchRemove() {
 }
 
 async function confirmRemove() {
-  const id = Number(route.params.id)
+  const id = String(route.params.id || '')
   try {
     if (removeMode.value === 'batch') {
       isBatchRemoving.value = true
@@ -724,7 +724,7 @@ async function onTrackDragPointerUp(e: PointerEvent) {
   try {
     isPersistingTrackOrder.value = true
     await invoke('reorder_playlist_tracks', {
-      playlistId: Number(route.params.id),
+      playlistId: String(route.params.id),
       orderedKeys: nextTracks.map(trackOrderKey),
     })
     player.prefetchPlaybackTracks(tracks.value)

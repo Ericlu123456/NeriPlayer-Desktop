@@ -1,6 +1,8 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, watch } from 'vue'
+import { ref, computed, onMounted, onActivated, onUnmounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
+import { convertFileSrc, invoke } from '@tauri-apps/api/core'
+import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 
 defineOptions({ name: 'HomeView' })
 import { usePlayerStore } from '@/stores/player'
@@ -13,6 +15,8 @@ import { useI18n } from 'vue-i18n'
 import type { TrackInfo } from '@/stores/player'
 import { useToastStore } from '@/stores/toast'
 import BilibiliCoverImage from '@/components/BilibiliCoverImage.vue'
+import { normalizeContinuePlaylists, continuePlaylistRoute, type ContinuePlaylist } from '@/modules/library/homeContinue'
+import { createLogger } from '@/utils/logger'
 
 const router = useRouter()
 const player = usePlayerStore()
@@ -23,6 +27,80 @@ const history = useHistoryStore()
 const settings = useSettingsStore()
 const toast = useToastStore()
 const { t } = useI18n()
+const log = createLogger('home')
+
+const continuePlaylists = ref<ContinuePlaylist[]>([])
+const continueLoading = ref(true)
+const continueError = ref(false)
+const continueGridRef = ref<HTMLElement | null>(null)
+const continueLimit = ref(1)
+const visibleContinuePlaylists = computed(() => continuePlaylists.value.slice(0, continueLimit.value))
+let continueResizeObserver: ResizeObserver | null = null
+let continueRequest = 0
+let homeUnmounted = false
+let unlistenPlaylistsChanged: UnlistenFn | null = null
+
+watch(continueGridRef, element => {
+  continueResizeObserver?.disconnect()
+  if (!element) return
+  const updateLimit = () => {
+    continueLimit.value = getComputedStyle(element).gridTemplateColumns.split(' ').filter(Boolean).length
+  }
+  continueResizeObserver = new ResizeObserver(updateLimit)
+  continueResizeObserver.observe(element)
+  updateLimit()
+}, { flush: 'post' })
+
+async function loadContinuePlaylists() {
+  const request = ++continueRequest
+  continueLoading.value = true
+  continueError.value = false
+  try {
+    const [usage, local] = await Promise.allSettled([
+      invoke<unknown>('get_playlist_usage_stats'),
+      invoke<unknown>('get_home_local_playlists'),
+    ])
+    if (request !== continueRequest || homeUnmounted) return
+    if (usage.status === 'rejected') throw usage.reason
+    if (local.status === 'rejected') {
+      continueError.value = true
+      log.error('Load local continue playlists failed:', local.reason)
+    }
+    continuePlaylists.value = normalizeContinuePlaylists(usage.value, local.status === 'fulfilled' ? local.value : []).map(playlist => ({
+      ...playlist,
+      coverUrl: playlist.coverUrl && !/^(https?:|asset:|data:|blob:)/i.test(playlist.coverUrl)
+        ? convertFileSrc(playlist.coverUrl) : playlist.coverUrl,
+    }))
+  } catch (error) {
+    if (request !== continueRequest || homeUnmounted) return
+    continueError.value = true
+    log.error('Load continue playlists failed:', error)
+  } finally {
+    if (request === continueRequest && !homeUnmounted) continueLoading.value = false
+  }
+}
+
+function openContinuePlaylist(playlist: ContinuePlaylist) {
+  const target = continuePlaylistRoute(playlist)
+  if (target) void router.push(target)
+}
+
+onActivated(() => void loadContinuePlaylists())
+onMounted(async () => {
+  try {
+    const stop = await listen('playlists-changed', () => void loadContinuePlaylists())
+    if (homeUnmounted) stop()
+    else unlistenPlaylistsChanged = stop
+  } catch (error) {
+    log.error('Listen for playlist changes failed:', error)
+  }
+})
+onUnmounted(() => {
+  homeUnmounted = true
+  continueRequest++
+  unlistenPlaylistsChanged?.()
+  continueResizeObserver?.disconnect()
+})
 
 const showNotifications = ref(false)
 const homeSearchQuery = ref('')
@@ -48,7 +126,8 @@ const showSkeleton = computed(() =>
   recommend.recommendedPlaylists.length === 0 &&
   Object.keys(recommend.userPlaylists).length === 0 &&
   hotSongs.value.length === 0 &&
-  radarSongs.value.length === 0
+  radarSongs.value.length === 0 &&
+  continuePlaylists.value.length === 0
 )
 
 const greeting = computed(() => {
@@ -329,6 +408,34 @@ function formatNotifTime(ts: number): string {
         </Teleport>
       </div>
     </header>
+
+    <section v-if="continuePlaylists.length || continueLoading || continueError" class="section continue-section">
+      <div class="section-header">
+        <h2 class="section-title">
+          <span class="material-symbols-rounded section-icon">history</span>
+          {{ t('home.continue_play') }}
+        </h2>
+      </div>
+      <div v-if="continuePlaylists.length" ref="continueGridRef" class="continue-scroll">
+        <button v-for="playlist in visibleContinuePlaylists" :key="playlist.key" type="button" class="continue-card" @click="openContinuePlaylist(playlist)">
+          <div class="playlist-cover">
+            <span class="material-symbols-rounded filled cover-fallback">queue_music</span>
+            <BilibiliCoverImage v-if="playlist.coverUrl" :src="playlist.coverUrl" :alt="playlist.name" />
+            <span class="continue-open material-symbols-rounded">arrow_forward</span>
+          </div>
+          <div class="playlist-name">{{ playlist.name }}</div>
+          <div class="daily-artist">{{ t('player.track_count', { count: playlist.trackCount }) }}</div>
+        </button>
+      </div>
+      <div v-else-if="continueLoading" class="section-state">
+        <span class="material-symbols-rounded spinning">progress_activity</span>
+        <span>{{ t('player.loading') }}</span>
+      </div>
+      <div v-else-if="continueError" class="section-state error">
+        <span>{{ t('home.continue_load_failed') }}</span>
+        <button class="section-state-action" @click="loadContinuePlaylists">{{ t('player.retry') }}</button>
+      </div>
+    </section>
 
     <section class="quick-access">
       <div
@@ -676,6 +783,51 @@ function formatNotifTime(ts: number): string {
   margin-bottom: 24px;
   gap: 16px;
   flex-wrap: wrap;
+}
+
+.section-icon {
+  color: var(--md-primary);
+  font-size: 23px;
+  vertical-align: middle;
+  margin-right: 6px;
+}
+
+.continue-scroll {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 20px;
+  overflow: hidden;
+  padding: 4px 2px 12px;
+}
+
+@media (max-width: 600px) {
+  .continue-scroll { grid-template-columns: repeat(auto-fill, minmax(128px, 1fr)); gap: 14px; }
+}
+
+.continue-card {
+  min-width: 0;
+  text-align: left;
+  border-radius: var(--radius-md);
+
+  .playlist-name { font-size: 14px; margin-top: 10px; font-weight: 600; }
+  .daily-artist { font-size: 12px; margin-top: 4px; }
+  &:focus-visible { outline: 2px solid var(--md-primary); outline-offset: 2px; }
+  &:hover .continue-open, &:focus-visible .continue-open { opacity: 1; }
+}
+
+.continue-open {
+  position: absolute;
+  bottom: 10px;
+  right: 10px;
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border-radius: var(--radius-full);
+  background: var(--md-primary-container);
+  color: var(--md-on-primary-container);
+  opacity: 0;
+  transition: opacity var(--duration-short);
 }
 
 .home-search {
