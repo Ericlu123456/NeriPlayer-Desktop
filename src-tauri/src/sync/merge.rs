@@ -108,6 +108,29 @@ pub fn converge_lyrics(data: &mut SyncData, validate_references: bool) -> crate:
     Ok(())
 }
 
+/// 把一首歌当前的歌词状态并入覆盖记录，修订号更高才替换（对齐 Android SyncLyricOverrideStore）
+pub fn record_lyric_override(
+    extensions: &mut serde_json::Map<String, serde_json::Value>,
+    song: &SyncSong,
+) -> crate::error::AppResult<()> {
+    let mut data = SyncData {
+        extensions: std::mem::take(extensions),
+        playlists: vec![SyncPlaylist {
+            id: String::new(),
+            name: String::new(),
+            songs: vec![song.clone()],
+            created_at: 0,
+            modified_at: 0,
+            is_deleted: false,
+            song_order_version: DISPLAY_ORDER_SONG_ORDER_VERSION,
+        }],
+        ..Default::default()
+    };
+    let result = converge_lyrics(&mut data, false);
+    *extensions = data.extensions;
+    result
+}
+
 fn normalize_lyric_state(song: &SyncSong) -> SyncSong {
     let mut song=song.clone();
     let has_text=[song.matched_lyric.as_ref(),song.matched_translated_lyric.as_ref(),song.matched_romanized_lyric.as_ref(),song.original_lyric.as_ref(),song.original_translated_lyric.as_ref(),song.original_romanized_lyric.as_ref()].iter().any(|value|value.is_some());
@@ -2158,6 +2181,41 @@ mod tests {
         );
         assert!(merged.playlists[0].is_deleted);
         assert!(merged.playlists[0].songs.is_empty());
+    }
+
+    fn edited_lyrics(revision: i64, text: &str) -> SyncSong {
+        SyncSong {
+            lyric_sync_edited: Some(true),
+            lyric_sync_revision: revision,
+            matched_lyric: Some(text.into()),
+            ..song("1", 10)
+        }
+    }
+
+    #[test]
+    fn recorded_lyric_overrides_keep_the_highest_revision() {
+        let mut extensions = serde_json::Map::new();
+        record_lyric_override(&mut extensions, &edited_lyrics(10, "first")).unwrap();
+        record_lyric_override(&mut extensions, &edited_lyrics(5, "older")).unwrap();
+        assert_eq!(extensions["lyricOverrides"][0]["matchedLyric"], "first");
+        record_lyric_override(&mut extensions, &edited_lyrics(20, "newer")).unwrap();
+        assert_eq!(extensions["lyricOverrides"].as_array().unwrap().len(), 1);
+        assert_eq!(extensions["lyricOverrides"][0]["matchedLyric"], "newer");
+    }
+
+    #[test]
+    fn a_desktop_lyric_edit_after_the_phone_edit_wins_the_merge() {
+        let phone = edited_lyrics(5, "phone");
+        let desk = edited_lyrics(1_800_000_000_000, "desk");
+        for (local, remote) in [(&desk, &phone), (&phone, &desk)] {
+            let merged = three_way_merge(
+                &sync_data(vec![playlist(vec![local.clone()])]),
+                &sync_data(vec![playlist(vec![remote.clone()])]),
+                0,
+                &HashMap::new(),
+            );
+            assert_eq!(merged.playlists[0].songs[0].matched_lyric.as_deref(), Some("desk"));
+        }
     }
 
     #[test]

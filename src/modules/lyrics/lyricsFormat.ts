@@ -255,6 +255,7 @@ export function withUpdatedLyricsPayload(
   nextLyric: string | null,
   nextTranslated: string | null,
   source?: string | null,
+  now: number = Date.now(),
 ): Record<string, unknown> {
   const base: Record<string, unknown> = { ...(payload || {}) }
   const prevMatched = typeof base.matchedLyric === 'string'
@@ -304,6 +305,13 @@ export function withUpdatedLyricsPayload(
     base.syncMetadataVersion = 1
     delete base.sync_metadata_version
   }
+
+  // 用户编辑：标记已编辑并推进修订号，同步合并按修订号取最新（对齐 Android nextUserLyricSyncRevision）
+  const previousRevision = Number(base.lyricSyncRevision ?? base.lyric_sync_revision ?? 0)
+  base.lyricSyncEdited = true
+  base.lyricSyncRevision = Math.max(now, (Number.isFinite(previousRevision) ? previousRevision : 0) + 1)
+  delete base.lyric_sync_edited
+  delete base.lyric_sync_revision
 
   return base
 }

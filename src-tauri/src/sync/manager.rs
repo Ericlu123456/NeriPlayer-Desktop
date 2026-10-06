@@ -452,7 +452,7 @@ pub fn track_to_playlist_song_deletion_pub(
 }
 
 /// TrackInfo -> SyncSong 转换（内部使用）
-fn track_to_sync_song(track: &TrackInfo) -> SyncSong {
+pub(crate) fn track_to_sync_song(track: &TrackInfo) -> SyncSong {
     if let Some(payload) = &track.sync_payload {
         let mut preserved = payload.normalized_for_sync();
         preserved.added_at = track.added_at.max(0);

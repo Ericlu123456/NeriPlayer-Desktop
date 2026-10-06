@@ -470,6 +470,7 @@ fn main() {
             library_cmd::reorder_playlist_tracks,
             library_cmd::reorder_playlists,
             library_cmd::update_playlist_track,
+            library_cmd::record_lyric_override,
             library_cmd::list_favorite_playlists,
             library_cmd::set_artist_favorite,
             library_cmd::import_followed_artists,

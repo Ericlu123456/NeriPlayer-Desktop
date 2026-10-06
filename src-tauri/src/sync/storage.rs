@@ -62,6 +62,16 @@ pub(crate) fn save_archive_metadata(connection: &Connection, data: &SyncData) ->
     )
 }
 
+/// 只改扩展段，统计与清空时间原样保留
+pub(crate) fn update_archive_extensions(
+    connection: &Connection,
+    update: impl FnOnce(&mut serde_json::Map<String, serde_json::Value>) -> AppResult<()>,
+) -> AppResult<()> {
+    let mut metadata = load_archive_metadata(connection)?;
+    update(&mut metadata.extensions)?;
+    db::meta::set_document(connection, ARCHIVE_METADATA_KEY, &metadata)
+}
+
 pub(crate) fn load_recent_play_history(connection: &Connection) -> AppResult<RecentPlayHistory> {
     Ok(db::meta::get_document(connection, RECENT_PLAY_HISTORY_KEY)?.unwrap_or_default())
 }

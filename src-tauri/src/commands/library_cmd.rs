@@ -449,6 +449,29 @@ fn next_track_added_at(tracks: &[TrackInfo], count: usize) -> i64 {
     now.max(existing_max.saturating_add(count as i64)).max(1)
 }
 
+/// 用户改过的歌词记成覆盖记录：不在任何歌单里、只在队列或历史里的歌也能同步出去
+/// （对齐 Android SyncLyricOverrideStore）
+#[tauri::command]
+pub async fn record_lyric_override(track: TrackInfo) -> AppResult<()> {
+    let song = manager::track_to_sync_song(&track);
+    if song.lyric_sync_revision <= 0 {
+        return Ok(());
+    }
+    tokio::task::spawn_blocking(move || {
+        // 与同步回写共用歌单锁并推进写入版本：进行中的同步会推迟，而不是用旧快照的扩展段覆盖这条记录
+        let _guard = crate::library::playlist::lock_io();
+        crate::db::user_db()?.write(|transaction| {
+            crate::sync::storage::update_archive_extensions(transaction, |extensions| {
+                crate::sync::merge::record_lyric_override(extensions, &song)
+            })
+        })?;
+        crate::library::playlist::mark_io_changed();
+        Ok(())
+    })
+    .await
+    .map_err(|error| AppError::Other(format!("record_lyric_override task failed: {error}")))?
+}
+
 /// 按 track id / playlist_key 更新本地歌单中的曲目元数据(含 sync_payload)
 /// 用于歌词编辑、偏移写入等需要回写 Android 对齐字段的场景
 #[tauri::command]

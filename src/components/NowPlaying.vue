@@ -36,7 +36,11 @@ import {
 } from '@/modules/lyrics/lyricsFormat'
 import { offsetBucketForSource } from '@/modules/lyrics/lyricOffset'
 import { isEditableTarget } from '@/modules/shortcuts/platform'
-import { persistTrackSyncPayload, withUpdatedCustomInfoPayload } from '@/modules/lyrics/syncTrackPayload'
+import {
+  persistTrackSyncPayload,
+  recordLyricOverride,
+  withUpdatedCustomInfoPayload,
+} from '@/modules/lyrics/syncTrackPayload'
 import { useLyricOffsetStore } from '@/stores/lyricOffset'
 import HyperBackground from './HyperBackground.vue'
 import CoverBlurBackground from './CoverBlurBackground.vue'
@@ -240,6 +244,7 @@ async function commitLyricsToTrack(
   const updatedTrack = player.currentTrack
   if (updatedTrack) {
     await persistTrackSyncPayload(updatedTrack)
+    await recordLyricOverride(updatedTrack)
   }
 }
 
