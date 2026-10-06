@@ -17,6 +17,9 @@ use tokio::io::AsyncWriteExt;
 #[path = "download_recovery.rs"]
 mod recovery;
 
+#[path = "download_metadata.rs"]
+pub(crate) mod metadata;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DownloadedTrack {
     pub id: String,
@@ -213,21 +216,36 @@ fn render_download_filename(
         .strip_prefix("Bilibili|")
         .map(|s| s.split('|').next().unwrap_or(s))
         .unwrap_or("");
+    let identity = metadata::DownloadMetadata::for_track(&DownloadedTrack {
+        id: track_id.to_string(), title: title.to_string(), artist: artist.to_string(),
+        album: album.to_string(), duration_ms: 0, cover_url: None, source: source.to_string(),
+        file_path: String::new(), file_size: 0, downloaded_at: 0,
+    });
+    let song_id = identity.song_id.map(|id| id.to_string()).unwrap_or_else(|| audio_id.to_string());
+    let identity_hash = {
+        use sha2::Digest;
+        let key = identity.stable_key.as_deref().unwrap_or(track_id);
+        hex::encode(sha2::Sha256::digest(key.as_bytes()))[..12].to_string()
+    };
+    let album = metadata::normalized_album(album);
+    let source = if source == "youtube" { "youtubeMusic" } else { source };
     let rendered = tpl
         .replace("{title}", title)
         .replace("{artist}", artist)
-        .replace("{album}", album)
+        .replace("{album}", &album)
         .replace("{source}", source)
-        .replace("{id}", audio_id)
+        .replace("{id}", &song_id)
         .replace("{audioId}", audio_id)
         .replace("{subAudioId}", sub_audio_id)
+        .replace("{hash}", &identity_hash)
         .replace("%title%", title)
         .replace("%artist%", artist)
-        .replace("%album%", album)
+        .replace("%album%", &album)
         .replace("%source%", source)
-        .replace("%id%", audio_id)
+        .replace("%id%", &song_id)
         .replace("%audioId%", audio_id)
-        .replace("%subAudioId%", sub_audio_id);
+        .replace("%subAudioId%", sub_audio_id)
+        .replace("%hash%", &identity_hash);
     // 折叠占位符替换为空后残留的多余分隔符与空括号（SC-5）
     let rendered = collapse_empty_name_separators(&rendered);
     let sanitized = sanitize_filename(&rendered);
@@ -345,53 +363,82 @@ fn extract_qq_song_mid(track_id: &str) -> Option<&str> {
     track_id.strip_prefix("qq:").filter(|id| !id.is_empty())
 }
 
+async fn fetch_original_download_lyrics(
+    client: &reqwest::Client,
+    track: &DownloadedTrack,
+) -> Option<(String, Option<String>, Option<String>)> {
+    let acceptable = |content: &str| {
+        let lines = crate::lyrics::parser::parse_auto(content);
+        !lines.is_empty() && crate::lyrics::manager::lyrics_duration_acceptable(&lines, track.duration_ms)
+    };
+    if let Some(id) = extract_netease_id(&track.id) {
+        let netease = crate::api::netease::client::NeteaseClient::new(client);
+        let bundle = tokio::time::timeout(Duration::from_secs(15), netease.get_lyrics(id)).await.ok()?.ok()?;
+        let original = bundle.yrc.filter(|content| acceptable(content))
+            .or_else(|| bundle.lrc.filter(|content| acceptable(content)))?;
+        let translation = bundle.ytlrc.filter(|content| !content.trim().is_empty())
+            .or_else(|| bundle.tlyric.filter(|content| !content.trim().is_empty()));
+        Some((original, translation, bundle.romalrc.filter(|content| !content.trim().is_empty())))
+    } else if let Some(mid) = extract_qq_song_mid(&track.id) {
+        let qq = crate::api::qq::client::QqMusicClient::new(client);
+        let (original, translation) = tokio::time::timeout(Duration::from_secs(15), qq.get_lyrics(mid)).await.ok()?.ok()?;
+        Some((original.filter(|content| acceptable(content))?, translation.filter(|content| !content.trim().is_empty()), None))
+    } else {
+        None
+    }
+}
+
 async fn write_download_sidecars(
     client: &reqwest::Client,
     file_path: &std::path::Path,
-    track_id: &str,
-    title: &str,
-    artist: &str,
-    duration_ms: u64,
-    cover_url: Option<&str>,
+    track: &DownloadedTrack,
+    metadata: &mut metadata::DownloadMetadata,
 ) -> AppResult<()> {
-    let mut written_files: Vec<PathBuf> = Vec::new();
-
-    // 歌词 sidecar
+    let root = file_path.parent().ok_or_else(|| AppError::Metadata("下载路径无效".into()))?;
+    let stem = file_path.file_stem().ok_or_else(|| AppError::Metadata("下载文件名无效".into()))?.to_string_lossy();
+    let lyrics_dir = root.join("Lyrics");
+    let covers_dir = root.join("Covers");
+    std::fs::create_dir_all(&lyrics_dir)?;
+    std::fs::create_dir_all(&covers_dir)?;
     let lyrics_manager = LyricsManager::new(client);
-    let youtube_video_id = track_id
+    let youtube_video_id = track.id
         .strip_prefix("youtube:")
         .filter(|id| !id.is_empty());
-    let lyrics = lyrics_manager
+    let original_bundle = fetch_original_download_lyrics(client, track).await;
+    let lyrics = if let Some((original, _, _)) = &original_bundle {
+        crate::lyrics::parser::parse_auto(original)
+    } else { tokio::time::timeout(Duration::from_secs(60), lyrics_manager
         .fetch_lyrics(
-            title,
-            artist,
-            duration_ms / 1000,
+            &track.title,
+            &track.artist,
+            track.duration_ms / 1000,
             None,
-            extract_netease_id(track_id),
-            extract_qq_song_mid(track_id),
+            extract_netease_id(&track.id),
+            extract_qq_song_mid(&track.id),
             youtube_video_id,
-        )
+        ))
         .await
-        .unwrap_or_default();
-
-    if let Some(lrc_text) = build_lrc_text(&lyrics) {
-        let lrc_path = download_sidecar_path(file_path, "lrc")
-            .ok_or_else(|| AppError::Other("下载文件名无效，无法写入歌词".into()))?;
-        // 原子写：sidecar 是 load_local_sidecar_lyrics 的最高优先级本地源，
-        // 半截写入会被读回成损坏歌词（LY-6）
+        .unwrap_or_else(|_| Ok(Vec::new()))
+        .unwrap_or_default() };
+    if let Some(lrc_text) = original_bundle.as_ref().map(|bundle| bundle.0.clone()).or_else(|| metadata::original_lyrics(&lyrics)) {
+        let lrc_path = lyrics_dir.join(format!("{stem}.lrc"));
         crate::fsutil::atomic_write(&lrc_path, lrc_text.as_bytes())?;
-        written_files.push(lrc_path);
+        metadata.lyric_path = Some(lrc_path.to_string_lossy().to_string());
+        metadata.original_lyric = Some(lrc_text);
     }
-
-    if let Some(tlrc_text) = build_translation_lrc_text(&lyrics) {
-        let tlrc_path = download_sidecar_path(file_path, "tlrc")
-            .ok_or_else(|| AppError::Other("下载文件名无效，无法写入翻译歌词".into()))?;
+    if let Some(tlrc_text) = original_bundle.as_ref().and_then(|bundle| bundle.1.clone()).or_else(|| build_translation_lrc_text(&lyrics)) {
+        let tlrc_path = lyrics_dir.join(format!("{stem}_trans.lrc"));
         crate::fsutil::atomic_write(&tlrc_path, tlrc_text.as_bytes())?;
-        written_files.push(tlrc_path);
+        metadata.translated_lyric_path = Some(tlrc_path.to_string_lossy().to_string());
+        metadata.original_translated_lyric = Some(tlrc_text);
     }
-
-    // 封面 sidecar
-    if let Some(raw_cover_url) = cover_url {
+    if let Some(roman_text) = original_bundle.as_ref().and_then(|bundle| bundle.2.clone()).or_else(|| metadata::romanized_lyrics(&lyrics)) {
+        let roman_path = lyrics_dir.join(format!("{stem}_roma.lrc"));
+        crate::fsutil::atomic_write(&roman_path, roman_text.as_bytes())?;
+        metadata.romanized_lyric_path = Some(roman_path.to_string_lossy().to_string());
+        metadata.original_romanized_lyric = Some(roman_text);
+    }
+    if let Some(raw_cover_url) = track.cover_url.as_deref() {
         let normalized_cover_url = if raw_cover_url.starts_with("//") {
             format!("https:{}", raw_cover_url)
         } else {
@@ -400,6 +447,7 @@ async fn write_download_sidecars(
         if !normalized_cover_url.trim().is_empty() {
             if let Ok(resp) = client
                 .get(&normalized_cover_url)
+                .timeout(Duration::from_secs(30))
                 .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
                 .send()
                 .await
@@ -415,13 +463,10 @@ async fn write_download_sidecars(
                         if let Ok(bytes) = resp.bytes().await {
                             if !bytes.is_empty() {
                                 let ext = ext_from_image_content_type(&content_type);
-                                let cover_path = download_sidecar_path(file_path, ext)
-                                    .ok_or_else(|| {
-                                        AppError::Other("下载文件名无效，无法写入封面".into())
-                                    })?;
-                                // 原子写封面 sidecar（DL-4）
+                                let key = metadata.stable_key.as_deref().unwrap_or(&track.id);
+                                let cover_path = covers_dir.join(format!("{stem}-{}.{ext}", metadata::cover_suffix(key)));
                                 crate::fsutil::atomic_write(&cover_path, &bytes)?;
-                                written_files.push(cover_path);
+                                metadata.cover_path = Some(cover_path.to_string_lossy().to_string());
                             }
                         }
                     }
@@ -430,9 +475,6 @@ async fn write_download_sidecars(
         }
     }
 
-    if written_files.is_empty() {
-        return Ok(());
-    }
     Ok(())
 }
 
@@ -470,12 +512,15 @@ fn downloads_dir(app: &AppHandle, custom_dir: Option<&str>) -> AppResult<PathBuf
 
 /// 默认下载目录
 fn default_downloads_dir(app: &AppHandle) -> AppResult<PathBuf> {
-    let dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| AppError::Other(e.to_string()))?
-        .join("downloads");
-    Ok(dir)
+    if let Some(music) = dirs_next::audio_dir() {
+        Ok(music.join("NeriPlayer"))
+    } else {
+        legacy_downloads_dir(app)
+    }
+}
+
+fn legacy_downloads_dir(app: &AppHandle) -> AppResult<PathBuf> {
+    Ok(app.path().app_data_dir().map_err(|e| AppError::Other(e.to_string()))?.join("downloads"))
 }
 
 /// 验证并设置下载目录
@@ -515,9 +560,47 @@ fn download_semaphore() -> &'static tokio::sync::Semaphore {
     SEM.get_or_init(|| tokio::sync::Semaphore::new(8))
 }
 
+fn should_retry_plain_download(error: &AppError) -> bool {
+    match error {
+        AppError::Api(message) => message.strip_prefix("HTTP ")
+            .and_then(|status| status.split_ascii_whitespace().next())
+            .and_then(|status| status.parse::<u16>().ok())
+            .is_some_and(|status| matches!(status, 408 | 425 | 429 | 500..=599)),
+        AppError::Network(error) => error.is_connect() || error.is_timeout() || error.is_body(),
+        AppError::Other(message) => message.starts_with("Download stalled:"),
+        _ => false,
+    }
+}
+
+async fn retry_plain_download<T, D, DF>(
+    source: recovery::Source,
+    cancel: &Arc<AtomicBool>,
+    delay_unit: Duration,
+    mut download: D,
+) -> AppResult<T>
+where
+    D: FnMut(recovery::Source) -> DF,
+    DF: std::future::Future<Output = AppResult<T>>,
+{
+    for attempt in 0..3 {
+        match recovery::cancellable(cancel, download(source.clone())).await {
+            Ok(result) => return Ok(result),
+            Err(error) if attempt < 2 && should_retry_plain_download(&error) => {
+                log::warn!(target: "download", "transient download failure, retry {}: {}", attempt + 1, error);
+                recovery::cancellable(cancel, async {
+                    tokio::time::sleep(delay_unit.saturating_mul(1 << attempt)).await;
+                    Ok(())
+                }).await?;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    unreachable!("the third download attempt returns its result")
+}
+
 /// manifest.json 路径（始终存储在默认下载目录，与自定义目录无关）
 fn manifest_path(app: &AppHandle) -> AppResult<PathBuf> {
-    let dir = default_downloads_dir(app)?;
+    let dir = legacy_downloads_dir(app)?;
     if !dir.exists() {
         std::fs::create_dir_all(&dir).map_err(AppError::Io)?;
     }
@@ -632,10 +715,20 @@ fn reserve_download_path(
     base_name: &str,
     ext: &str,
 ) -> AppResult<(PathBuf, PathBuf)> {
+    static LOCK: std::sync::OnceLock<parking_lot::Mutex<()>> = std::sync::OnceLock::new();
+    let _guard = LOCK.get_or_init(|| parking_lot::Mutex::new(())).lock();
     let mut file_path = dir.join(format!("{base_name}.{ext}"));
     let mut collision_suffix = 2_u32;
     loop {
-        if path_exists_including_broken_symlink(&file_path) {
+        if path_exists_including_broken_symlink(&file_path)
+            || has_ambiguous_legacy_sidecar(&file_path)
+            || std::fs::read_dir(dir).is_ok_and(|entries| entries.flatten().any(|entry| {
+                let candidate = entry.path();
+                candidate.extension().is_some_and(|ext| ext == "reserve")
+                    && candidate.file_stem().map(std::path::Path::new)
+                        .and_then(std::path::Path::file_stem) == file_path.file_stem()
+            }))
+        {
             file_path = dir.join(format!("{base_name} ({collision_suffix}).{ext}"));
             collision_suffix += 1;
             if collision_suffix > 1_000 {
@@ -709,6 +802,65 @@ fn manifest_lock() -> std::sync::MutexGuard<'static, ()> {
     }
 }
 
+pub(crate) fn edit_download_metadata(
+    app: &AppHandle,
+    audio: &std::path::Path,
+    title: &str,
+    artist: &str,
+    album: &str,
+    edit: impl FnOnce() -> AppResult<()>,
+) -> AppResult<()> {
+    let _guard = manifest_lock();
+    let mut tracks = read_manifest(app)?;
+    let canonical = audio.canonicalize()?;
+    let index = tracks.iter().position(|track| {
+        std::path::Path::new(&track.file_path).canonicalize().ok().as_ref() == Some(&canonical)
+    });
+    let backup = if index.is_some() {
+        let directory = audio.parent().unwrap_or_else(|| std::path::Path::new(".")).join(".tmp");
+        std::fs::create_dir_all(&directory)?;
+        let backup = tempfile::Builder::new().prefix("tag-backup-").suffix(".part").tempfile_in(directory)?;
+        std::fs::copy(audio, backup.path())?;
+        backup.as_file().sync_all()?;
+        Some(backup)
+    } else { None };
+    let sidecar = metadata::metadata_path(audio).ok_or_else(|| AppError::Metadata("本地文件名无效".into()))?;
+    let previous_sidecar = if index.is_some() {
+        match std::fs::read(&sidecar) {
+            Ok(contents) => Some(contents),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(AppError::Io(error)),
+        }
+    } else { None };
+    let result = (|| {
+        edit()?;
+        if let Some(index) = index {
+            let track = &mut tracks[index];
+            track.title = title.to_string();
+            track.artist = artist.to_string();
+            track.album = album.to_string();
+            track.file_size = std::fs::metadata(audio)?.len();
+            write_manifest(app, &tracks)?;
+        }
+        Ok(())
+    })();
+    if let Err(error) = result {
+        if let Some(backup) = backup {
+            backup.persist(audio).map_err(|restore| AppError::Other(format!("{error}; 音频回滚失败: {}", restore.error)))?;
+            if let Some(contents) = previous_sidecar {
+                crate::fsutil::atomic_write(&sidecar, contents).map_err(|restore| AppError::Other(format!("{error}; 元信息回滚失败: {restore}")))?;
+            } else if let Err(restore) = std::fs::remove_file(&sidecar) {
+                if restore.kind() != std::io::ErrorKind::NotFound {
+                    return Err(AppError::Other(format!("{error}; 元信息回滚失败: {restore}")));
+                }
+            }
+        }
+        return Err(error);
+    }
+    if index.is_some() { let _ = app.emit("downloads-changed", ()); }
+    Ok(())
+}
+
 const DOWNLOAD_SIDECAR_SUFFIXES: [&str; 10] = [
     "lrc",
     "tlrc",
@@ -757,6 +909,25 @@ fn candidate_download_sidecars(audio_path: &std::path::Path) -> Vec<PathBuf> {
         }
     }
 
+    if let Some(path) = metadata::metadata_path(audio_path) {
+        candidates.push(path);
+    }
+    let stored = metadata::read_metadata(audio_path);
+    if let (Some(root), Some(stem)) = (audio_path.parent(), audio_path.file_stem().and_then(|stem| stem.to_str())) {
+        // 新下载的文件名跨容器保留唯一 stem，旧文件仍需要避免误删共享歌词
+        if !has_ambiguous_legacy_sidecar(audio_path) {
+            for suffix in ["lrc", "_trans.lrc", "_roma.lrc", "_romalrc.lrc", "_romanized.lrc"] {
+                let name = if suffix == "lrc" { format!("{stem}.lrc") } else { format!("{stem}{suffix}") };
+                candidates.push(root.join("Lyrics").join(name));
+            }
+        }
+        if let Some(key) = stored.as_ref().and_then(|metadata| metadata.stable_key.as_deref()) {
+            for suffix in ["jpg", "jpeg", "png", "webp", "gif"] {
+                candidates.push(root.join("Covers").join(format!("{stem}-{}.{suffix}", metadata::cover_suffix(key))));
+            }
+        }
+    }
+
     // 旧版本按 stem 写 sidecar。只有目录中不存在同 stem 的其它文件时才删除，
     // 否则删除一个扩展名可能误删另一个下载仍在使用的旧 sidecar
     if !has_ambiguous_legacy_sidecar(audio_path) {
@@ -783,6 +954,76 @@ fn remove_download_artifacts(file_path: &str) {
     let _ = std::fs::remove_file(audio_path);
 }
 
+struct StagedDownloadDeletion {
+    directory: Option<tempfile::TempDir>,
+    moved: Vec<(PathBuf, PathBuf)>,
+}
+
+impl StagedDownloadDeletion {
+    fn restore(&mut self) -> AppResult<()> {
+        while let Some((original, staged)) = self.moved.last() {
+            if path_exists_including_broken_symlink(original) {
+                return Err(AppError::Other(format!("删除回滚时文件名已被占用: {}", original.display())));
+            }
+            std::fs::rename(staged, original)?;
+            self.moved.pop();
+        }
+        Ok(())
+    }
+
+    fn rollback(mut self) -> AppResult<()> { self.restore() }
+
+    fn commit(mut self) -> AppResult<()> {
+        self.moved.clear();
+        if let Some(directory) = self.directory.take() {
+            let path = directory.path().to_path_buf();
+            directory.close().map_err(|error| AppError::Other(format!("下载文件已移除，临时文件清理失败: {}: {error}", path.display())))?;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for StagedDownloadDeletion {
+    fn drop(&mut self) {
+        if let Err(error) = self.restore() {
+            if let Some(directory) = self.directory.take() {
+                let path = directory.keep();
+                log::error!(target: "download", "{}; staged files retained at {}", error, path.display());
+            }
+        }
+    }
+}
+
+fn remove_download_artifacts_strict(audio: &std::path::Path) -> AppResult<StagedDownloadDeletion> {
+    let mut files = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for path in std::iter::once(audio.to_path_buf()).chain(candidate_download_sidecars(audio)) {
+        if !seen.insert(path.clone()) { continue; }
+        match std::fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.is_file() || metadata.file_type().is_symlink() => files.push(path),
+            Ok(_) => return Err(AppError::Io(std::io::Error::other(format!("下载资产不是文件: {}", path.display())))),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(AppError::Io(error)),
+        }
+    }
+    let mut transaction = StagedDownloadDeletion { directory: None, moved: Vec::new() };
+    if files.is_empty() { return Ok(transaction); }
+    let temporary = audio.parent().unwrap_or_else(|| std::path::Path::new(".")).join(".tmp");
+    std::fs::create_dir_all(&temporary)?;
+    let directory = tempfile::Builder::new().prefix("delete-").tempdir_in(temporary)?;
+    let stage_root = directory.path().to_path_buf();
+    transaction.directory = Some(directory);
+    for (index, path) in files.into_iter().enumerate() {
+        let staged = stage_root.join(index.to_string());
+        if let Err(error) = std::fs::rename(&path, &staged) {
+            transaction.restore().map_err(|restore| AppError::Other(format!("{error}; {restore}")))?;
+            return Err(AppError::Io(error));
+        }
+        transaction.moved.push((path, staged));
+    }
+    Ok(transaction)
+}
+
 /// 清扫遗留的下载标记和半截下载文件
 ///
 /// 只清理最后修改超过 1 小时的：活动下载的 .part 和 .reserve 由任务自身负责删除，
@@ -803,14 +1044,15 @@ fn reserve_has_fresh_part(reserve_path: &std::path::Path, stale_after: Duration)
         return false;
     };
     let part_path = reserve_path.with_file_name(format!("{audio_name}.part"));
-    part_path.is_file() && !marker_is_stale(&part_path, stale_after)
+    let classified_part = reserve_path.parent().unwrap_or_else(|| std::path::Path::new(".")).join(".tmp").join(format!("{audio_name}.part"));
+    [part_path, classified_part].iter().any(|path| path.is_file() && !marker_is_stale(path, stale_after))
 }
 
 fn sweep_stale_download_markers(dirs: impl IntoIterator<Item = PathBuf>) -> usize {
     const STALE_AFTER: Duration = Duration::from_secs(3_600);
     let mut removed = 0_usize;
     let mut seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
-    for dir in dirs {
+    for dir in dirs.into_iter().flat_map(|dir| [dir.clone(), dir.join(".tmp")]) {
         if !seen.insert(dir.clone()) {
             continue;
         }
@@ -1018,6 +1260,7 @@ async fn perform_download(
     );
 
     let dir = downloads_dir(&app, download_dir.as_deref())?;
+    std::fs::create_dir_all(dir.join(".tmp"))?;
     // 每次下载开始顺带清扫目标目录的崩溃遗留 .part 和 .reserve: validate 的 sweep
     // 集合拿不到前端配置的自定义目录, 自定义目录首次下载即崩溃会残留标记（DL-9）
     let swept = sweep_stale_download_markers(std::iter::once(dir.clone()));
@@ -1042,7 +1285,7 @@ async fn perform_download(
             .map(|n| n.to_os_string())
             .unwrap_or_default();
         name.push(".part");
-        file_path.with_file_name(name)
+        dir.join(".tmp").join(name)
     };
     let mut file = if stream_type == YtStreamType::Hls {
         None
@@ -1252,37 +1495,12 @@ async fn perform_download(
         return Err(AppError::Other("Download cancelled".into()));
     }
 
-    // 下载 sidecar（歌词/翻译歌词/封面），失败不影响主音频
-    if let Err(e) = write_download_sidecars(
-        &client,
-        &file_path,
-        &track_id,
-        &title,
-        &artist,
-        duration_ms,
-        cover_url.as_deref(),
-    )
-    .await
-    {
-        log::warn!(
-            target: "download",
-            "write sidecars failed: track_id={}, title={}, error={}",
-            track_id, title, e
-        );
-    }
-
-    if cancel_flag.load(Ordering::Relaxed) {
-        remove_download_artifacts(&file_path.to_string_lossy());
-        return Err(AppError::Other("Download cancelled".into()));
-    }
-
-    // 构造记录
+    emit_download_progress(&app, &track_id, "processing", None, None, Some(file_size), total_bytes);
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64;
-
-    let track = DownloadedTrack {
+    let mut track = DownloadedTrack {
         id: track_id.clone(),
         title,
         artist,
@@ -1294,6 +1512,59 @@ async fn perform_download(
         file_size,
         downloaded_at: now,
     };
+    let mut metadata = metadata::DownloadMetadata::for_track(&track);
+    metadata.download_finalized = Some(false);
+    metadata.write(&file_path)?;
+    if let Err(e) = write_download_sidecars(
+        &client,
+        &file_path,
+        &track,
+        &mut metadata,
+    )
+    .await
+    {
+        log::warn!(
+            target: "download",
+            "write sidecars failed: track_id={}, title={}, error={}",
+            track_id, track.title, e
+        );
+    }
+
+    let settings = crate::settings::store::load_settings(&app)?.settings;
+    metadata.metadata_embedding_state = Some(if settings.download_auto_fill_metadata {
+        let audio = file_path.clone();
+        let tag_metadata = metadata.clone();
+        let standardized = settings.download_embed_lyrics;
+        let prepared = tokio::task::spawn_blocking(move || {
+            metadata::prepare_audio_tags(&audio, &tag_metadata, standardized)
+        }).await.map_err(|error| AppError::Metadata(error.to_string()))?;
+        if cancel_flag.load(Ordering::Relaxed) {
+            return Err(AppError::Other("Download cancelled".into()));
+        }
+        match prepared {
+            Ok(prepared) => {
+                prepared.persist(&file_path).map_err(|error| AppError::Io(error.error))?;
+                "EMBEDDED_VERIFIED"
+            }
+            Err(error) => {
+                log::warn!(target: "download", "metadata embedding failed for {}: {}", track_id, error);
+                emit_download_progress(&app, &track_id, "processing", Some(&error.to_string()), None, Some(file_size), total_bytes);
+                "LEGACY_UNVERIFIED"
+            }
+        }
+    } else {
+        "USER_DISABLED"
+    }.into());
+    metadata.download_finalized = Some(true);
+    metadata.write(&file_path)?;
+    // 标签会改变容器大小，清单必须记录最终音频而不是网络传输长度
+    track.file_size = std::fs::metadata(&file_path)?.len();
+    let file_size = track.file_size;
+
+    if cancel_flag.load(Ordering::Relaxed) {
+        remove_download_artifacts(&file_path.to_string_lossy());
+        return Err(AppError::Other("Download cancelled".into()));
+    }
 
     let _manifest_guard = manifest_lock();
     let mut manifest = read_manifest(&app)?;
@@ -1351,7 +1622,7 @@ pub async fn download_track(
     let cancel_flag = Arc::new(AtomicBool::new(false));
     let task_cancel_flag = cancel_flag.clone();
     register_download_task(&state.download_tasks, track_id, || {
-        emit_download_progress(&app, &task_track_id, "start", None, None, None, None);
+        emit_download_progress(&app, &task_track_id, "queued", None, None, None, None);
         let task_identity = task_cancel_flag.clone();
         let handle = tokio::spawn(async move {
             // 全局并发上限（对齐 Android MAX_DOWNLOAD_PARALLELISM=8）：批量下载时其余任务
@@ -1370,6 +1641,7 @@ pub async fn download_track(
                         .map_err(|error| AppError::Other(error.to_string()))
                 })
                 .await?;
+                emit_download_progress(&app_handle, &task_track_id, "start", None, None, None, None);
                 let transfer = |candidate: recovery::Source| {
                     perform_download(
                         app_handle.clone(),
@@ -1409,7 +1681,7 @@ pub async fn download_track(
                     )
                     .await
                 } else {
-                    recovery::cancellable(&task_cancel_flag, transfer(initial)).await
+                    retry_plain_download(initial, &task_cancel_flag, Duration::from_secs(1), transfer).await
                 }
             }
             .await;
@@ -1475,10 +1747,14 @@ pub async fn delete_download(app: AppHandle, track_id: String) -> AppResult<()> 
     // 查找并移除
     let idx = manifest.iter().position(|t| t.id == track_id);
     if let Some(i) = idx {
-        let track = manifest.remove(i);
-        // 删除磁盘文件 + 同名 sidecar（忽略错误，文件可能已被手动删除）
-        remove_download_artifacts(&track.file_path);
-        write_manifest(&app, &manifest)?;
+        // 文件占用或只读时保留清单，用户可以修复后重试
+        let deletion = remove_download_artifacts_strict(std::path::Path::new(&manifest[i].file_path))?;
+        manifest.remove(i);
+        if let Err(error) = write_manifest(&app, &manifest) {
+            deletion.rollback().map_err(|restore| AppError::Other(format!("{error}; {restore}")))?;
+            return Err(error);
+        }
+        deletion.commit()?;
     } else {
         return Err(AppError::NotFound("Download not found".into()));
     }
@@ -1552,6 +1828,116 @@ pub async fn reveal_file(path: String) -> AppResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explicit_download_deletion_reports_io_errors_and_only_ignores_missing_files() {
+        let root = tempfile::tempdir().unwrap();
+        let audio = root.path().join("Song.aac");
+        std::fs::create_dir(&audio).unwrap();
+        assert!(remove_download_artifacts_strict(&audio).is_err());
+        assert!(audio.is_dir());
+        std::fs::remove_dir(&audio).unwrap();
+        assert!(remove_download_artifacts_strict(&audio).is_ok());
+        std::fs::write(&audio, b"audio").unwrap();
+        std::fs::create_dir(root.path().join("Song.aac.npmeta.json")).unwrap();
+        assert!(remove_download_artifacts_strict(&audio).is_err());
+        assert_eq!(std::fs::read(&audio).unwrap(), b"audio");
+    }
+
+    #[test]
+    fn deleting_a_legacy_download_keeps_shared_stem_lyrics_for_the_other_container() {
+        let root = tempfile::tempdir().unwrap();
+        let mp3 = root.path().join("Song.mp3");
+        let flac = root.path().join("Song.flac");
+        std::fs::write(&mp3, b"mp3").unwrap();
+        std::fs::write(&flac, b"flac").unwrap();
+        let directory = root.path().join("Lyrics");
+        std::fs::create_dir(&directory).unwrap();
+        let shared = directory.join("Song.lrc");
+        std::fs::write(&shared, "[00:01.00]shared").unwrap();
+        remove_download_artifacts_strict(&mp3).unwrap().commit().unwrap();
+        assert!(!mp3.exists());
+        assert!(flac.exists());
+        assert!(shared.exists());
+    }
+
+    #[test]
+    fn audio_delete_failure_keeps_classified_lyrics_cover_and_metadata_and_staging_can_roll_back() {
+        let root = tempfile::tempdir().unwrap();
+        let audio = root.path().join("Song.aac");
+        std::fs::create_dir(&audio).unwrap();
+        let mut metadata = metadata::DownloadMetadata { stable_key: Some("42|album|".into()), ..Default::default() };
+        metadata.write(&audio).unwrap();
+        let lyrics = root.path().join("Lyrics").join("Song.lrc");
+        let cover = root.path().join("Covers").join(format!("Song-{}.jpg", metadata::cover_suffix("42|album|")));
+        std::fs::create_dir_all(lyrics.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(cover.parent().unwrap()).unwrap();
+        std::fs::write(&lyrics, b"lyrics").unwrap();
+        std::fs::write(&cover, b"cover").unwrap();
+        assert!(remove_download_artifacts_strict(&audio).is_err());
+        assert_eq!(std::fs::read(&lyrics).unwrap(), b"lyrics");
+        assert_eq!(std::fs::read(&cover).unwrap(), b"cover");
+        assert!(metadata::metadata_path(&audio).unwrap().is_file());
+        std::fs::remove_dir(&audio).unwrap();
+        std::fs::write(&audio, b"audio").unwrap();
+        let staged = remove_download_artifacts_strict(&audio).unwrap();
+        assert!(!audio.exists());
+        assert!(!lyrics.exists());
+        staged.rollback().unwrap();
+        assert_eq!(std::fs::read(&audio).unwrap(), b"audio");
+        assert_eq!(std::fs::read(&lyrics).unwrap(), b"lyrics");
+        assert_eq!(std::fs::read(&cover).unwrap(), b"cover");
+        assert!(metadata::metadata_path(&audio).unwrap().is_file());
+    }
+
+    #[tokio::test]
+    async fn plain_download_retries_transient_failures_but_never_retries_integrity_errors() {
+        let initial = recovery::Source { url: "fixture:retry".into(), stream_type: YtStreamType::Direct, content_length: None, content_md5: None };
+        let cancel = Arc::new(AtomicBool::new(false));
+        let attempts = std::sync::atomic::AtomicUsize::new(0);
+        retry_plain_download(initial.clone(), &cancel, Duration::ZERO, |_| async {
+            if attempts.fetch_add(1, Ordering::Relaxed) < 2 {
+                Err(AppError::Api("HTTP 503 Service Unavailable".into()))
+            } else { Ok(()) }
+        }).await.unwrap();
+        assert_eq!(attempts.load(Ordering::Relaxed), 3);
+        attempts.store(0, Ordering::Relaxed);
+        let result: AppResult<()> = retry_plain_download(initial, &cancel, Duration::ZERO, |_| async {
+            attempts.fetch_add(1, Ordering::Relaxed);
+            Err(AppError::Audio("Download MD5 does not match the resolved source".into()))
+        }).await;
+        assert!(result.is_err());
+        assert_eq!(attempts.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn android_artifact_cleanup_removes_only_this_download_and_cross_container_names_are_unique() {
+        let root = tempfile::tempdir().unwrap();
+        let (audio, reservation) = reserve_download_path(root.path(), "Song", "aac").unwrap();
+        let (other_audio, other_reservation) = reserve_download_path(root.path(), "Song", "flac").unwrap();
+        assert_eq!(other_audio.file_name().unwrap(), "Song (2).flac");
+        std::fs::write(&audio, b"audio").unwrap();
+        let mut metadata = metadata::DownloadMetadata { stable_key: Some("42|album|".into()), ..Default::default() };
+        metadata.write(&audio).unwrap();
+        let cover = root.path().join("Covers").join(format!("Song-{}.jpg", metadata::cover_suffix("42|album|")));
+        std::fs::create_dir_all(cover.parent().unwrap()).unwrap();
+        std::fs::write(&cover, b"cover").unwrap();
+        let lyrics = root.path().join("Lyrics");
+        std::fs::create_dir_all(&lyrics).unwrap();
+        for suffix in [".lrc", "_trans.lrc", "_roma.lrc"] {
+            std::fs::write(lyrics.join(format!("Song{suffix}")), b"lyrics").unwrap();
+        }
+        let unrelated = lyrics.join("Keep.lrc");
+        std::fs::write(&unrelated, b"keep").unwrap();
+        remove_download_artifacts(audio.to_str().unwrap());
+        assert!(!audio.exists());
+        assert!(!cover.exists());
+        assert!(!metadata::metadata_path(&audio).unwrap().exists());
+        assert!(!lyrics.join("Song_roma.lrc").exists());
+        assert!(unrelated.exists());
+        std::fs::remove_file(reservation).unwrap();
+        std::fs::remove_file(other_reservation).unwrap();
+    }
 
     #[tokio::test]
     async fn concurrent_download_registration_starts_only_one_job() {

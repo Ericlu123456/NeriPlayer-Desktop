@@ -457,6 +457,7 @@ export const useDownloadStore = defineStore('download', () => {
       }
     } catch (e) {
       log.error('Delete download failed:', e)
+      await loadDownloads()
       throw e
     }
   }

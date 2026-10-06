@@ -57,7 +57,8 @@ async function runtime(options = {}) {
     pinia, vue,
     '@tauri-apps/api/core': { invoke: async (command, args) => {
       invoked.push({ command, args })
-      if (command === 'validate_downloads') return { tracks: [] }
+      if (command === 'validate_downloads') return { tracks: options.downloads || [] }
+      if (command === 'delete_download' && options.deleteError) throw new Error('fixture delete failed')
       if (command === 'cancel_download') return options.cancel ? options.cancel.promise : false
       if (command === 'cancel_all_downloads') return 0
       if (command === 'download_track') events.get('download-progress')?.({ payload: { trackId: args.trackId, status: 'start' } })
@@ -167,5 +168,12 @@ for (const failed of [false, true]) {
   else resolution.resolve(stream)
   await flush()
   assert.equal(r.store.downloading.size, 0)
+}
+for (const retained of [false, true]) {
+  const saved = { id: 'netease:a', title: 'A', artist: 'Artist', album: 'Album', duration_ms: 10000, source: 'netease', file_path: 'E:/Music/a.mp3', file_size: 1024, downloaded_at: 1 }
+  const r = await runtime({ deleteError: true, downloads: retained ? [saved] : [] })
+  r.store.downloads = [{ id: saved.id, title: saved.title, artist: saved.artist, album: saved.album, durationMs: saved.duration_ms, source: saved.source, filePath: saved.file_path, fileSize: saved.file_size, downloadedAt: saved.downloaded_at }]
+  await assert.rejects(r.store.deleteDownload(saved.id), /fixture delete failed/)
+  assert.equal(r.store.downloads.length, retained ? 1 : 0, 'failed deletion refreshes the actual manifest state')
 }
 console.log('download store lifecycle tests passed')
