@@ -383,7 +383,7 @@ struct DesktopConfigFile {
     platform_name: String,
     #[serde(default)]
     exported_at: i64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "store::deserialize_app_settings")]
     settings: AppSettings,
     #[serde(default)]
     listen_together: Option<ConfigListenTogether>,

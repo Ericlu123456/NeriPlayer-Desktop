@@ -55,6 +55,7 @@ import { getPlaybackSourceKind } from '@/modules/playback/playbackSource'
 import { usePlaybackAudioInfoDisplay } from '@/composables/usePlaybackAudioInfoDisplay'
 import {
   actualAudioBitrateLabel,
+  actualAudioParameterLabels,
   canSwitchAudioQuality,
   isLocalAudioPlayback,
   resolveAudioQualityLabel,
@@ -1562,7 +1563,6 @@ function downloadTaskStatusText(status?: string) {
 }
 
 const downloadActionIcon = computed(() => {
-  if (player.isPlayingFromDownload) return 'download_done'
   if (isCurrentDownloading.value) {
     const status = currentDownloadTask.value?.status
     if (status === 'error') return 'error'
@@ -1575,7 +1575,6 @@ const downloadActionIcon = computed(() => {
 })
 
 const downloadActionLabel = computed(() => {
-  if (player.isPlayingFromDownload) return t('player.playing_from_download')
   if (isCurrentDownloadCancellable.value) return t('download.cancel_task')
   if (isCurrentDownloading.value) return downloadTaskStatusText(currentDownloadTask.value?.status) || t('download.downloading')
   if (isCurrentDownloaded.value) return t('download.redownload')
@@ -1583,7 +1582,6 @@ const downloadActionLabel = computed(() => {
 })
 
 const downloadActionDesc = computed(() => {
-  if (player.isPlayingFromDownload) return t('download.using_local_file')
   if (isCurrentDownloading.value) {
     const task = currentDownloadTask.value
     if (!task) return ''
@@ -1597,7 +1595,6 @@ const downloadActionDesc = computed(() => {
 
 const downloadActionDisabled = computed(() =>
   !player.currentTrack
-  || player.isPlayingFromDownload
   || (isCurrentDownloading.value && !isCurrentDownloadCancellable.value && currentDownloadTask.value?.status !== 'error' && currentDownloadTask.value?.status !== 'cancelled')
 )
 
@@ -1696,8 +1693,7 @@ async function handleDownloadAction() {
     await downloadStore.cancelDownload(track.id)
     return
   }
-  if (isCurrentDownloaded.value && !player.isPlayingFromDownload) {
-    player.handleDownloadedFileRemoved(track.id, downloadStore.getDownloadedTrack(track.id)?.filePath)
+  if (isCurrentDownloaded.value) {
     await downloadStore.redownloadTrack(track)
   } else {
     await downloadStore.downloadTrack(track)
@@ -1803,7 +1799,7 @@ const canViewNeteaseArtist = computed(() =>
   currentSource.value === 'netease' && !!primaryArtistName.value && !!currentNeteaseSongNumericId.value)
 
 // 进度条下方音质信息（不展示 Local / download 占位）
-// 在线显示平台音质，本地文件仅显示文件实际参数
+// 参数开关统一控制文件和在线流，平台音质标签单独显示
 const displayedAudioInfo = usePlaybackAudioInfoDisplay(() => ({
   info: player.audioInfo,
   fromDownload: player.isPlayingFromDownload,
@@ -1814,16 +1810,8 @@ const audioInfoParts = computed(() => {
   const info = displayedAudioInfo.value.info
   if (!info) return []
   const parts: Array<{ text: string; accent?: boolean }> = []
-  const local = isLocalAudioPlayback({ source: currentSource.value, fromDownload: displayedAudioInfo.value.fromDownload, info })
-  if (local) addAudioInfoPart(parts, actualAudioBitrateLabel(info))
-  else if (settings.showQualitySwitch) addAudioInfoPart(parts, currentAudioQualityLabel(info, displayedAudioInfo.value.fromDownload), true)
-  if (settings.showAudioCodec) {
-    addAudioInfoPart(parts, normalizeAudioDisplayToken(info.codec, local))
-    if (local) addAudioInfoPart(parts, normalizeAudioDisplayToken(info.format, true))
-  }
-  if (settings.showAudioSpec) {
-    for (const token of paperSpecFromAudioInfo(info, !local)) addAudioInfoPart(parts, token)
-  }
+  if (settings.showQualitySwitch) addAudioInfoPart(parts, currentAudioQualityLabel(info, displayedAudioInfo.value.fromDownload), true)
+  for (const token of actualAudioParameterLabels(info, settings)) addAudioInfoPart(parts, token)
   return parts.filter(part => !isHiddenAudioInfoToken(part.text))
 })
 
@@ -2164,9 +2152,10 @@ const sliderActiveColor = computed(() => {
           </div>
           <!-- 音质行始终占位，空内容也保留高度 -->
           <div class="np-audio-info" :aria-busy="player.isLoadingAudio">
-            <span v-if="displayedAudioInfo.fromDownload" class="np-download-chip">
-              <span class="material-symbols-rounded">download_done</span>
-              {{ t('player.playing_from_download') }}
+            <span v-if="displayedAudioInfo.fromDownload" class="np-download-chip"
+              role="img"
+              :title="t('player.playing_from_download')" :aria-label="t('player.playing_from_download')">
+              <span class="material-symbols-rounded" aria-hidden="true">check</span>
             </span>
             <span v-if="audioInfoParts.length" class="np-audio-detail" :class="{ separated: displayedAudioInfo.fromDownload }">
               <template v-for="(part, index) in audioInfoParts" :key="`${part.text}:${index}`">
@@ -3660,7 +3649,7 @@ const sliderActiveColor = computed(() => {
   color: rgba(255,255,255,0.68);
   letter-spacing: 0.2px;
   margin-top: 0;
-  /* 给下载 chip 完整高度，禁止裁切圆角 */
+  /* 空参数行保持高度，切换播放来源时不推动控制栏 */
   min-height: 24px;
   height: auto;
   flex-shrink: 0;
@@ -3720,19 +3709,12 @@ const sliderActiveColor = computed(() => {
 .np-download-chip {
   display: inline-flex;
   align-items: center;
-  gap: 3px;
-  padding: 3px 9px;
-  border-radius: 999px;
-  line-height: 1.2;
-  white-space: nowrap;
+  line-height: 1;
   color: var(--np-primary-container, var(--md-primary-container, #E8DEF8));
-  background: rgba(255,255,255,0.10);
-  border: 1px solid rgba(255,255,255,0.14);
-  box-sizing: border-box;
   flex-shrink: 0;
 
   .material-symbols-rounded {
-    font-size: 13px;
+    font-size: 16px;
     line-height: 1;
   }
 }

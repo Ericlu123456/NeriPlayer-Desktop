@@ -37,6 +37,11 @@ pub struct AppSettings {
     pub show_quality_switch: bool,
     pub show_audio_codec: bool,
     pub show_audio_spec: bool,
+    pub show_audio_bitrate: bool,
+    pub show_audio_format: bool,
+    pub show_audio_channels: bool,
+    pub show_audio_sample_rate: bool,
+    pub show_audio_bit_depth: bool,
     pub lyric_font_scale: f32,
     pub crossfade: bool,
     pub normalize_volume: bool,
@@ -112,9 +117,14 @@ impl Default for AppSettings {
             show_cover_badge: true,
             show_now_playing_title: true,
             show_toolbar_dock: true,
-            show_quality_switch: true,
+            show_quality_switch: false,
             show_audio_codec: true,
             show_audio_spec: true,
+            show_audio_bitrate: true,
+            show_audio_format: false,
+            show_audio_channels: false,
+            show_audio_sample_rate: false,
+            show_audio_bit_depth: false,
             lyric_font_scale: 1.0,
             crossfade: false,
             normalize_volume: false,
@@ -320,17 +330,48 @@ impl AppSettings {
     }
 }
 
+fn migrate_audio_display_settings(value: &mut serde_json::Value) -> bool {
+    let Some(settings) = value.as_object_mut() else {
+        return false;
+    };
+    let mut migrated = false;
+    for (key, legacy_key) in [
+        ("showAudioFormat", "showAudioCodec"),
+        ("showAudioChannels", "showAudioSpec"),
+        ("showAudioSampleRate", "showAudioSpec"),
+        ("showAudioBitDepth", "showAudioSpec"),
+    ] {
+        if !settings.contains_key(key) {
+            if let Some(enabled) = settings.get(legacy_key).and_then(serde_json::Value::as_bool) {
+                settings.insert(key.into(), serde_json::Value::Bool(enabled));
+                migrated = true;
+            }
+        }
+    }
+    migrated
+}
+
+pub fn deserialize_app_settings<'de, D>(deserializer: D) -> Result<AppSettings, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let mut value = serde_json::Value::deserialize(deserializer)?;
+    migrate_audio_display_settings(&mut value);
+    serde_json::from_value(value).map_err(serde::de::Error::custom)
+}
+
 pub fn load_settings(app: &AppHandle) -> AppResult<SettingsLoadResult> {
     let store = app
         .store(SETTINGS_STORE_FILE)
         .map_err(|error| AppError::Other(error.to_string()))?;
-    let Some(value) = store.get(SETTINGS_STORE_KEY) else {
+    let Some(mut value) = store.get(SETTINGS_STORE_KEY) else {
         return Ok(SettingsLoadResult {
             settings: AppSettings::default(),
             persisted: false,
         });
     };
 
+    let migrated = migrate_audio_display_settings(&mut value);
     let mut settings = match serde_json::from_value::<AppSettings>(value) {
         Ok(settings) => settings,
         Err(error) => {
@@ -343,7 +384,7 @@ pub fn load_settings(app: &AppHandle) -> AppResult<SettingsLoadResult> {
     };
     let before_normalize = settings.clone();
     settings.normalize();
-    if settings != before_normalize {
+    if migrated || settings != before_normalize {
         persist_settings(&store, &settings)?;
     }
     Ok(SettingsLoadResult {
@@ -468,6 +509,70 @@ fn non_empty_or_default(value: &str, fallback: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn audio_display_settings_new_defaults_only_show_bitrate() {
+        let settings: AppSettings = serde_json::from_str("{}").expect("new settings");
+        assert!(settings.show_audio_bitrate);
+        assert!(!settings.show_audio_format);
+        assert!(!settings.show_audio_channels);
+        assert!(!settings.show_audio_sample_rate);
+        assert!(!settings.show_audio_bit_depth);
+        assert!(!settings.show_quality_switch);
+    }
+
+    #[test]
+    fn audio_display_settings_preserve_legacy_groups_and_explicit_new_values() {
+        for enabled in [false, true] {
+            let mut value = serde_json::json!({
+                "showAudioCodec": enabled,
+                "showAudioSpec": enabled,
+                "showQualitySwitch": enabled,
+            });
+            assert!(super::migrate_audio_display_settings(&mut value));
+            let settings: AppSettings = serde_json::from_value(value).expect("legacy settings");
+            assert!(settings.show_audio_bitrate);
+            assert_eq!(settings.show_audio_format, enabled);
+            assert_eq!(settings.show_audio_channels, enabled);
+            assert_eq!(settings.show_audio_sample_rate, enabled);
+            assert_eq!(settings.show_audio_bit_depth, enabled);
+            assert_eq!(settings.show_quality_switch, enabled);
+        }
+        let mut value = serde_json::json!({
+            "showAudioCodec": true, "showAudioSpec": true,
+            "showAudioBitrate": false, "showAudioFormat": false,
+            "showAudioChannels": false, "showAudioSampleRate": true,
+            "showAudioBitDepth": false,
+        });
+        assert!(!super::migrate_audio_display_settings(&mut value));
+        let settings: AppSettings = serde_json::from_value(value.clone()).expect("new settings");
+        assert!(!settings.show_audio_bitrate);
+        assert!(!settings.show_audio_format);
+        assert!(!settings.show_audio_channels);
+        assert!(settings.show_audio_sample_rate);
+        assert!(!settings.show_audio_bit_depth);
+        let serialized = serde_json::to_value(settings).expect("serialized settings");
+        for key in ["showAudioBitrate", "showAudioFormat", "showAudioChannels", "showAudioSampleRate", "showAudioBitDepth"] {
+            assert_eq!(serialized[key], value[key]);
+        }
+    }
+
+    #[test]
+    fn audio_display_settings_config_deserialization_migrates_old_preferences() {
+        #[derive(serde::Deserialize)]
+        struct Config {
+            #[serde(deserialize_with = "super::deserialize_app_settings")]
+            settings: AppSettings,
+        }
+        let config: Config = serde_json::from_value(serde_json::json!({
+            "settings": { "showAudioCodec": true, "showAudioSpec": false, "showQualitySwitch": true }
+        })).expect("legacy config");
+        assert!(config.settings.show_audio_format);
+        assert!(!config.settings.show_audio_channels);
+        assert!(!config.settings.show_audio_sample_rate);
+        assert!(!config.settings.show_audio_bit_depth);
+        assert!(config.settings.show_quality_switch);
+    }
+
     #[test]
     fn download_settings_adopt_android_defaults_for_old_snapshots() {
         let settings: AppSettings = serde_json::from_str("{}").expect("old settings");

@@ -50,7 +50,7 @@ const toast = useToastStore()
 const {
   darkMode, themeColor: selectedColor, coverStyle,
   defaultScreen, showCoverBadge, showNowPlayingTitle, showToolbarDock,
-  showQualitySwitch, showAudioCodec, showAudioSpec, lyricFontScale,
+  showQualitySwitch, lyricFontScale,
   crossfade, normalizeVolume, audioOutputDevice,
   fadeIn, fadeInDuration, fadeOutDuration,
   crossfadeNext, crossfadeInDuration, crossfadeOutDuration,
@@ -71,6 +71,14 @@ const {
   ltServerUrl, ltNickname, ltAllowMemberControl, ltAutoPauseOnMemberChange, ltShareAudioLinks,
   locale: settingLocale,
 } = storeToRefs(settings)
+
+const audioDisplayOptions = [
+  { key: 'showAudioBitrate', label: 'audio_bitrate', icon: 'speed' },
+  { key: 'showAudioFormat', label: 'audio_format', icon: 'audio_file' },
+  { key: 'showAudioChannels', label: 'audio_channels', icon: 'speaker_group' },
+  { key: 'showAudioSampleRate', label: 'audio_sample_rate', icon: 'graphic_eq' },
+  { key: 'showAudioBitDepth', label: 'audio_bit_depth', icon: 'equalizer' },
+] as const
 
 const syncFrequencyOptions = computed<Array<{ value: SyncFrequency; label: string }>>(() => [
   { value: 'immediate', label: t('settings.sync_immediate') },
@@ -1307,22 +1315,13 @@ watch(() => syncStore.pendingProtocolUpgrade, () => { hideProtocolUpgrade.value 
         <label class="m3-switch"><input type="checkbox" v-model="showQualitySwitch" /><span class="track"><span class="thumb"><span v-if="showQualitySwitch" class="material-symbols-rounded" style="font-size: 14px">check</span></span></span></label>
       </div>
 
-      <div class="setting-card">
-        <div class="setting-icon-wrap"><span class="material-symbols-rounded">audio_file</span></div>
+      <div v-for="option in audioDisplayOptions" :key="option.key" class="setting-card">
+        <div class="setting-icon-wrap"><span class="material-symbols-rounded">{{ option.icon }}</span></div>
         <div class="setting-info">
-          <div class="setting-title">{{ t('settings.audio_codec') }}</div>
-          <div class="setting-desc">{{ t('settings.audio_codec_desc') }}</div>
+          <div class="setting-title">{{ t('settings.' + option.label) }}</div>
+          <div class="setting-desc">{{ t('settings.' + option.label + '_desc') }}</div>
         </div>
-        <label class="m3-switch"><input type="checkbox" v-model="showAudioCodec" /><span class="track"><span class="thumb"><span v-if="showAudioCodec" class="material-symbols-rounded" style="font-size: 14px">check</span></span></span></label>
-      </div>
-
-      <div class="setting-card">
-        <div class="setting-icon-wrap"><span class="material-symbols-rounded">equalizer</span></div>
-        <div class="setting-info">
-          <div class="setting-title">{{ t('settings.audio_spec') }}</div>
-          <div class="setting-desc">{{ t('settings.audio_spec_desc') }}</div>
-        </div>
-        <label class="m3-switch"><input type="checkbox" v-model="showAudioSpec" /><span class="track"><span class="thumb"><span v-if="showAudioSpec" class="material-symbols-rounded" style="font-size: 14px">check</span></span></span></label>
+        <label class="m3-switch"><input type="checkbox" v-model="settings[option.key]" /><span class="track"><span class="thumb"><span v-if="settings[option.key]" class="material-symbols-rounded" style="font-size: 14px">check</span></span></span></label>
       </div>
 
       <div class="setting-card">

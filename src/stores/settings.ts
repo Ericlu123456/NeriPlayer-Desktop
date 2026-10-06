@@ -21,6 +21,11 @@ export interface AppSettings {
   showQualitySwitch: boolean
   showAudioCodec: boolean
   showAudioSpec: boolean
+  showAudioBitrate: boolean
+  showAudioFormat: boolean
+  showAudioChannels: boolean
+  showAudioSampleRate: boolean
+  showAudioBitDepth: boolean
   lyricFontScale: number
   crossfade: boolean
   normalizeVolume: boolean
@@ -111,9 +116,14 @@ const DEFAULT_SETTINGS: AppSettings = {
   showCoverBadge: true,
   showNowPlayingTitle: true,
   showToolbarDock: true,
-  showQualitySwitch: true,
+  showQualitySwitch: false,
   showAudioCodec: true,
   showAudioSpec: true,
+  showAudioBitrate: true,
+  showAudioFormat: false,
+  showAudioChannels: false,
+  showAudioSampleRate: false,
+  showAudioBitDepth: false,
   lyricFontScale: 1,
   crossfade: false,
   normalizeVolume: false,
@@ -188,6 +198,11 @@ const LEGACY_KEYS: Partial<Record<SettingKey, string>> = {
   showQualitySwitch: 'quality_switch',
   showAudioCodec: 'audio_codec',
   showAudioSpec: 'audio_spec',
+  showAudioBitrate: 'audio_bitrate',
+  showAudioFormat: 'audio_format',
+  showAudioChannels: 'audio_channels',
+  showAudioSampleRate: 'audio_sample_rate',
+  showAudioBitDepth: 'audio_bit_depth',
   lyricFontScale: 'lyric_font_scale',
   crossfade: 'crossfade',
   normalizeVolume: 'normalize',
@@ -319,6 +334,15 @@ function normalizeSnapshot(input: unknown): AppSettings {
     }
   }
 
+  for (const [key, legacyKey] of [
+    ['showAudioFormat', 'showAudioCodec'],
+    ['showAudioChannels', 'showAudioSpec'],
+    ['showAudioSampleRate', 'showAudioSpec'],
+    ['showAudioBitDepth', 'showAudioSpec'],
+  ] as const) {
+    if (!(key in source) && typeof source[legacyKey] === 'boolean') result[key] = source[legacyKey]
+  }
+
   if (!['system', 'dark', 'light'].includes(result.darkMode)) result.darkMode = DEFAULT_SETTINGS.darkMode
   if (!['disc', 'card'].includes(result.coverStyle)) result.coverStyle = DEFAULT_SETTINGS.coverStyle
   if (!['home', 'explore', 'library'].includes(result.defaultScreen)) result.defaultScreen = DEFAULT_SETTINGS.defaultScreen
@@ -395,7 +419,7 @@ function writeLegacyShadow(snapshot: AppSettings) {
 }
 
 export const useSettingsStore = defineStore('settings', () => {
-  const initial = normalizeSnapshot({ ...DEFAULT_SETTINGS, ...readLegacySnapshot() })
+  const initial = normalizeSnapshot(readLegacySnapshot())
   const darkMode = ref<ThemeMode>(initial.darkMode)
   const themeColor = ref(initial.themeColor)
   const locale = ref(initial.locale)
@@ -406,6 +430,11 @@ export const useSettingsStore = defineStore('settings', () => {
   const showQualitySwitch = ref(initial.showQualitySwitch)
   const showAudioCodec = ref(initial.showAudioCodec)
   const showAudioSpec = ref(initial.showAudioSpec)
+  const showAudioBitrate = ref(initial.showAudioBitrate)
+  const showAudioFormat = ref(initial.showAudioFormat)
+  const showAudioChannels = ref(initial.showAudioChannels)
+  const showAudioSampleRate = ref(initial.showAudioSampleRate)
+  const showAudioBitDepth = ref(initial.showAudioBitDepth)
   const lyricFontScale = ref(initial.lyricFontScale)
   const crossfade = ref(initial.crossfade)
   const normalizeVolume = ref(initial.normalizeVolume)
@@ -473,6 +502,7 @@ export const useSettingsStore = defineStore('settings', () => {
     darkMode, themeColor, locale, defaultScreen, showCoverBadge,
     showNowPlayingTitle, showToolbarDock, showQualitySwitch, showAudioCodec,
     showAudioSpec, lyricFontScale, crossfade, normalizeVolume, fadeIn,
+    showAudioBitrate, showAudioFormat, showAudioChannels, showAudioSampleRate, showAudioBitDepth,
     fadeInDuration, fadeOutDuration, crossfadeNext, crossfadeInDuration,
     crossfadeOutDuration, keepProgress, keepPlaybackMode, showTranslation,
     lyricBlur, lyricBlurAmount, cloudMusicOffset, qqMusicOffset, coverStyle,
@@ -542,12 +572,12 @@ export const useSettingsStore = defineStore('settings', () => {
         const loaded = await invoke<SettingsLoadResult>('get_settings')
         const legacy = readLegacySnapshot()
         const shouldMigrate = !loaded.persisted && hasLegacySnapshot()
-        applySnapshot(loaded.persisted ? loaded.settings : { ...DEFAULT_SETTINGS, ...legacy })
+        applySnapshot(loaded.persisted ? loaded.settings : legacy)
         isHydrated.value = true
         if (shouldMigrate || !loaded.persisted) await persistNow()
         else writeLegacyShadow(snapshot())
       } catch {
-        applySnapshot({ ...DEFAULT_SETTINGS, ...readLegacySnapshot() })
+        applySnapshot(readLegacySnapshot())
         isHydrated.value = true
         writeLegacyShadow(snapshot())
       }
@@ -562,6 +592,7 @@ export const useSettingsStore = defineStore('settings', () => {
     darkMode, themeColor, locale, coverStyle,
     defaultScreen, showCoverBadge, showNowPlayingTitle, showToolbarDock,
     showQualitySwitch, showAudioCodec, showAudioSpec, lyricFontScale,
+    showAudioBitrate, showAudioFormat, showAudioChannels, showAudioSampleRate, showAudioBitDepth,
     crossfade, normalizeVolume, fadeIn, fadeInDuration, fadeOutDuration,
     crossfadeNext, crossfadeInDuration, crossfadeOutDuration,
     keepProgress, keepPlaybackMode, showTranslation, lyricBlur, lyricBlurAmount,
