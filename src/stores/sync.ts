@@ -159,6 +159,15 @@ export function describeSyncError(error: unknown, fallback = 'Sync failed'): str
   }
 }
 
+/** 升级失败只给出本地化原因或 HTTP 状态码，不暴露服务器地址和响应正文 */
+export function describeUpgradeFailure(error: unknown): string {
+  if (parseSyncFailure(error)) return describeSyncError(error)
+  const status = /\((\d{3})\)/.exec(String(error ?? ''))?.[1]
+  return status
+    ? t('settings.sync_upgrade_attempt_failed_status', { status })
+    : t('settings.sync_upgrade_attempt_failed')
+}
+
 export const useSyncStore = defineStore('sync', () => {
   const github = ref<GitHubSyncConfig>({
     configured: false, owner: '', repo: '',
@@ -175,6 +184,9 @@ export const useSyncStore = defineStore('sync', () => {
   const dialogError = ref<string | null>(null)
   const protocolUpgrades = ref<SyncProtocolUpgrade[]>([])
   const pendingProtocolUpgrade = computed(() => protocolUpgrades.value[0] ?? null)
+  // 升级失败留在确认对话框里显示；换成另一份确认时清掉
+  const upgradeError = ref<string | null>(null)
+  watch(pendingProtocolUpgrade, () => { upgradeError.value = null })
 
   function rememberProtocolUpgrade(challenge: SyncProtocolUpgrade) {
     protocolUpgrades.value = protocolUpgrades.value.filter(item => item.backend !== challenge.backend)
@@ -716,13 +728,15 @@ export const useSyncStore = defineStore('sync', () => {
     }, FOLLOW_UP_SYNC_DELAY_MS)
   }
 
-  async function approveProtocolUpgrade() {
+  /** 旧客户端读不懂升级后的归档，必须先确认所有设备都已更新（对齐 Android SyncProtocolUpgradeDialog） */
+  async function approveProtocolUpgrade(allDevicesUpdated: boolean) {
     const challenge = pendingProtocolUpgrade.value
-    if (!challenge || isSyncing.value) return
+    if (!challenge || isSyncing.value || !allDevicesUpdated) return
     const generation = configurationGeneration[challenge.backend]
+    upgradeError.value = null
     isSyncing.value = true
     try {
-      await invoke('approve_sync_protocol_upgrade', { challenge })
+      await invoke('approve_sync_protocol_upgrade', { challenge, allDevicesUpdated })
       if (!isCurrentConfiguration(challenge.backend, generation)) return
       clearProtocolUpgrade(challenge.backend)
       isSyncing.value = false
@@ -730,7 +744,7 @@ export const useSyncStore = defineStore('sync', () => {
       else await syncWebDav()
     } catch (error) {
       if (!isCurrentConfiguration(challenge.backend, generation)) return
-      useToastStore().error(describeSyncError(error))
+      upgradeError.value = describeUpgradeFailure(error)
     } finally {
       isSyncing.value = false
       scheduleFollowUpSync()
@@ -811,7 +825,7 @@ export const useSyncStore = defineStore('sync', () => {
 
   return {
     github, webdav, syncFrequency, isSyncing, lastResult, dialogError,
-    pendingProtocolUpgrade, approveProtocolUpgrade,
+    pendingProtocolUpgrade, upgradeError, approveProtocolUpgrade,
     loadConfigs,
     validateGitHubToken, createGitHubRepo, useExistingGitHubRepo,
     configureGitHub, syncGitHub, syncAuto, requestFollowUpSync, disconnectGitHub,

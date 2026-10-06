@@ -844,7 +844,9 @@ pub async fn approve_sync_protocol_upgrade(
     app: AppHandle,
     state: State<'_, AppState>,
     challenge: crate::sync::archive::approval::SyncProtocolUpgrade,
+    all_devices_updated: bool,
 ) -> AppResult<()> {
+    ensure_all_devices_updated(all_devices_updated)?;
     let (current, request) = match challenge.backend.as_str() {
         "github" => {
             let (config, request) = with_config_generations(|generations| {
@@ -877,6 +879,17 @@ pub async fn approve_sync_protocol_upgrade(
             crate::sync::archive::approval::approve_verified(&challenge, &current)
         })
     })
+}
+
+/// 旧客户端读不懂升级后的归档，必须由用户确认所有设备都已更新（对齐 Android SyncProtocolUpgradeRepository）
+fn ensure_all_devices_updated(confirmed: bool) -> AppResult<()> {
+    if confirmed {
+        Ok(())
+    } else {
+        Err(AppError::Other(
+            "Confirm that every device runs a compatible version before upgrading the sync format".into(),
+        ))
+    }
 }
 
 #[tauri::command]
@@ -1694,6 +1707,12 @@ mod tests {
             }),
             "owner/repo"
         );
+    }
+
+    #[test]
+    fn upgrade_approval_requires_the_all_devices_confirmation() {
+        assert!(super::ensure_all_devices_updated(false).is_err());
+        assert!(super::ensure_all_devices_updated(true).is_ok());
     }
 
     #[test]

@@ -1088,7 +1088,11 @@ async function confirmClearGitHub() {
 }
 
 const hideProtocolUpgrade = ref(false)
-watch(() => syncStore.pendingProtocolUpgrade, () => { hideProtocolUpgrade.value = false })
+const upgradeDevicesConfirmed = ref(false)
+watch(() => syncStore.pendingProtocolUpgrade, () => {
+  hideProtocolUpgrade.value = false
+  upgradeDevicesConfirmed.value = false
+})
 
 // 页内旧式对话框（.dialog-overlay）同样响应 Escape，并与 M3Dialog 共用弹层栈
 for (const dialog of [
@@ -2597,9 +2601,14 @@ useEscapeClose(
           </div>
           <h3 class="dialog-title">{{ t('settings.sync_upgrade_title') }}</h3>
           <p class="dialog-desc">{{ t('settings.sync_upgrade_message', { provider: syncStore.pendingProtocolUpgrade.backend === 'github' ? 'GitHub' : 'WebDAV' }) }}</p>
+          <label class="dialog-check">
+            <input v-model="upgradeDevicesConfirmed" type="checkbox" :disabled="syncStore.isSyncing" />
+            <span>{{ t('settings.sync_upgrade_all_devices') }}</span>
+          </label>
+          <p v-if="syncStore.upgradeError" class="dialog-error">{{ syncStore.upgradeError }}</p>
           <div class="dialog-actions">
             <button class="dialog-btn" :disabled="syncStore.isSyncing" @click="hideProtocolUpgrade = true">{{ t('settings.cancel') }}</button>
-            <button class="dialog-btn primary" :disabled="syncStore.isSyncing" @click="syncStore.approveProtocolUpgrade()">{{ t('settings.sync_upgrade_confirm') }}</button>
+            <button class="dialog-btn primary" :disabled="syncStore.isSyncing || !upgradeDevicesConfirmed" @click="syncStore.approveProtocolUpgrade(upgradeDevicesConfirmed)">{{ t('settings.sync_upgrade_confirm') }}</button>
           </div>
         </div>
       </div>
@@ -3596,6 +3605,22 @@ useEscapeClose(
   font-size: 12px;
   color: var(--md-error);
   margin-bottom: 12px;
+}
+
+.dialog-check {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 12px 0;
+  font-size: 13px;
+  line-height: 1.4;
+  color: var(--md-on-surface);
+  cursor: pointer;
+
+  input {
+    margin-top: 2px;
+    accent-color: var(--md-primary);
+  }
 }
 
 .dialog-desc {
