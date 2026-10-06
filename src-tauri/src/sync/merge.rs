@@ -313,8 +313,12 @@ fn merge_playlists(
             (Some(local_playlist), None) => apply_deletions_to_playlist(local_playlist, deletions),
             (None, Some(remote_playlist)) => apply_deletions_to_playlist(remote_playlist, deletions),
             (Some(local_playlist), Some(remote_playlist)) => {
-                if local_playlist.is_deleted || remote_playlist.is_deleted {
+                if should_keep_playlist_deleted(local_playlist, remote_playlist) {
                     merge_deleted_playlist(local_playlist, remote_playlist)
+                } else if local_playlist.is_deleted || remote_playlist.is_deleted {
+                    // 另一端在删除之后又改过（或 Android 撤销了删除），活着的那份赢
+                    let active = if local_playlist.is_deleted { remote_playlist } else { local_playlist };
+                    apply_deletions_to_playlist(active, deletions)
                 } else {
                     merge_single_playlist(
                         local_playlist,
@@ -346,6 +350,19 @@ fn apply_deletions_to_playlist(
     let mut merged = playlist.clone();
     merged.songs = apply_playlist_song_deletions(&playlist.id, &playlist.songs, deletions);
     merged
+}
+
+/// 对齐 Android SyncPlaylistDeletionPolicy.shouldKeepPlaylistDeleted：
+/// 一端删除、另一端还在时，只有删除不早于那份歌单的最后修改才保留墓碑
+fn should_keep_playlist_deleted(left: &SyncPlaylist, right: &SyncPlaylist) -> bool {
+    match (left.is_deleted, right.is_deleted) {
+        (false, false) => false,
+        (true, true) => true,
+        _ => {
+            let (deleted, active) = if left.is_deleted { (left, right) } else { (right, left) };
+            deleted.modified_at >= active.modified_at
+        }
+    }
 }
 
 fn merge_deleted_playlist(local: &SyncPlaylist, remote: &SyncPlaylist) -> SyncPlaylist {
@@ -2141,6 +2158,28 @@ mod tests {
         );
         assert!(merged.playlists[0].is_deleted);
         assert!(merged.playlists[0].songs.is_empty());
+    }
+
+    #[test]
+    fn a_playlist_edited_after_its_deletion_survives_the_merge() {
+        let mut tombstone = playlist(Vec::new());
+        tombstone.is_deleted = true;
+        tombstone.modified_at = 100;
+        let mut edited = playlist(vec![song("42", 150)]);
+        edited.modified_at = 200;
+        for (local, remote) in [(&tombstone, &edited), (&edited, &tombstone)] {
+            let merged = three_way_merge(
+                &sync_data(vec![local.clone()]),
+                &sync_data(vec![remote.clone()]),
+                50,
+                &HashMap::new(),
+            );
+            assert!(!merged.playlists[0].is_deleted, "the newer live copy wins on either side");
+            assert_eq!(merged.playlists[0].songs.len(), 1);
+        }
+        edited.modified_at = 100;
+        let merged = three_way_merge(&sync_data(vec![tombstone]), &sync_data(vec![edited]), 50, &HashMap::new());
+        assert!(merged.playlists[0].is_deleted, "a deletion at the same time as the last edit is kept");
     }
 
     #[test]

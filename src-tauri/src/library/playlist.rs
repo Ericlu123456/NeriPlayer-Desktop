@@ -69,6 +69,9 @@ pub struct PlaylistStore {
     pub playlists: Vec<Playlist>,
     #[serde(default)]
     pub deleted_playlist_ids: Vec<i64>,
+    /// 墓碑的删除时间：首次删除时记下，同步时取各端较晚的那个（对齐 Android SyncPlaylistDeletionStore）
+    #[serde(skip)]
+    pub deleted_playlist_times: HashMap<i64, i64>,
     #[serde(default)]
     pub playlist_song_deletions: Vec<SyncPlaylistSongDeletion>,
     #[serde(default)]
@@ -117,12 +120,15 @@ impl PlaylistStore {
                 playlists[position].tracks.push(parse_member(&row.get::<_, String>(1)?)?);
             }
         }
-        let deleted_playlist_ids = connection
+        let deletions = connection
             .prepare(
-                "SELECT playlist_id FROM local_playlist_deletion ORDER BY deleted_at, playlist_id",
+                "SELECT playlist_id, deleted_at FROM local_playlist_deletion
+                 ORDER BY deleted_at, playlist_id",
             )?
-            .query_map([], |row| row.get::<_, i64>(0))?
+            .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))?
             .collect::<Result<Vec<_>, _>>()?;
+        let deleted_playlist_ids = deletions.iter().map(|(id, _)| *id).collect();
+        let deleted_playlist_times = deletions.into_iter().collect();
         let playlist_song_deletions = connection
             .prepare("SELECT deletion_payload_json FROM playlist_song_deletion ORDER BY position")?
             .query_map([], |row| row.get::<_, String>(0))?
@@ -133,6 +139,7 @@ impl PlaylistStore {
         let mut store = Self {
             playlists,
             deleted_playlist_ids,
+            deleted_playlist_times,
             playlist_song_deletions,
             next_id: db::meta::get_i64(connection, NEXT_ID_KEY)?.unwrap_or(0),
         };
@@ -266,9 +273,17 @@ impl PlaylistStore {
         let now = chrono::Utc::now().timestamp_millis();
         transaction.execute("DELETE FROM local_playlist_deletion", [])?;
         for id in &self.deleted_playlist_ids {
+            let deleted_at = self
+                .deleted_playlist_times
+                .get(id)
+                .copied()
+                .into_iter()
+                .chain(stored.get(id).copied())
+                .max()
+                .unwrap_or(now);
             transaction.execute(
                 "INSERT OR IGNORE INTO local_playlist_deletion (playlist_id, deleted_at) VALUES (?1, ?2)",
-                params![id, stored.get(id).copied().unwrap_or(now)],
+                params![id, deleted_at],
             )?;
         }
 
@@ -309,8 +324,26 @@ impl PlaylistStore {
             tracks: Vec::new(),
             modified_at: chrono::Utc::now().timestamp_millis() as u64,
         });
-        self.deleted_playlist_ids.retain(|deleted_id| *deleted_id != id);
+        self.forget_deletion(id);
         self.playlists.last().unwrap()
+    }
+
+    pub fn deletion_time(&self, id: i64) -> Option<i64> {
+        self.deleted_playlist_times.get(&id).copied()
+    }
+
+    fn forget_deletion(&mut self, id: i64) {
+        self.deleted_playlist_ids.retain(|deleted_id| *deleted_id != id);
+        self.deleted_playlist_times.remove(&id);
+    }
+
+    /// 记下（远端带来的）墓碑；已有墓碑时保留较晚的删除时间
+    pub fn record_playlist_deletion(&mut self, id: i64, deleted_at: i64) {
+        if !self.deleted_playlist_ids.contains(&id) {
+            self.deleted_playlist_ids.push(id);
+        }
+        let time = self.deleted_playlist_times.entry(id).or_insert(deleted_at);
+        *time = (*time).max(deleted_at);
     }
 
     /// 53 位随机 ID 可被 JavaScript 精确表示，并避免多台设备从同一序号开始
@@ -355,7 +388,7 @@ impl PlaylistStore {
             return (&self.playlists[index], false);
         }
         // 重新出现的系统歌单修改时间比旧墓碑新，同步时会按 Android 规则复活而不是再被删掉
-        self.deleted_playlist_ids.retain(|deleted_id| *deleted_id != id);
+        self.forget_deletion(id);
         let playlist = Playlist {
             id,
             name: name.trim().to_string(),
@@ -398,7 +431,7 @@ impl PlaylistStore {
                     deletion.playlist_id = system_id.to_string();
                 }
             }
-            self.deleted_playlist_ids.retain(|deleted_id| *deleted_id != system_id);
+            self.forget_deletion(system_id);
             changed = true;
         }
         changed
@@ -412,8 +445,14 @@ impl PlaylistStore {
         let len = self.playlists.len();
         self.playlists.retain(|p| p.id != id);
         let deleted = self.playlists.len() < len;
-        if deleted && !self.deleted_playlist_ids.contains(&id) {
-            self.deleted_playlist_ids.push(id);
+        if deleted {
+            if !self.deleted_playlist_ids.contains(&id) {
+                self.deleted_playlist_ids.push(id);
+            }
+            // 删除时间只在第一次删除时记下，再删一次不会把它往后推
+            self.deleted_playlist_times
+                .entry(id)
+                .or_insert_with(|| chrono::Utc::now().timestamp_millis());
         }
         deleted
     }
@@ -823,6 +862,23 @@ mod tests {
         assert_eq!(store.playlists[0].tracks[0].id, "netease:1");
         assert_eq!(store.deleted_playlist_ids, vec![9]);
         assert!(!directory.path().join(LEGACY_FILE).exists());
+    }
+
+    #[test]
+    fn deletion_times_are_stamped_once_and_only_move_forward_from_sync() {
+        let database = UserDatabase::open_in_memory().unwrap();
+        let mut store = PlaylistStore::default();
+        let id = store.create("Gone".into()).id;
+        assert!(store.delete(id));
+        let first = store.deletion_time(id).unwrap();
+        store.record_playlist_deletion(id, first - 1_000);
+        assert_eq!(store.deletion_time(id), Some(first), "an older remote time never rewinds it");
+        store.record_playlist_deletion(id, first + 1_000);
+        assert_eq!(store.deletion_time(id), Some(first + 1_000));
+        store.save_with(&database).unwrap();
+        let reloaded = database.read(PlaylistStore::load_from).unwrap();
+        assert_eq!(reloaded.deletion_time(id), Some(first + 1_000));
+        assert_eq!(reloaded.deleted_playlist_ids, vec![id]);
     }
 
     #[test]

@@ -698,7 +698,10 @@ fn local_sync_playlists(store: &PlaylistStore) -> Vec<SyncPlaylist> {
             name: String::new(),
             songs: Vec::new(),
             created_at: deleted_id,
-            modified_at: chrono::Utc::now().timestamp_millis(),
+            // 墓碑以删除时间作为修改时间（对齐 Android SyncPlaylistSnapshotMapping），每次快照都相同
+            modified_at: store
+                .deletion_time(deleted_id)
+                .unwrap_or_else(|| chrono::Utc::now().timestamp_millis()),
             is_deleted: true,
             song_order_version: DISPLAY_ORDER_SONG_ORDER_VERSION,
         });
@@ -810,12 +813,12 @@ fn merged_playlist_store(merged: &SyncData) -> AppResult<PlaylistStore> {
     let mut new_playlists: Vec<Playlist> = Vec::new();
     let mut max_id: i64 = existing_playlists.iter().map(|p| p.id).filter(|&id| id > 0).max().unwrap_or(0);
     let mut active_ids = HashSet::new();
-    let mut deleted_ids = HashSet::new();
+    let mut deleted_ids = HashMap::new();
 
     for sp in &merged.playlists {
         if sp.is_deleted {
             if let Ok(id) = sp.id.parse::<i64>() {
-                deleted_ids.insert(id);
+                deleted_ids.insert(id, sp.modified_at);
             }
             continue;
         }
@@ -869,15 +872,15 @@ fn merged_playlist_store(merged: &SyncData) -> AppResult<PlaylistStore> {
         });
     }
 
-    for id in deleted_ids {
+    for (id, deleted_at) in deleted_ids {
         if active_ids.contains(&id) {
             continue;
         }
-        if !store.deleted_playlist_ids.contains(&id) {
-            store.deleted_playlist_ids.push(id);
-        }
+        store.record_playlist_deletion(id, deleted_at);
     }
+    // 比墓碑新的活歌单赢了合并（对齐 Android shouldKeepPlaylistDeleted），本地墓碑随之撤销
     store.deleted_playlist_ids.retain(|id| !active_ids.contains(id));
+    store.deleted_playlist_times.retain(|id, _| !active_ids.contains(id));
 
     // 排序：我喜欢的音乐始终第一，本地文件始终最后，其余保持原序
     new_playlists.sort_by(|a, b| {
@@ -969,6 +972,17 @@ mod tests {
     use crate::state::{TrackInfo, TrackSource};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
+
+    #[test]
+    fn tombstones_keep_their_deletion_time_across_snapshots() {
+        let mut store = playlist::PlaylistStore::default();
+        store.record_playlist_deletion(77, 1_234);
+        let first = local_sync_playlists(&store);
+        let second = local_sync_playlists(&store);
+        assert!(first[0].is_deleted);
+        assert_eq!(first[0].modified_at, 1_234, "the tombstone carries the deletion time, not the upload time");
+        assert_eq!(second[0].modified_at, first[0].modified_at);
+    }
 
     #[test]
     fn only_fixed_or_negative_ids_are_system_playlists() {
