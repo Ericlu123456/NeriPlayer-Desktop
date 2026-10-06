@@ -30,7 +30,12 @@ import {
   type LocalArtistSummary,
 } from '@/modules/library/localArtists'
 import { createLogger } from '@/utils/logger'
-import { isEmptyLocalFilesPlaylist } from '@/modules/library/localPlaylists'
+import {
+  isEmptyLocalFilesPlaylist,
+  LEGACY_PLAYLIST_ORDER_KEY,
+  playlistOrderIds,
+  readLegacyPlaylistOrder,
+} from '@/modules/library/localPlaylists'
 import { usePointerListReorder } from '@/composables/usePointerListReorder'
 import {
   ARTIST_FAVORITE_SOURCES,
@@ -169,21 +174,36 @@ const {
 
     if (arr.map(playlistDragKey).join('\n') === playlists.value.map(playlistDragKey).join('\n')) return
     playlists.value = arr
-    // 持久化链路保持不变：仅写 localStorage 的自定义顺序
-    savePlaylistOrder(arr)
+    void savePlaylistOrder(arr)
   },
 })
 
-function savePlaylistOrder(ordered: PlaylistInfo[]) {
-  const orderIds = ordered.map(p => p.id)
-  localStorage.setItem('neri:playlist-order', JSON.stringify(orderIds))
-  log.info('Playlist order saved:', orderIds)
-}
-function loadPlaylistOrder(): number[] | null {
+// 自定义顺序落库并随同步跨端保留（对齐 Android reorderPlaylists）
+async function savePlaylistOrder(ordered: PlaylistInfo[]) {
+  const orderedIds = playlistOrderIds(ordered, isProtectedPlaylist)
   try {
-    const raw = localStorage.getItem('neri:playlist-order')
-    return raw ? JSON.parse(raw) : null
-  } catch { return null }
+    await invoke('reorder_playlists', { orderedIds })
+    log.info('Playlist order saved:', orderedIds)
+  } catch (e) {
+    log.error('Save playlist order failed:', e)
+    toast.error(t('library.playlist_order_save_failed'))
+    void loadPlaylists()
+  }
+}
+
+let legacyPlaylistOrderMigrated = false
+async function migrateLegacyPlaylistOrder() {
+  if (legacyPlaylistOrderMigrated) return
+  legacyPlaylistOrderMigrated = true
+  const legacyOrder = readLegacyPlaylistOrder(localStorage)
+  if (legacyOrder === null) return
+  try {
+    if (legacyOrder.length > 0) await invoke('reorder_playlists', { orderedIds: legacyOrder })
+    localStorage.removeItem(LEGACY_PLAYLIST_ORDER_KEY)
+  } catch (e) {
+    legacyPlaylistOrderMigrated = false
+    log.warn('Migrate legacy playlist order failed:', e)
+  }
 }
 
 const failedLibraryCoverKeys = ref<Set<string>>(new Set())
@@ -215,8 +235,9 @@ function markLibraryCoverFailed(scope: string, id: string | number, url?: string
 
 async function loadPlaylists() {
   try {
+    await migrateLegacyPlaylistOrder()
     const raw = await invoke<PlaylistInfo[]>('list_playlists')
-    // 排序：「我喜欢的音乐」置顶，「本地音乐」置底，其余保持原序
+    // 排序：「我喜欢的音乐」置顶，「本地音乐」置底，其余沿用数据库中的自定义顺序
     const liked: PlaylistInfo[] = []
     const localFiles: PlaylistInfo[] = []
     const normal: PlaylistInfo[] = []
@@ -225,16 +246,6 @@ async function loadPlaylists() {
       if (LIKED_NAMES.includes(pl.name)) liked.push(pl)
       else if (LOCAL_NAMES.includes(pl.name)) localFiles.push(pl)
       else normal.push(pl)
-    }
-    // 应用用户自定义排序
-    const savedOrder = loadPlaylistOrder()
-    if (savedOrder && savedOrder.length > 0) {
-      const orderMap = new Map(savedOrder.map((id, idx) => [id, idx]))
-      normal.sort((a, b) => {
-        const ai = orderMap.get(a.id) ?? Number.MAX_SAFE_INTEGER
-        const bi = orderMap.get(b.id) ?? Number.MAX_SAFE_INTEGER
-        return ai - bi
-      })
     }
     playlists.value = [...liked, ...normal, ...localFiles]
   } catch (e) {

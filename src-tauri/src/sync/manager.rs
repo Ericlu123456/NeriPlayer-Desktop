@@ -253,21 +253,23 @@ pub fn build_local_sync_data(
     let cleared_at=stats.cleared_at.max(metadata.playback_stats_cleared_at);
     let buckets=merge::merge_stat_buckets(&stats.buckets,&metadata.playback_stat_buckets,cleared_at);
     let merged_stats=merge::merge_playback_stats(&stats.stats,&metadata.playback_stats,cleared_at);
+    // 歌单与删除墓碑来自同一次读取，不能分两次读到前后不一致的库
+    let store = PlaylistStore::load()?;
 
     Ok(SyncData {
         version: "2.0".into(),
         device_id,
         device_name: format!("NeriPlayer Desktop ({})", hostname),
         last_modified: chrono::Utc::now().timestamp_millis(),
-        playlists: load_local_playlists(app)?,
-        favorite_playlists: load_favorites_at(&favorites_path(), true)?,
+        playlists: local_sync_playlists(&store),
+        favorite_playlists: crate::library::favorites::load(true)?,
         recent_plays,
         sync_log: Vec::new(),
         recent_play_deletions,
         playback_stats: merge::lift_stats_to_bucket_totals(&merged_stats,&buckets),
         playback_stats_cleared_at: cleared_at,
         playback_stat_buckets: buckets,
-        playlist_song_deletions: load_local_playlist_song_deletions()?,
+        playlist_song_deletions: local_playlist_song_deletions(&store),
         extensions: metadata.extensions,
     })
 }
@@ -440,14 +442,6 @@ pub fn attach_sync_membership_token_pub(
     payload.sync_metadata_version = CURRENT_SYNC_METADATA_VERSION;
     track.playlist_key = Some(payload.identity().stable_key());
     track.sync_payload = Some(payload);
-}
-
-/// 歌单文件路径（与 library_cmd 保持一致）
-fn playlists_path() -> std::path::PathBuf {
-    let mut path = dirs_next::data_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
-    path.push("NeriPlayer");
-    path.push("playlists.json");
-    path
 }
 
 pub fn tracks_to_sync_songs_pub(tracks: &[TrackInfo]) -> Vec<SyncSong> {
@@ -722,13 +716,11 @@ fn sync_song_to_track(song: &SyncSong) -> TrackInfo {
     }
 }
 
-/// 从本地歌单存储加载，转换为同步格式
-/// 歌单文件损坏时必须中止同步：以空库继续会把"空态"推上云端，
+/// 本地歌单转换为同步格式
+///
+/// 读取失败必须中止同步：以空库继续会把"空态"推上云端，
 /// 经 base-snapshot 删除检测放大为全设备数据丢失
-fn load_local_playlists(_app: &AppHandle) -> AppResult<Vec<SyncPlaylist>> {
-    let path = playlists_path();
-    let store = PlaylistStore::load_strict(&path)?;
-
+fn local_sync_playlists(store: &PlaylistStore) -> Vec<SyncPlaylist> {
     let mut playlists: Vec<SyncPlaylist> = store.playlists.iter().map(|pl| {
         let sync_id = sync_playlist_id(pl.id, &pl.name);
         SyncPlaylist {
@@ -743,7 +735,7 @@ fn load_local_playlists(_app: &AppHandle) -> AppResult<Vec<SyncPlaylist>> {
     }).collect();
 
     let existing_ids: HashSet<String> = playlists.iter().map(|playlist| playlist.id.clone()).collect();
-    for deleted_id in store.deleted_playlist_ids {
+    for &deleted_id in &store.deleted_playlist_ids {
         let id = deleted_id.to_string();
         if existing_ids.contains(&id) {
             continue;
@@ -758,7 +750,7 @@ fn load_local_playlists(_app: &AppHandle) -> AppResult<Vec<SyncPlaylist>> {
             song_order_version: DISPLAY_ORDER_SONG_ORDER_VERSION,
         });
     }
-    Ok(playlists)
+    playlists
 }
 
 fn sync_playlist_id(id: i64, name: &str) -> String {
@@ -781,6 +773,15 @@ const LOCAL_NAMES: &[&str] = &["本地音乐", "本機音樂", "ローカル音�
 
 fn is_favorites_name(name: &str) -> bool { FAVORITES_NAMES.contains(&name) }
 fn is_local_name(name: &str) -> bool { LOCAL_NAMES.contains(&name) }
+
+/// 系统歌单（我喜欢的音乐 / 本地文件）固定首尾，不参与自定义排序
+pub(crate) fn is_system_playlist(id: i64, name: &str) -> bool {
+    id == SYSTEM_FAVORITES_ID || is_favorites_name(name) || is_local_files_playlist(id, name)
+}
+
+pub(crate) fn is_local_files_playlist(id: i64, name: &str) -> bool {
+    id == SYSTEM_LOCAL_ID || is_local_name(name)
+}
 
 /// 解析 SyncPlaylist ID，识别系统歌单
 fn resolve_system_id(sp_id: &str, sp_name: &str) -> i64 {
@@ -820,9 +821,8 @@ pub(super) fn ensure_local_playlist_epoch(expected_epoch: u64) -> AppResult<()> 
 }
 
 fn save_synced_playlists_locked(merged: &SyncData) -> AppResult<()> {
-    let path = playlists_path();
-    // 损坏时中止回写：在空库上重建会把用户本地独有的歌单 ID 映射全部丢弃
-    let mut store = PlaylistStore::load_strict(&path)?;
+    // 读取失败时中止回写：在空库上重建会把用户本地独有的歌单 ID 映射全部丢弃
+    let mut store = PlaylistStore::load()?;
     let existing_playlists = store.playlists.clone();
 
     let mut new_playlists: Vec<Playlist> = Vec::new();
@@ -920,82 +920,39 @@ fn save_synced_playlists_locked(merged: &SyncData) -> AppResult<()> {
         })
         .collect();
     store.fix_next_id();
-    // 歌单库是同步的最终落点，写失败必须上抛，静默吞掉会让用户以为已同步
-    store.save_locked(&path)?;
-
-    // 保存收藏歌单到独立文件
-    save_favorite_playlists(merged)?;
+    // 歌单与收藏（含删除墓碑）在同一事务里落库，不会出现只写了一半的同步结果；
+    // 写失败必须上抛，静默吞掉会让用户以为已同步
+    crate::db::user_db()?.write(|transaction| {
+        store.save_into(transaction)?;
+        crate::library::favorites::save_into(transaction, &merged.favorite_playlists)
+    })?;
+    playlist::mark_io_changed();
     Ok(())
 }
 
-/// 收藏歌单存储路径
-fn favorites_path() -> std::path::PathBuf {
-    let mut path = dirs_next::data_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
-    path.push("NeriPlayer");
-    path.push("favorites.json");
-    path
-}
-
-/// 保存收藏歌单（FavoritePlaylist）
-fn save_favorite_playlists(merged: &SyncData) -> AppResult<()> {
-    save_favorites_at(&favorites_path(), merged)
-}
-
-fn save_favorites_at(path: &std::path::Path, merged: &SyncData) -> AppResult<()> {
-    // 删除记录必须持久化，下一轮同步才不会被旧端的收藏重新恢复
-    crate::fsutil::atomic_write(path, serde_json::to_vec_pretty(&merged.favorite_playlists)?)?;
-    Ok(())
-}
-
-/// 读取收藏歌单（供 list 命令调用）
+/// 读取收藏歌单（供 list 命令调用，隐藏墓碑）
 pub fn load_favorite_playlists() -> AppResult<Vec<SyncFavoritePlaylist>> {
-    load_favorites_at(&favorites_path(), false)
+    crate::library::favorites::load(false)
 }
 
 pub fn update_favorite_playlists<T>(
     update: impl FnOnce(&mut Vec<SyncFavoritePlaylist>) -> AppResult<T>,
 ) -> AppResult<T> {
-    let _guard = playlist::lock_io();
-    update_favorites_at(&favorites_path(), update)
+    crate::library::favorites::update(update)
 }
 
-fn update_favorites_at<T>(
-    path: &std::path::Path,
-    update: impl FnOnce(&mut Vec<SyncFavoritePlaylist>) -> AppResult<T>,
-) -> AppResult<T> {
-    let mut favorites = load_favorites_at(path, true)?;
-    let result = update(&mut favorites)?;
-    let data = SyncData { favorite_playlists: favorites, ..Default::default() };
-    save_favorites_at(path, &data)?;
-    // 收藏也是同步快照的一部分，网络窗口中的修改必须让旧快照失效
-    playlist::mark_io_changed();
-    Ok(result)
-}
-
-fn load_favorites_at(path: &std::path::Path, include_deleted: bool) -> AppResult<Vec<SyncFavoritePlaylist>> {
-    read_optional_json::<Vec<SyncFavoritePlaylist>>(path, "favorites.json")
-        .map(|favorites| {
-            favorites
-                .unwrap_or_default()
-                .into_iter()
-                .filter(|favorite| include_deleted || !favorite.is_deleted)
-                .map(|favorite| favorite.normalized_for_sync())
-                .collect()
-        })
-}
-
-fn load_local_playlist_song_deletions() -> AppResult<Vec<SyncPlaylistSongDeletion>> {
-    let store = PlaylistStore::load_strict(&playlists_path())?;
-    Ok(store
+fn local_playlist_song_deletions(store: &PlaylistStore) -> Vec<SyncPlaylistSongDeletion> {
+    store
         .playlist_song_deletions
-        .into_iter()
+        .iter()
+        .cloned()
         .map(|mut deletion| {
             deletion.removed_membership_tokens = normalize_sync_causal_tokens(
                 &deletion.removed_membership_tokens,
             );
             deletion
         })
-        .collect())
+        .collect()
 }
 
 // Base Snapshot：用于三方歌曲合并的删除检测
@@ -1212,48 +1169,11 @@ mod tests {
     }
 
     #[test]
-    fn favorite_updates_preserve_tombstones_and_invalidate_sync_snapshots() {
-        let directory = std::env::temp_dir().join(format!("neri-favorite-update-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir(&directory).unwrap();
-        let path = directory.join("favorites.json");
-        let deleted: SyncFavoritePlaylist = serde_json::from_value(serde_json::json!({"id":42,"name":"deleted artist","source":"neteaseArtist","modifiedAt":20,"isDeleted":true})).unwrap();
-        save_favorites_at(&path, &SyncData { favorite_playlists: vec![deleted], ..Default::default() }).unwrap();
-        let epoch = playlist::io_epoch();
-        update_favorites_at(&path, |favorites| {
-            assert!(favorites[0].is_deleted);
-            favorites.push(serde_json::from_value(serde_json::json!({"id":43,"name":"new artist","source":"biliArtist","modifiedAt":21})).unwrap());
-            Ok(())
-        }).unwrap();
-        assert!(playlist::io_epoch() > epoch);
-        assert_eq!(load_favorites_at(&path, true).unwrap().len(), 2);
-        assert_eq!(load_favorites_at(&path, false).unwrap().len(), 1);
-        let before = std::fs::read(&path).unwrap();
-        assert!(update_favorites_at(&path, |favorites| { favorites.clear(); Err::<(), _>(AppError::Other("fixture error".into())) }).is_err());
-        assert_eq!(std::fs::read(&path).unwrap(), before);
-        std::fs::remove_dir_all(directory).unwrap();
-    }
-
-    #[test]
-    fn favorite_tombstone_survives_two_sync_rounds_and_is_hidden_from_listing() {
-        let directory=std::env::temp_dir().join(format!("neri-favorite-persistence-{}",uuid::Uuid::new_v4()));std::fs::create_dir_all(&directory).unwrap();let path=directory.join("favorites.json");
-        let active:SyncFavoritePlaylist=serde_json::from_value(serde_json::json!({"id":42,"name":"phone favorite","source":"netease","modifiedAt":10})).unwrap();
-        let mut deleted=active.clone();deleted.is_deleted=true;deleted.modified_at=20;
-        let data=SyncData{favorite_playlists:vec![deleted],..Default::default()};
-        save_favorites_at(&path,&data).unwrap();let first=std::fs::read(&path).unwrap();save_favorites_at(&path,&data).unwrap();assert_eq!(std::fs::read(&path).unwrap(),first);
-        assert!(load_favorites_at(&path,false).unwrap().is_empty());
-        let local=SyncData{favorite_playlists:load_favorites_at(&path,true).unwrap(),..Default::default()};
-        let remote=SyncData{favorite_playlists:vec![active],..Default::default()};
-        let next=merge::three_way_merge(&local,&remote,0,&HashMap::new());assert!(next.favorite_playlists[0].is_deleted);
-        save_favorites_at(&path,&next).unwrap();assert!(load_favorites_at(&path,true).unwrap()[0].is_deleted);assert!(load_favorites_at(&path,false).unwrap().is_empty());
-        std::fs::remove_file(path).unwrap();std::fs::remove_dir(directory).unwrap();
-    }
-
-    #[test]
-    fn failed_history_favorites_and_base_writes_propagate_and_retry_idempotently() {
+    fn failed_history_and_base_writes_propagate_and_retry_idempotently() {
         let directory=std::env::temp_dir().join(format!("neri-sync-write-failure-{}",uuid::Uuid::new_v4()));std::fs::create_dir_all(&directory).unwrap();let blocker=directory.join("blocked");std::fs::write(&blocker,b"file").unwrap();let blocked=blocker.join("state.json");let data=SyncData::default();
-        assert!(save_recent_history_at(&blocked,&data).is_err());assert!(save_favorites_at(&blocked,&data).is_err());assert!(save_base_snapshot_at(&blocked,&data).is_err());
+        assert!(save_recent_history_at(&blocked,&data).is_err());assert!(save_base_snapshot_at(&blocked,&data).is_err());
         std::fs::remove_file(&blocker).unwrap();
-        for (name,write) in [("history",save_recent_history_at as fn(&std::path::Path,&SyncData)->AppResult<()>),("favorites",save_favorites_at),("base",save_base_snapshot_at)] {
+        for (name,write) in [("history",save_recent_history_at as fn(&std::path::Path,&SyncData)->AppResult<()>),("base",save_base_snapshot_at)] {
             let path=directory.join(name);write(&path,&data).unwrap();let first=std::fs::read(&path).unwrap();write(&path,&data).unwrap();assert_eq!(std::fs::read(&path).unwrap(),first);std::fs::remove_file(path).unwrap();
         }
         std::fs::remove_dir(directory).unwrap();

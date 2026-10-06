@@ -165,8 +165,9 @@ pub async fn get_storage_usage(
 
     let local_covers = app_data_dir.as_ref().map(|dir| dir.join("local-covers"));
     let custom_background = app_data_dir.as_ref().map(|dir| dir.join("background"));
-    let playlist_data = dirs_next::data_dir()
-        .map(|dir| dir.join("NeriPlayer").join("playlists.json"));
+    let user_database = crate::db::database_files(
+        &crate::db::user_data_dir().join(crate::db::DATABASE_FILE),
+    );
     let known_data = known_data_paths(
         &image_cache,
         &download_staging,
@@ -175,14 +176,14 @@ pub async fn get_storage_usage(
         &download_roots,
         local_covers.as_deref(),
         custom_background.as_deref(),
-        playlist_data.as_deref(),
+        &user_database,
     );
     sections.push(StorageUsageSection {
         id: "app_data".into(),
         items: vec![
             usage_item("local_covers", local_covers.as_deref(), None),
             usage_item("custom_background", custom_background.as_deref(), None),
-            usage_item("playlist_data", playlist_data.as_deref(), None),
+            aggregate_item("playlist_data", &user_database, None),
             other_app_data_item(app_data_dir.as_deref(), &known_data),
         ],
     });
@@ -484,7 +485,7 @@ fn known_data_paths(
     download_roots: &[PathBuf],
     local_covers: Option<&Path>,
     custom_background: Option<&Path>,
-    playlist_data: Option<&Path>,
+    user_database: &[PathBuf],
 ) -> Vec<PathBuf> {
     image_cache
         .iter()
@@ -492,9 +493,9 @@ fn known_data_paths(
         .chain(shared_media)
         .chain(platform_list)
         .chain(download_roots)
+        .chain(user_database)
         .cloned()
         .chain(local_covers.map(Path::to_path_buf))
         .chain(custom_background.map(Path::to_path_buf))
-        .chain(playlist_data.map(Path::to_path_buf))
         .collect()
 }

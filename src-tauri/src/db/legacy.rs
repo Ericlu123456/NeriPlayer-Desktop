@@ -17,7 +17,16 @@ pub const BACKUP_DIR: &str = "legacy-json-backup";
 pub type LegacyImporter = fn(&Transaction<'_>, &Path) -> AppResult<Vec<PathBuf>>;
 
 /// (迁移标记, 导入器)；顺序即导入顺序，依赖其它数据域的导入器必须排在后面
-const IMPORTERS: &[(&str, LegacyImporter)] = &[];
+const IMPORTERS: &[(&str, LegacyImporter)] = &[
+    (
+        crate::library::playlist::LEGACY_IMPORT_KEY,
+        crate::library::playlist::import_legacy_json,
+    ),
+    (
+        crate::library::favorites::LEGACY_IMPORT_KEY,
+        crate::library::favorites::import_legacy_json,
+    ),
+];
 
 pub fn import_all(database: &UserDatabase, directory: &Path) -> AppResult<()> {
     for (key, importer) in IMPORTERS {

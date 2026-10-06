@@ -1,5 +1,5 @@
 use crate::error::{AppError, AppResult};
-use crate::library::playlist::PlaylistStore;
+use crate::library::playlist;
 use crate::state::{AppState, TrackInfo, TrackSource};
 use serde_json::Value;
 use std::collections::HashSet;
@@ -88,14 +88,8 @@ pub async fn find_netease_local_sources(
     duration_ms: u64,
 ) -> AppResult<Vec<TrackInfo>> {
     tokio::task::spawn_blocking(move || {
-        let path = dirs_next::data_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("NeriPlayer/playlists.json");
-        let store = PlaylistStore::load_strict(&path)?;
-        let mut candidates: Vec<_> = store
-            .playlists
+        let mut candidates: Vec<_> = playlist::load_all_tracks(Some(TrackSource::Local))?
             .into_iter()
-            .flat_map(|playlist| playlist.tracks)
             .filter_map(|track| {
                 local_match_rank(&song_id, &title, &artist, duration_ms, &track)
                     .map(|rank| (rank, track))

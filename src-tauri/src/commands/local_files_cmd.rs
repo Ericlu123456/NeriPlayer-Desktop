@@ -7,7 +7,7 @@ use lofty::probe::Probe;
 use lofty::properties::FileProperties;
 use tauri::{AppHandle, Emitter, Manager};
 use crate::error::{AppError, AppResult};
-use crate::library::{playlist::PlaylistStore, scanner};
+use crate::library::scanner;
 use crate::state::TrackInfo;
 
 static SCANS: OnceLock<Mutex<HashMap<String, Arc<AtomicBool>>>> = OnceLock::new();
@@ -136,13 +136,9 @@ pub fn cancel_local_scan(session_id: String) -> bool {
 
 #[tauri::command]
 pub async fn get_local_playlist_tracks() -> AppResult<Vec<TrackInfo>> {
-    tokio::task::spawn_blocking(|| {
-        let mut path = dirs_next::data_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
-        path.push("NeriPlayer");
-        path.push("playlists.json");
-        let store = PlaylistStore::load_strict(&path)?;
-        Ok(store.playlists.into_iter().flat_map(|playlist| playlist.tracks).collect())
-    }).await.map_err(|error| AppError::Other(error.to_string()))?
+    tokio::task::spawn_blocking(|| crate::library::playlist::load_all_tracks(None))
+        .await
+        .map_err(|error| AppError::Other(error.to_string()))?
 }
 
 #[tauri::command]

@@ -448,6 +448,7 @@ fn main() {
             library_cmd::remove_from_playlist,
             library_cmd::remove_tracks_from_playlist,
             library_cmd::reorder_playlist_tracks,
+            library_cmd::reorder_playlists,
             library_cmd::update_playlist_track,
             library_cmd::list_favorite_playlists,
             library_cmd::set_artist_favorite,

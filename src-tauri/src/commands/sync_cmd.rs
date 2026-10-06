@@ -1214,13 +1214,7 @@ fn dir_size(path: &std::path::Path) -> std::io::Result<u64> {
 #[tauri::command]
 pub async fn export_playlists(app: AppHandle) -> AppResult<Value> {
     use crate::library::playlist::PlaylistStore;
-    let playlists_path = {
-        let mut path = dirs_next::data_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
-        path.push("NeriPlayer");
-        path.push("playlists.json");
-        path
-    };
-    let store = PlaylistStore::load_strict(&playlists_path)?;
+    let store = PlaylistStore::load()?;
 
     // 转换为 SyncPlaylist 格式（Android 兼容）
     let sync_playlists: Vec<crate::sync::models::SyncPlaylist> = store.playlists.iter().map(|pl| {
@@ -1323,6 +1317,29 @@ fn build_import_merged_playlists(
     Ok(merged)
 }
 
+/// 合并桌面格式导出的歌单：同名歌单保留本地版本，新歌单 ID 与本地冲突时换发新 ID
+fn merge_desktop_playlists(
+    store: &mut crate::library::playlist::PlaylistStore,
+    imported: Vec<crate::library::playlist::Playlist>,
+) -> bool {
+    let mut changed = false;
+    for mut playlist in imported {
+        if store.playlists.iter().any(|existing| existing.name == playlist.name) {
+            continue;
+        }
+        if store.playlists.iter().any(|existing| existing.id == playlist.id) {
+            playlist.id = store.allocate_id();
+        }
+        store.deleted_playlist_ids.retain(|id| *id != playlist.id);
+        store.playlists.push(playlist);
+        changed = true;
+    }
+    if changed {
+        store.fix_next_id();
+    }
+    changed
+}
+
 /// 导入播放列表 JSON（兼容 Android BackupData 和 Desktop 两种格式）
 #[tauri::command]
 pub async fn import_playlists(app: AppHandle) -> AppResult<Value> {
@@ -1357,19 +1374,10 @@ pub async fn import_playlists(app: AppHandle) -> AppResult<Value> {
                 // 尝试 Desktop 格式
                 if let Ok(imported) = serde_json::from_value::<Vec<Playlist>>(parsed.clone()) {
                     count = imported.len();
-                    let playlists_path = {
-                        let mut path = dirs_next::data_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
-                        path.push("NeriPlayer");
-                        path.push("playlists.json");
-                        path
-                    };
-                    let mut store = PlaylistStore::load_strict(&playlists_path)?;
-                    for pl in imported {
-                        if !store.playlists.iter().any(|p| p.name == pl.name) {
-                            store.playlists.push(pl);
-                        }
-                    }
-                    store.save(&playlists_path)?;
+                    PlaylistStore::update(|store| {
+                        let changed = merge_desktop_playlists(store, imported);
+                        Ok(((), changed))
+                    })?;
                 } else {
                     // 可能是 SyncPlaylist 数组（无外层包装）
                     let sync_playlists: Vec<SyncPlaylist> = serde_json::from_value(parsed)
