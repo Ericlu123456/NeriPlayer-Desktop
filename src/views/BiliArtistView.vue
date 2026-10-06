@@ -26,7 +26,6 @@ const loading = ref(false)
 const loadingMore = ref(false)
 const error = ref('')
 const failedLoadMore = ref(false)
-const query = ref('')
 const activeTab = ref<'videos' | 'collections' | 'series'>('videos')
 const contents = ref<ArtistContents | null>(null)
 const loadingContents = ref(false)
@@ -43,15 +42,9 @@ const header = computed(() => detail.value?.header || {
 })
 const tracks = computed(() => detail.value?.tracks || [])
 const activeTracks = computed(() => selectedContent.value ? collection.value?.tracks || [] : tracks.value)
-const filteredTracks = computed(() => {
-  const search = query.value.trim().toLocaleLowerCase()
-  return activeTracks.value.filter(track => !search || `${track.title} ${track.artist}`.toLocaleLowerCase().includes(search))
-})
-const visibleContents = computed(() => {
-  const pool = activeTab.value === 'collections' ? contents.value?.collections || [] : contents.value?.series || []
-  const search = query.value.trim().toLocaleLowerCase()
-  return pool.filter(content => !search || `${content.name} ${content.description}`.toLocaleLowerCase().includes(search))
-})
+const visibleContents = computed(() => activeTab.value === 'collections'
+  ? contents.value?.collections || [] : contents.value?.series || [])
+const tabIcons = { videos: 'smart_display', collections: 'video_library', series: 'playlist_play' }
 const { following, changing, toggle } = useArtistFavorite(computed(() => ({
   source: 'biliArtist', id: mid.value, name: header.value.name, coverUrl: header.value.coverUrl,
   trackCount: detail.value?.total || tracks.value.length,
@@ -64,7 +57,6 @@ async function load(more = false) {
   const cacheKey = playlistDetailCacheKey('bili-artist-v1', id)
   if (!more) {
     detail.value = readPlaylistDetailCache<ArtistDetail>(cacheKey)
-    query.value = ''
     loading.value = true
   } else loadingMore.value = true
   error.value = ''
@@ -94,7 +86,7 @@ async function load(more = false) {
 async function toggleFollow() {
   try { await toggle() } catch (cause) { toast.error(String(cause)) }
 }
-function playTrack(track: TrackInfo) { player.playAll(filteredTracks.value, track.id) }
+function playTrack(track: TrackInfo) { player.playAll(activeTracks.value, track.id) }
 
 async function loadContents(more = false) {
   if (loadingContents.value) return
@@ -124,7 +116,7 @@ async function loadCollection(content: ArtistContent, more = false) {
   if (more && loadingCollection.value) return
   const request = more ? collectionGeneration : ++collectionGeneration
   const artistRequest = generation
-  if (!more) { selectedContent.value = content; collection.value = null; query.value = '' }
+  if (!more) { selectedContent.value = content; collection.value = null }
   loadingCollection.value = true
   collectionError.value = ''
   try {
@@ -150,7 +142,6 @@ function selectTab(tab: 'videos' | 'collections' | 'series') {
   selectedContent.value = null
   collectionGeneration++
   loadingCollection.value = false
-  query.value = ''
 }
 watch(() => [mid.value, route.query.contentId, route.query.kind], () => {
   contentsGeneration++
@@ -182,7 +173,6 @@ onUnmounted(() => { generation++; contentsGeneration++; collectionGeneration++ }
       <div class="creator-page-title">{{ header.name || t('player.source_bilibili') }}</div>
     </header>
     <section class="creator-hero">
-      <div v-if="header.bannerUrl" class="creator-banner"><BilibiliCoverImage :src="header.bannerUrl" /></div>
       <div class="creator-identity">
         <div class="creator-avatar"><BilibiliCoverImage v-if="header.coverUrl" :src="header.coverUrl" /><span v-else class="material-symbols-rounded">account_circle</span></div>
         <div class="creator-name"><h1>{{ header.name }}</h1><p>{{ t('player.source_bilibili') }} · {{ t('player.track_count', { count: detail?.total || tracks.length }) }}</p></div>
@@ -191,35 +181,94 @@ onUnmounted(() => { generation++; contentsGeneration++; collectionGeneration++ }
       <p v-if="header.description" class="creator-description">{{ header.description }}</p>
       <button class="play-all-btn" :disabled="!activeTracks.length" @click="player.playAll(activeTracks)"><span class="material-symbols-rounded filled">play_arrow</span>{{ t('player.play_all') }}</button>
     </section>
-    <div class="creator-tabs">
-      <button v-for="tab in (['videos', 'collections', 'series'] as const)" :key="tab" :class="{ active: activeTab === tab }" @click="selectTab(tab)">{{ t(`player.artist_${tab}`) }}</button>
+    <div class="artist-tabs">
+      <button v-for="tab in (['videos', 'collections', 'series'] as const)" :key="tab" class="artist-tab" :class="{ active: activeTab === tab }" @click="selectTab(tab)">
+        <span class="material-symbols-rounded">{{ tabIcons[tab] }}</span>
+        <span>{{ t(`player.artist_${tab}`) }}</span>
+      </button>
     </div>
+    <Transition name="fade" mode="out-in">
+    <div :key="`${activeTab}:${selectedContent?.id || ''}`" class="creator-tab-content">
     <div v-if="activeTab === 'videos' && loading && !tracks.length" class="state-center"><span class="material-symbols-rounded spinning">progress_activity</span></div>
     <div v-else-if="activeTab === 'videos' && error && !tracks.length" class="state-center"><p>{{ error }}</p><button class="retry-btn" @click="load()">{{ t('player.retry') }}</button></div>
     <template v-else>
-      <div class="creator-section-heading"><h2>{{ selectedContent?.name || t(`player.artist_${activeTab}`) }}</h2><button v-if="selectedContent" class="creator-more" @click="selectTab(activeTab)">{{ t('player.artist_collection_back') }}</button><div class="header-search"><span class="material-symbols-rounded search-icon">search</span><input v-model="query" class="search-input" :placeholder="t('library.tab_search_hint')" :aria-label="t('library.tab_search_hint')" /></div></div>
+      <div class="creator-section-heading"><h2>{{ selectedContent?.name || t(`player.artist_${activeTab}`) }}</h2><button v-if="selectedContent" class="creator-more" @click="selectTab(activeTab)">{{ t('player.artist_collection_back') }}</button></div>
       <template v-if="activeTab !== 'videos' && !selectedContent">
         <div v-if="contentsError" class="creator-error"><span>{{ contentsError }}</span><button @click="loadContents()">{{ t('player.retry') }}</button></div>
         <div v-if="loadingContents && !contents" class="state-center"><span class="material-symbols-rounded spinning">progress_activity</span></div>
-        <div v-else class="creator-grid"><button v-for="content in visibleContents" :key="content.kind + content.id" class="creator-card" @click="loadCollection(content)"><div class="creator-card-cover"><BilibiliCoverImage v-if="content.coverUrl" :src="content.coverUrl" loading="lazy" /><span v-else class="material-symbols-rounded">video_library</span></div><span class="creator-card-title">{{ content.name }}</span><span class="creator-card-subtitle">{{ t('player.track_count', { count: content.total }) }}</span></button></div>
+        <div v-else class="creator-content-list">
+          <button v-for="content in visibleContents" :key="content.kind + content.id" class="creator-content-item" @click="loadCollection(content)">
+            <div class="creator-content-cover"><BilibiliCoverImage v-if="content.coverUrl" :src="content.coverUrl" loading="lazy" /><span v-else class="material-symbols-rounded">video_library</span></div>
+            <div class="creator-content-info"><div class="creator-content-title">{{ content.name }}</div><div class="creator-content-meta">{{ t('player.track_count', { count: content.total }) }}</div></div>
+            <span class="material-symbols-rounded creator-content-arrow">chevron_right</span>
+          </button>
+          <p v-if="!loadingContents && !contentsError && !visibleContents.length" class="creator-empty">{{ t('library.empty_title', { type: t(`player.artist_${activeTab}`) }) }}</p>
+        </div>
         <button v-if="contents?.hasMore" class="creator-more" :disabled="loadingContents" @click="loadContents(true)">{{ t(loadingContents ? 'common.loading' : 'player.artist_load_more') }}</button>
       </template>
       <template v-else>
       <div v-if="selectedContent ? collectionError : error" class="creator-error"><span>{{ selectedContent ? collectionError : error }}</span><button @click="selectedContent ? loadCollection(selectedContent, !!collection) : load(failedLoadMore)">{{ t('player.retry') }}</button></div>
       <div v-if="loadingCollection && !collection" class="state-center"><span class="material-symbols-rounded spinning">progress_activity</span></div>
       <div class="track-list">
-        <button v-for="(track, index) in filteredTracks" :key="track.id" class="track-item" :class="{ active: player.currentTrack?.id === track.id }" @click="playTrack(track)">
+        <button v-for="(track, index) in activeTracks" :key="track.id" class="track-item" :class="{ active: player.currentTrack?.id === track.id }" @click="playTrack(track)">
           <span class="track-index">{{ index + 1 }}</span><div class="track-cover"><BilibiliCoverImage v-if="track.coverUrl" :src="track.coverUrl" loading="lazy" /></div><div class="track-info"><div class="track-title">{{ track.title }}</div><div class="track-meta">{{ track.artist }}</div></div><span class="track-duration">{{ formatTrackDuration(track.durationMs) }}</span>
         </button>
       </div>
-      <p v-if="!loadingCollection && !filteredTracks.length" class="creator-empty">{{ t('player.artist_songs_empty') }}</p>
+      <p v-if="!loadingCollection && !activeTracks.length" class="creator-empty">{{ t('player.artist_songs_empty') }}</p>
       <button v-if="selectedContent ? collection?.hasMore : detail?.hasMore" class="creator-more" :disabled="loadingMore || loadingCollection" @click="selectedContent ? loadCollection(selectedContent, true) : load(true)">{{ t(loadingMore || loadingCollection ? 'common.loading' : 'player.artist_load_more') }}</button>
       </template>
     </template>
+    </div>
+    </Transition>
   </div>
 </template>
 
 <style scoped lang="scss">
 @use '@/styles/detail-view.scss' as *;
 @use '@/modules/library/artistDetail.scss' as *;
+@use '@/modules/library/artistTabs.scss' as *;
+
+.creator-hero {
+  border-radius: 28px;
+  margin-bottom: 16px;
+}
+
+.creator-content-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.creator-content-item {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 10px 12px;
+  border-radius: 16px;
+  text-align: left;
+  transition: background var(--duration-short, 150ms);
+
+  &:hover { background: var(--md-surface-container); }
+  &:focus-visible { outline: 2px solid var(--md-primary); }
+}
+
+.creator-content-cover {
+  width: 56px;
+  height: 56px;
+  border-radius: 12px;
+  overflow: hidden;
+  flex-shrink: 0;
+  background: var(--md-surface-variant);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+
+  :deep(img) { width: 100%; height: 100%; object-fit: cover; }
+  .material-symbols-rounded { font-size: 26px; opacity: 0.4; }
+}
+
+.creator-content-info { flex: 1; min-width: 0; }
+.creator-content-title { font-size: 14px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.creator-content-meta { margin-top: 2px; font-size: 12px; color: var(--md-on-surface-variant); }
+.creator-content-arrow { font-size: 18px; opacity: 0.3; }
 </style>

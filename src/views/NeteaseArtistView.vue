@@ -54,6 +54,20 @@ const header = ref<ArtistHeader | null>(null)
 const tracks = ref<TrackInfo[]>([])
 const albums = ref<ArtistAlbum[]>([])
 const activeTab = ref<'songs' | 'albums'>('songs')
+const query = ref('')
+const search = computed(() => query.value.trim().toLocaleLowerCase())
+const filteredTracks = computed(() => {
+  const keyword = search.value
+  if (!keyword) return tracks.value
+  return tracks.value.filter(track =>
+    [track.title, track.artist, track.album].some(value => value.toLocaleLowerCase().includes(keyword)))
+})
+const filteredAlbums = computed(() => {
+  const keyword = search.value
+  if (!keyword) return albums.value
+  return albums.value.filter(album =>
+    [album.name, album.publishYear].some(value => value.toLocaleLowerCase().includes(keyword)))
+})
 
 const artistId = computed(() => Number(route.params.id) || 0)
 let generation = 0
@@ -71,14 +85,20 @@ async function toggleFollow() {
 // 大列表窗口渲染, 与歌单详情页同策略
 const RENDER_CHUNK = 100
 const renderCount = ref(RENDER_CHUNK)
-const visibleTracks = computed(() => tracks.value.slice(0, renderCount.value))
-const hasMoreTracks = computed(() => renderCount.value < tracks.value.length)
+const visibleTracks = computed(() => filteredTracks.value.slice(0, renderCount.value))
+const hasMoreTracks = computed(() => renderCount.value < filteredTracks.value.length)
+
+watch(query, () => { renderCount.value = RENDER_CHUNK })
+watch(activeTab, () => {
+  query.value = ''
+  renderCount.value = RENDER_CHUNK
+})
 
 function onViewScroll(e: Event) {
   const el = e.currentTarget as HTMLElement | null
   if (!el || !hasMoreTracks.value || activeTab.value !== 'songs') return
   if (el.scrollTop + el.clientHeight >= el.scrollHeight - 2400) {
-    renderCount.value = Math.min(tracks.value.length, renderCount.value + RENDER_CHUNK)
+    renderCount.value = Math.min(filteredTracks.value.length, renderCount.value + RENDER_CHUNK)
   }
 }
 
@@ -183,8 +203,8 @@ function playAll() {
   if (tracks.value.length) player.playAll(tracks.value)
 }
 
-function playTrack(index: number) {
-  player.playAll(tracks.value, tracks.value[index]?.id)
+function playTrack(track: TrackInfo) {
+  player.playAll(filteredTracks.value, track.id)
 }
 
 function openAlbum(album: ArtistAlbum) {
@@ -196,7 +216,12 @@ const songCountLabel = computed(() =>
 const albumCountLabel = computed(() =>
   t('player.artist_album_count', { count: header.value?.albumSize || albums.value.length }))
 
-watch(artistId, () => { void load() }, { immediate: true })
+watch(artistId, () => {
+  query.value = ''
+  activeTab.value = 'songs'
+  renderCount.value = RENDER_CHUNK
+  void load()
+}, { immediate: true })
 onUnmounted(() => { generation++ })
 </script>
 
@@ -207,6 +232,10 @@ onUnmounted(() => { generation++ })
         <span class="material-symbols-rounded">arrow_back</span>
       </button>
       <div class="artist-header-title">{{ header?.name || String(route.query.name || '') }}</div>
+      <div class="header-search">
+        <span class="material-symbols-rounded search-icon">search</span>
+        <input v-model="query" class="search-input" :placeholder="t('library.tab_search_hint')" :aria-label="t('library.tab_search_hint')" />
+      </div>
     </header>
 
     <div v-if="isLoading && !header" class="state-center">
@@ -288,15 +317,15 @@ onUnmounted(() => { generation++ })
       <Transition name="fade" mode="out-in">
       <!-- 歌曲列表 -->
       <div v-if="activeTab === 'songs'" key="artist-songs" class="track-list">
-        <div v-if="tracks.length === 0" class="state-center">
-          <p>{{ t('player.artist_songs_empty') }}</p>
+        <div v-if="filteredTracks.length === 0" class="state-center">
+          <p>{{ t(search ? 'player.no_results' : 'player.artist_songs_empty') }}</p>
         </div>
         <div
           v-for="(track, index) in visibleTracks"
           :key="track.id"
           class="track-item"
           :class="{ active: player.currentTrack?.id === track.id }"
-          @click="playTrack(index)"
+          @click="playTrack(track)"
         >
           <div class="track-index">
             <div
@@ -321,11 +350,11 @@ onUnmounted(() => { generation++ })
 
       <!-- 专辑列表 -->
       <div v-else key="artist-albums" class="artist-album-list">
-        <div v-if="albums.length === 0" class="state-center">
-          <p>{{ t('player.artist_albums_empty') }}</p>
+        <div v-if="filteredAlbums.length === 0" class="state-center">
+          <p>{{ t(search ? 'player.no_results' : 'player.artist_albums_empty') }}</p>
         </div>
         <div
-          v-for="album in albums"
+          v-for="album in filteredAlbums"
           :key="album.id"
           class="artist-album-item"
           role="button"
@@ -354,13 +383,24 @@ onUnmounted(() => { generation++ })
 
 <style scoped lang="scss">
 @use '@/styles/detail-view.scss' as *;
+@use '@/modules/library/artistTabs.scss' as *;
 
 .artist-header-title {
+  flex: 1;
+  min-width: 0;
   font-size: 18px;
   font-weight: 600;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.header-search {
+  flex: 0 1 320px;
+  max-width: 50%;
+  min-width: 0;
+
+  .search-input { min-width: 0; }
 }
 
 // Hero 卡片
@@ -512,38 +552,6 @@ onUnmounted(() => { generation++ })
   &.active { background: var(--md-secondary-container); color: var(--md-on-secondary-container); }
   &:disabled { opacity: 0.5; }
   .material-symbols-rounded { font-size: 18px; }
-}
-
-// 歌曲 / 专辑 Tab
-.artist-tabs {
-  display: flex;
-  padding: 4px;
-  border-radius: 24px;
-  background: var(--md-surface-container);
-  margin-bottom: 12px;
-}
-
-.artist-tab {
-  flex: 1;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  height: 42px;
-  border-radius: 20px;
-  font-size: 14px;
-  font-weight: 600;
-  color: var(--md-on-surface-variant);
-  transition: background var(--duration-short, 150ms), color var(--duration-short, 150ms);
-
-  .material-symbols-rounded { font-size: 19px; }
-
-  &:hover { background: color-mix(in srgb, var(--md-on-surface) 6%, transparent); }
-
-  &.active {
-    background: var(--md-secondary-container);
-    color: var(--md-on-secondary-container);
-  }
 }
 
 // 专辑行
