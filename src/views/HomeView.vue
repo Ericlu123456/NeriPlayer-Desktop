@@ -8,7 +8,7 @@ defineOptions({ name: 'HomeView' })
 import { usePlayerStore } from '@/stores/player'
 import { useLibraryStore } from '@/stores/library'
 import { useAuthStore } from '@/stores/auth'
-import { useRecommendStore, type HomeRecommendationSong } from '@/stores/recommend'
+import { useRecommendStore, type HomeRecommendationSong, type HomeFeedItem } from '@/stores/recommend'
 import { useHistoryStore } from '@/stores/history'
 import { useSettingsStore } from '@/stores/settings'
 import { useI18n } from 'vue-i18n'
@@ -17,6 +17,8 @@ import { useToastStore } from '@/stores/toast'
 import BilibiliCoverImage from '@/components/BilibiliCoverImage.vue'
 import { normalizeContinuePlaylists, continuePlaylistRoute, type ContinuePlaylist } from '@/modules/library/homeContinue'
 import { createLogger } from '@/utils/logger'
+import HomeYoutubeShelf from '@/components/HomeYoutubeShelf.vue'
+import { getPlaybackSourceKind } from '@/modules/playback/playbackSource'
 
 const router = useRouter()
 const player = usePlayerStore()
@@ -34,7 +36,9 @@ const continueLoading = ref(true)
 const continueError = ref(false)
 const continueGridRef = ref<HTMLElement | null>(null)
 const continueLimit = ref(1)
-const visibleContinuePlaylists = computed(() => continuePlaylists.value.slice(0, continueLimit.value))
+const availableContinuePlaylists = computed(() => continuePlaylists.value.filter(playlist =>
+  settings.internationalizationEnabled || playlist.source.toLowerCase() !== 'youtubemusic').slice(0, 12))
+const visibleContinuePlaylists = computed(() => availableContinuePlaylists.value.slice(0, continueLimit.value))
 let continueResizeObserver: ResizeObserver | null = null
 let continueRequest = 0
 let homeUnmounted = false
@@ -124,10 +128,12 @@ const isHomeSearchLoading = computed(() => recommend.homeHotSongs.loading || rec
 const showSkeleton = computed(() =>
   (recommend.isLoading || isHomeSearchLoading.value) &&
   recommend.recommendedPlaylists.length === 0 &&
-  Object.keys(recommend.userPlaylists).length === 0 &&
+  myPlaylists.value.length === 0 &&
+  bilibiliPlaylists.value.length === 0 &&
+  (!showYoutubeFeed.value || youtubeHomeShelves.value.length === 0) &&
   hotSongs.value.length === 0 &&
   radarSongs.value.length === 0 &&
-  continuePlaylists.value.length === 0
+  availableContinuePlaylists.value.length === 0
 )
 
 const greeting = computed(() => {
@@ -138,71 +144,35 @@ const greeting = computed(() => {
   return t('home.greeting_evening')
 })
 
-const quickAccess = computed(() => [
-  { title: t('home.recent_play'), icon: 'history', color: 'var(--md-primary-container)', action: 'recent' },
-  { title: t('home.favorites'), icon: 'favorite', color: 'var(--md-tertiary-container)', action: 'favorites' },
-  { title: t('home.local_music'), icon: 'folder_open', color: 'var(--md-secondary-container)', action: 'local' },
-  { title: t('home.downloads'), icon: 'download', color: 'var(--md-surface-container-highest)', action: 'downloads' },
-])
-
 // 最近播放（真实历史记录）
 const recentTracks = computed(() => {
-  return history.entries.slice(0, 12).map(e => e.track)
+  return history.entries.filter(entry =>
+    settings.internationalizationEnabled || getPlaybackSourceKind(entry.track) !== 'youtube',
+  ).slice(0, 12).map(e => e.track)
 })
 
 // 本地音乐
 const localTracks = computed(() => {
-  return library.tracks.slice(0, 20)
+  return library.tracks.slice(0, 12)
 })
 
 // 每日推荐歌曲（网易云）
 const dailySongs = computed(() => {
-  return recommend.recommendedSongs.slice(0, 20)
+  return recommend.recommendedSongs.slice(0, 12)
 })
 
 // 用户歌单（多平台合并）
 const myPlaylists = computed(() => {
-  const all = Object.entries(recommend.userPlaylists).flatMap(([platform, list]) =>
-    list.map(pl => ({ ...pl, platform })),
-  )
+  const all = Object.entries(recommend.userPlaylists)
+    .filter(([platform]) => platform !== 'bilibili' && (platform !== 'youtube' || settings.internationalizationEnabled))
+    .flatMap(([platform, list]) => list.map(pl => ({ ...pl, platform })))
   return all.slice(0, 12)
 })
 
-const platformHubs = computed(() => [
-  {
-    key: 'netease',
-    title: t('settings.netease_account'),
-    subtitle: recommend.recommendedPlaylists.length > 0 ? t('home.recommended_playlists') : t('explore.login_for_recommend'),
-    icon: '/icons/ic_netease.svg',
-    color: '#e74c3c',
-    action: () => router.push({ name: 'explore' }),
-  },
-  {
-    key: 'bilibili',
-    title: t('settings.bilibili_account'),
-    subtitle: auth.bilibili.loggedIn
-      ? t('home.recommended_videos')
-      : t('explore.bili_hint'),
-    icon: '/icons/ic_bilibili.svg',
-    color: '#00a1d6',
-    action: () => router.push({ name: 'explore', query: { platform: 'bilibili' } }),
-  },
-  {
-    key: 'youtube',
-    title: t('settings.youtube_account'),
-    subtitle: auth.youtube.loggedIn
-      ? t('player.track_count', { count: recommend.userPlaylists.youtube?.length || 0 })
-      : t('explore.yt_hint'),
-    icon: '/icons/ic_youtube.svg',
-    color: '#ff0033',
-    action: () => router.push({ name: 'explore', query: { platform: 'youtube' } }),
-  },
-])
+const bilibiliPlaylists = computed(() => (recommend.userPlaylists.bilibili || []).slice(0, 6))
 
-const youtubeHomeItems = computed(() => recommend.homeFeedShelves.flatMap(s => s.items).slice(0, 14))
-
-// 国际化开启时 YTM 信息流置顶按分区展示 (对齐 Android HomeScreen isInternational 分支)
-const ytFeedFirst = computed(() => settings.internationalizationEnabled && auth.youtube.loggedIn)
+// 首页 YouTube 推荐随国际化开关显示，保留缓存供再次开启时使用
+const showYoutubeFeed = computed(() => settings.internationalizationEnabled && auth.youtube.loggedIn)
 const youtubeHomeShelves = computed(() =>
   recommend.homeFeedShelves.filter(shelf => shelf.items.length > 0).slice(0, 3))
 
@@ -235,18 +205,6 @@ function searchResultToTrack(s: HomeRecommendationSong): TrackInfo {
   }
 }
 
-async function handleQuickAction(action: string) {
-  if (action === 'local') {
-    router.push({ name: 'library', query: { tab: 'local' } })
-  } else if (action === 'recent') {
-    router.push('/recent')
-  } else if (action === 'favorites') {
-    router.push({ name: 'library', query: { tab: 'favorites' } })
-  } else if (action === 'downloads') {
-    router.push({ name: 'downloads' })
-  }
-}
-
 // 播放每日推荐歌曲
 function playDailySong(song: any) {
   const track = {
@@ -271,7 +229,7 @@ function openPlatformPlaylist(pl: any) {
   }
 }
 
-function openYoutubeHomeItem(item: any) {
+function openYoutubeHomeItem(item: HomeFeedItem) {
   if (item.browseId) {
     router.push({ name: 'youtube-playlist', params: { browseId: item.browseId } })
     return
@@ -303,7 +261,7 @@ onMounted(() => {
   if (auth.bilibili.loggedIn && !recommend.userPlaylists.bilibili?.length) {
     recommend.fetchUserPlaylists('bilibili')
   }
-  if (auth.youtube.loggedIn) {
+  if (showYoutubeFeed.value) {
     if (!recommend.userPlaylists.youtube?.length) recommend.fetchUserPlaylists('youtube')
     if (recommend.homeFeedShelves.length === 0) recommend.fetchHomeFeed()
   }
@@ -333,10 +291,10 @@ watch(() => auth.bilibili.loggedIn, (loggedIn) => {
   if (loggedIn) recommend.fetchUserPlaylists('bilibili')
 })
 
-watch(() => auth.youtube.loggedIn, (loggedIn) => {
-  if (loggedIn) {
-    recommend.fetchUserPlaylists('youtube')
-    recommend.fetchHomeFeed()
+watch(showYoutubeFeed, (enabled) => {
+  if (enabled) {
+    if (!recommend.userPlaylists.youtube?.length) recommend.fetchUserPlaylists('youtube')
+    if (recommend.homeFeedShelves.length === 0) recommend.fetchHomeFeed()
   }
 })
 
@@ -409,14 +367,14 @@ function formatNotifTime(ts: number): string {
       </div>
     </header>
 
-    <section v-if="continuePlaylists.length || continueLoading || continueError" class="section continue-section">
+    <section v-if="availableContinuePlaylists.length || continueLoading || continueError" class="section continue-section">
       <div class="section-header">
         <h2 class="section-title">
           <span class="material-symbols-rounded section-icon">history</span>
           {{ t('home.continue_play') }}
         </h2>
       </div>
-      <div v-if="continuePlaylists.length" ref="continueGridRef" class="continue-scroll">
+      <div v-if="availableContinuePlaylists.length" ref="continueGridRef" class="continue-scroll">
         <button v-for="playlist in visibleContinuePlaylists" :key="playlist.key" type="button" class="continue-card" @click="openContinuePlaylist(playlist)">
           <div class="playlist-cover">
             <span class="material-symbols-rounded filled cover-fallback">queue_music</span>
@@ -437,73 +395,14 @@ function formatNotifTime(ts: number): string {
       </div>
     </section>
 
-    <section class="quick-access">
-      <div
-        v-for="item in quickAccess"
-        :key="item.title"
-        class="quick-card"
-        :style="{ '--card-bg': item.color }"
-        @click="handleQuickAction(item.action)"
-      >
-        <div class="quick-icon-wrap">
-          <span class="material-symbols-rounded filled">{{ item.icon }}</span>
-        </div>
-        <span class="quick-title">{{ item.title }}</span>
-        <span class="material-symbols-rounded quick-arrow">chevron_right</span>
-      </div>
-    </section>
-
-    <!-- 多平台入口 -->
-    <section class="section platform-hubs">
-      <div
-        v-for="hub in platformHubs"
-        :key="hub.key"
-        class="platform-hub-card"
-        :style="{ '--hub-color': hub.color }"
-        @click="hub.action()"
-      >
-        <span class="platform-hub-icon" :style="{ maskImage: `url(${hub.icon})` }"></span>
-        <div class="platform-hub-copy">
-          <div class="platform-hub-title">{{ hub.title }}</div>
-          <div class="platform-hub-subtitle">{{ hub.subtitle }}</div>
-        </div>
-        <span class="material-symbols-rounded">arrow_forward</span>
-      </div>
-    </section>
-
-    <!-- YouTube Music 信息流（国际化开启时置顶按分区展示, 对齐 Android isInternational 分支） -->
-    <template v-if="ytFeedFirst">
-      <section
-        v-for="shelf in youtubeHomeShelves"
-        :key="'ytm-shelf-' + shelf.title"
-        class="section"
-      >
-        <div class="section-header">
-          <h2 class="section-title">
-            <span class="platform-inline-icon" style="--platform-color: #ff0033; mask-image: url('/icons/ic_youtube.svg')"></span>
-            {{ shelf.title || 'YouTube Music' }}
-          </h2>
-          <button class="section-more" @click="router.push({ name: 'explore', query: { platform: 'youtube' } })">
-            <span>{{ t('home.more') }}</span>
-            <span class="material-symbols-rounded" style="font-size: 18px">arrow_forward</span>
-          </button>
-        </div>
-        <div class="daily-scroll">
-          <div
-            v-for="item in shelf.items.slice(0, 14)"
-            :key="item.browseId || item.videoId || item.title"
-            class="daily-card"
-            @click="openYoutubeHomeItem(item)"
-          >
-            <div class="daily-cover">
-              <span class="material-symbols-rounded filled cover-fallback">music_note</span>
-              <BilibiliCoverImage v-if="item.coverUrl" :src="item.coverUrl" loading="lazy" />
-            </div>
-            <div class="daily-name">{{ item.title }}</div>
-            <div class="daily-artist">{{ item.subtitle }}</div>
-          </div>
-        </div>
-      </section>
+    <template v-if="showYoutubeFeed">
+      <HomeYoutubeShelf
+        v-for="(shelf, index) in youtubeHomeShelves"
+        :key="'youtube-leading-' + index"
+        :shelf="shelf"
+        @open="openYoutubeHomeItem"
+        @more="router.push({ name: 'explore', query: { platform: 'youtube' } })"
+      />
     </template>
 
     <!-- 骨架屏（首次加载且无缓存时） -->
@@ -514,49 +413,6 @@ function formatNotifTime(ts: number): string {
           <div class="skeleton-cover" />
           <div class="skeleton-text" />
           <div class="skeleton-text-short" />
-        </div>
-      </div>
-    </section>
-
-    <!-- 热力飙升：三列网格 + 分页箭头 -->
-    <section v-if="auth.netease.loggedIn && (hotSongs.length > 0 || hotSection.loading || hotSection.error)" class="section">
-      <div class="section-header">
-        <h2 class="section-title">
-          <span class="material-symbols-rounded filled" style="font-size: 22px; color: var(--md-error); vertical-align: middle; margin-right: 6px">bolt</span>
-          {{ t('home.trending') }}
-        </h2>
-        <div class="grid-nav" v-if="hotTotalPages > 1">
-          <button class="grid-nav-btn" :disabled="hotPage === 0" @click="hotPage--">
-            <span class="material-symbols-rounded">chevron_left</span>
-          </button>
-          <button class="grid-nav-btn" :disabled="hotPage >= hotTotalPages - 1" @click="hotPage++">
-            <span class="material-symbols-rounded">chevron_right</span>
-          </button>
-        </div>
-      </div>
-      <div v-if="hotSection.loading && hotSongs.length === 0" class="section-state">
-        <span class="material-symbols-rounded spinning">progress_activity</span>
-        <span>{{ t('player.loading') }}</span>
-      </div>
-      <div v-else-if="hotSection.error && hotSongs.length === 0" class="section-state error">
-        <span>{{ hotSection.error || t('home.recommend_load_failed') }}</span>
-        <button class="section-state-action" @click="recommend.fetchHomeSearchRecommendations(true)">{{ t('player.retry') }}</button>
-      </div>
-      <div v-else class="song-grid">
-        <div
-          v-for="song in hotPageItems"
-          :key="song.id"
-          class="song-grid-item"
-          @click="player.play(searchResultToTrack(song))"
-        >
-          <div class="song-grid-cover">
-            <span class="material-symbols-rounded filled cover-fallback">music_note</span>
-            <BilibiliCoverImage v-if="song.cover_url" :src="song.cover_url" loading="lazy" />
-          </div>
-          <div class="song-grid-info">
-            <div class="song-grid-title">{{ song.title }}</div>
-            <div class="song-grid-meta">{{ song.artist }}<template v-if="song.album"> · {{ song.album }}</template></div>
-          </div>
         </div>
       </div>
     </section>
@@ -604,31 +460,6 @@ function formatNotifTime(ts: number): string {
       </div>
     </section>
 
-    <!-- 为你推荐（登录网易云后显示） -->
-    <section v-if="recommend.recommendedPlaylists.length > 0" class="section">
-      <div class="section-header">
-        <h2 class="section-title">{{ t('home.for_you') }}</h2>
-        <button class="section-more" @click="router.push('/explore')">
-          <span>{{ t('home.more') }}</span>
-          <span class="material-symbols-rounded" style="font-size: 18px">arrow_forward</span>
-        </button>
-      </div>
-      <div class="daily-scroll">
-        <div
-          v-for="pl in recommend.recommendedPlaylists.slice(0, 18)"
-          :key="pl.id"
-          class="playlist-card"
-          @click="router.push({ name: 'netease-playlist', params: { id: pl.id } })"
-        >
-          <div class="playlist-cover">
-            <span class="material-symbols-rounded filled cover-fallback">queue_music</span>
-            <BilibiliCoverImage v-if="pl.coverUrl" :src="pl.coverUrl" loading="lazy" />
-          </div>
-          <div class="playlist-name">{{ pl.name }}</div>
-        </div>
-      </div>
-    </section>
-
     <!-- 每日推荐歌曲 -->
     <section v-if="dailySongs.length > 0" class="section">
       <div class="section-header">
@@ -651,31 +482,93 @@ function formatNotifTime(ts: number): string {
       </div>
     </section>
 
-    <!-- YouTube Music 首页 Feed（国际化关闭时保持在底部的单分区形态） -->
-    <section v-if="!ytFeedFirst && youtubeHomeItems.length > 0" class="section">
+    <!-- 热力飙升：三列网格 + 分页箭头 -->
+    <section v-if="auth.netease.loggedIn && (hotSongs.length > 0 || hotSection.loading || hotSection.error)" class="section">
       <div class="section-header">
         <h2 class="section-title">
-          <span class="platform-inline-icon" style="--platform-color: #ff0033; mask-image: url('/icons/ic_youtube.svg')"></span>
-          YouTube Music
+          <span class="material-symbols-rounded filled" style="font-size: 22px; color: var(--md-error); vertical-align: middle; margin-right: 6px">bolt</span>
+          {{ t('home.trending') }}
         </h2>
-        <button class="section-more" @click="router.push({ name: 'explore', query: { platform: 'youtube' } })">
+        <div class="grid-nav" v-if="hotTotalPages > 1">
+          <button class="grid-nav-btn" :disabled="hotPage === 0" @click="hotPage--">
+            <span class="material-symbols-rounded">chevron_left</span>
+          </button>
+          <button class="grid-nav-btn" :disabled="hotPage >= hotTotalPages - 1" @click="hotPage++">
+            <span class="material-symbols-rounded">chevron_right</span>
+          </button>
+        </div>
+      </div>
+      <div v-if="hotSection.loading && hotSongs.length === 0" class="section-state">
+        <span class="material-symbols-rounded spinning">progress_activity</span>
+        <span>{{ t('player.loading') }}</span>
+      </div>
+      <div v-else-if="hotSection.error && hotSongs.length === 0" class="section-state error">
+        <span>{{ hotSection.error || t('home.recommend_load_failed') }}</span>
+        <button class="section-state-action" @click="recommend.fetchHomeSearchRecommendations(true)">{{ t('player.retry') }}</button>
+      </div>
+      <div v-else class="song-grid">
+        <div
+          v-for="song in hotPageItems"
+          :key="song.id"
+          class="song-grid-item"
+          @click="player.play(searchResultToTrack(song))"
+        >
+          <div class="song-grid-cover">
+            <span class="material-symbols-rounded filled cover-fallback">music_note</span>
+            <BilibiliCoverImage v-if="song.cover_url" :src="song.cover_url" loading="lazy" />
+          </div>
+          <div class="song-grid-info">
+            <div class="song-grid-title">{{ song.title }}</div>
+            <div class="song-grid-meta">{{ song.artist }}<template v-if="song.album"> · {{ song.album }}</template></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section v-if="bilibiliPlaylists.length" class="section">
+      <div class="section-header">
+        <h2 class="section-title">
+          <span class="platform-inline-icon" style="--platform-color: #00a1d6; mask-image: url('/icons/ic_bilibili.svg')" />
+          {{ t('library.bilibili_favorites') }}
+        </h2>
+        <button class="section-more" @click="router.push({ name: 'library', query: { tab: 'bilibili_favorites' } })">
+          <span>{{ t('home.more') }}</span>
+          <span class="material-symbols-rounded" style="font-size: 18px">arrow_forward</span>
+        </button>
+      </div>
+      <div class="daily-scroll">
+        <button v-for="playlist in bilibiliPlaylists" :key="playlist.id" type="button" class="playlist-card" @click="router.push({ name: 'bili-playlist', params: { mediaId: playlist.id } })">
+          <div class="playlist-cover">
+            <span class="material-symbols-rounded filled cover-fallback">video_library</span>
+            <BilibiliCoverImage v-if="playlist.coverUrl" :src="playlist.coverUrl" :alt="playlist.name" />
+          </div>
+          <div class="playlist-name">{{ playlist.name }}</div>
+          <div class="daily-artist">{{ t('player.track_count', { count: playlist.trackCount }) }}</div>
+        </button>
+      </div>
+    </section>
+
+    <!-- 为你推荐（登录网易云后显示） -->
+    <section v-if="recommend.recommendedPlaylists.length > 0" class="section">
+      <div class="section-header">
+        <h2 class="section-title">{{ t('home.for_you') }}</h2>
+        <button class="section-more" @click="router.push('/explore')">
           <span>{{ t('home.more') }}</span>
           <span class="material-symbols-rounded" style="font-size: 18px">arrow_forward</span>
         </button>
       </div>
       <div class="daily-scroll">
         <div
-          v-for="item in youtubeHomeItems"
-          :key="item.browseId || item.videoId || item.title"
-          class="daily-card"
-          @click="openYoutubeHomeItem(item)"
+          v-for="pl in recommend.recommendedPlaylists.slice(0, 12)"
+          :key="pl.id"
+          class="playlist-card"
+          @click="router.push({ name: 'netease-playlist', params: { id: pl.id } })"
         >
-          <div class="daily-cover">
-            <span class="material-symbols-rounded filled cover-fallback">music_note</span>
-            <BilibiliCoverImage v-if="item.coverUrl" :src="item.coverUrl" loading="lazy" />
+          <div class="playlist-cover">
+            <span class="material-symbols-rounded filled cover-fallback">queue_music</span>
+            <BilibiliCoverImage v-if="pl.coverUrl" :src="pl.coverUrl" loading="lazy" />
           </div>
-          <div class="daily-name">{{ item.title }}</div>
-          <div class="daily-artist">{{ item.subtitle }}</div>
+          <div class="playlist-name">{{ pl.name }}</div>
         </div>
       </div>
     </section>
@@ -866,169 +759,25 @@ function formatNotifTime(ts: number): string {
 }
 
 
-/* 多平台入口 */
-.platform-hubs {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 10px;
-}
-
-.platform-hub-card {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  min-height: 72px;
-  padding: 14px;
-  border-radius: 20px;
-  cursor: pointer;
-  overflow: hidden;
-  position: relative;
-  background:
-    radial-gradient(circle at 18% 16%, color-mix(in srgb, var(--hub-color) 28%, transparent), transparent 38%),
-    var(--md-surface-container);
-  border: 1px solid color-mix(in srgb, var(--hub-color) 20%, var(--md-outline-variant));
-  transition: transform var(--duration-short) var(--ease-standard), background var(--duration-short);
-
-  &:hover {
-    transform: translateY(-2px);
-    background:
-      radial-gradient(circle at 18% 16%, color-mix(in srgb, var(--hub-color) 34%, transparent), transparent 42%),
-      var(--md-surface-container-high);
-  }
-
-  > .material-symbols-rounded {
-    color: color-mix(in srgb, var(--hub-color) 70%, var(--md-on-surface));
-    font-size: 20px;
-    opacity: 0.75;
-  }
-}
-
-.platform-hub-icon,
 .platform-inline-icon {
   display: inline-block;
-  background: var(--hub-color, var(--platform-color, var(--md-primary)));
+  width: 23px;
+  height: 23px;
+  flex-shrink: 0;
+  background: var(--platform-color, var(--md-primary));
   mask-size: contain;
   mask-repeat: no-repeat;
   mask-position: center;
-  -webkit-mask-size: contain;
-  -webkit-mask-repeat: no-repeat;
-  -webkit-mask-position: center;
-  flex-shrink: 0;
-}
-
-.platform-hub-icon {
-  width: 28px;
-  height: 28px;
-}
-
-.platform-hub-copy {
-  flex: 1;
-  min-width: 0;
-}
-
-.platform-hub-title {
-  font-size: 13px;
-  font-weight: 800;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.platform-hub-subtitle {
-  margin-top: 3px;
-  font-size: 11px;
-  color: var(--md-on-surface-variant);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.platform-inline-icon {
-  width: 20px;
-  height: 20px;
-  vertical-align: -4px;
-  margin-right: 6px;
-}
-
-@media (max-width: 900px) {
-  .platform-hubs { grid-template-columns: 1fr; }
-}
-
-/* 快捷卡片 */
-.quick-access {
-  display: grid;
-  grid-template-columns: repeat(2, 1fr);
-  gap: 10px;
-  margin-bottom: 32px;
-}
-
-.quick-card {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 12px 14px;
-  border-radius: var(--radius-lg);
-  background: var(--card-bg);
-  cursor: pointer;
-  position: relative;
-  overflow: hidden;
-  transition: transform var(--duration-short) var(--ease-standard);
-
-  // M3 state layer：叠加半透明层而非 brightness 滤镜
-  &::after {
-    content: '';
-    position: absolute;
-    inset: 0;
-    border-radius: inherit;
-    background: var(--md-on-surface);
-    opacity: 0;
-    transition: opacity var(--duration-short);
-    pointer-events: none;
-  }
-
-  &:hover {
-    transform: translateY(-1px);
-    &::after { opacity: 0.08; }
-  }
-  &:active {
-    transform: scale(0.98);
-    &::after { opacity: 0.12; }
-  }
-}
-
-.quick-icon-wrap {
-  width: 36px;
-  height: 36px;
-  border-radius: var(--radius-full);
-  background: color-mix(in srgb, var(--md-on-surface) 10%, transparent);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-
-  .material-symbols-rounded { font-size: 20px; }
-}
-
-.quick-title {
-  flex: 1;
-  font-size: 13px;
-  font-weight: 600;
-  letter-spacing: 0.1px;
-}
-
-.quick-arrow {
-  font-size: 18px !important;
-  opacity: 0.4;
 }
 
 /* 段落 */
-.section { margin-bottom: 24px; }
+.section { margin-bottom: 32px; }
 
 /* 三列歌曲网格（YouTube Music 风格） */
 .song-grid {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 4px 16px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px 20px;
 }
 
 .song-grid-item {
@@ -1116,12 +865,15 @@ function formatNotifTime(ts: number): string {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 12px;
+  margin-bottom: 16px;
+  gap: 12px;
 }
 
 .section-title {
-  font-size: 18px;
-  font-weight: 600;
+  display: flex;
+  align-items: center;
+  font-size: 20px;
+  font-weight: 650;
 }
 
 .section-more {
@@ -1170,14 +922,15 @@ function formatNotifTime(ts: number): string {
   to { transform: rotate(360deg); }
 }
 
-/* 网格容器（所有板块统一使用，自动换行） */
+/* 封面随窗口宽度调整，保留清晰的标题和来源 */
 .daily-scroll {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
-  gap: 14px 12px;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 20px;
 }
 
 .daily-card {
+  min-width: 0;
   cursor: pointer;
   border-radius: var(--radius-md);
   transition: transform var(--duration-short) var(--ease-standard);
@@ -1200,16 +953,16 @@ function formatNotifTime(ts: number): string {
 }
 
 .daily-name {
-  font-size: 12px;
+  font-size: 14px;
   font-weight: 500;
-  margin-top: 6px;
+  margin-top: 10px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .daily-artist {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--md-on-surface-variant);
   margin-top: 2px;
   overflow: hidden;
@@ -1219,6 +972,9 @@ function formatNotifTime(ts: number): string {
 
 /* 歌单卡片 */
 .playlist-card {
+  min-width: 0;
+  text-align: left;
+  border-radius: var(--radius-md);
   cursor: pointer;
   transition: transform var(--duration-short) var(--ease-standard);
 
@@ -1250,12 +1006,40 @@ function formatNotifTime(ts: number): string {
 }
 
 .playlist-name {
-  font-size: 12px;
+  font-size: 14px;
   font-weight: 500;
-  margin-top: 6px;
+  margin-top: 10px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.playlist-card:focus-visible, .daily-card:focus-visible {
+  outline: 2px solid var(--md-primary);
+  outline-offset: 3px;
+}
+
+@media (max-width: 1000px) {
+  .song-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .daily-scroll { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; }
+}
+
+@media (max-width: 700px) {
+  .home-view { padding: 16px 20px 24px; }
+  .song-grid { grid-template-columns: 1fr; }
+  .daily-scroll { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+  .section-title { font-size: 18px; }
+}
+
+@media (max-width: 480px) {
+  .home-view { padding: 16px; }
+  .daily-scroll { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .home-search { order: 3; max-width: none; flex-basis: 100%; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .daily-card, .playlist-card, .continue-open { transition: none; }
+  .spinning { animation: none; }
 }
 
 /* 通知按钮包裹 */

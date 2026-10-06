@@ -79,7 +79,7 @@ export function normalizeContinuePlaylists(raw: unknown, localPlaylists: unknown
     const previous = byKey.get(playlist.key)
     if (!previous || compareUsage(playlist, previous) < 0) byKey.set(playlist.key, playlist)
   }
-  return [...byKey.values()].sort(compareUsage).slice(0, 12)
+  return [...byKey.values()].sort(compareUsage)
 }
 
 function compareUsage(left: ContinuePlaylist, right: ContinuePlaylist): number {
