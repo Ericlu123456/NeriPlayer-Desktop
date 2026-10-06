@@ -8,6 +8,8 @@ use crate::error::AppError;
 const GITHUB_API_BASE: &str = "https://api.github.com";
 const MAX_SYNC_FILE_BYTES: u64 = 12 * 1024 * 1024;
 const MAX_API_ERROR_CHARS: usize = 240;
+const MAX_TREE_ENTRIES: usize = 100_000;
+const TREE_BATCH_ENTRIES: usize = 1000;
 
 pub type GitHubResult<T> = Result<T, GitHubApiError>;
 
@@ -134,10 +136,16 @@ impl GitHubApiClient {
         let base_tree = required_json_string(&commit["tree"],"sha")?;
         let listing = self.archive_json(self.http.get(self.endpoint(&format!("repos/{owner}/{repo}/git/trees/{base_tree}")))).await?;
         if listing["truncated"].as_bool()!=Some(false) { return Err(GitHubApiError::InvalidResponse("archive tree listing is truncated or incomplete".into())); }
+        // 对齐 Android GitHubArchiveTreeReader：清单必须正是基准树，路径唯一、对象 id 合法、规模有上限
+        if listing["sha"].as_str()!=Some(base_tree.as_str()) { return Err(GitHubApiError::InvalidResponse("archive tree listing does not match the base tree".into())); }
         let entries = listing["tree"].as_array().ok_or_else(||GitHubApiError::InvalidResponse("missing archive tree entries".into()))?;
+        if entries.len()>MAX_TREE_ENTRIES { return Err(GitHubApiError::InvalidResponse("archive tree listing is too large".into())); }
         let mut existing = std::collections::HashMap::new();
+        let mut listed = std::collections::HashSet::new();
         for entry in entries {
             let path = required_json_string(entry,"path")?;
+            if !is_git_object_id(&required_json_string(entry,"sha")?) { return Err(GitHubApiError::InvalidResponse("archive tree listing has an invalid object id".into())); }
+            if !listed.insert(path.clone()) { return Err(GitHubApiError::InvalidResponse("archive tree listing repeats a path".into())); }
             if path==MANIFEST_FILE && (entry["type"].as_str()!=Some("blob") || entry["mode"].as_str()!=Some("100644")) {return Err(GitHubApiError::InvalidResponse("manifest is not a regular file".into()));}
             if canonical_object_path(&path) {
                 if entry["type"].as_str()!=Some("blob") || entry["mode"].as_str()!=Some("100644") { return Err(GitHubApiError::InvalidResponse("owned archive path is not a regular file".into())); }
@@ -149,13 +157,21 @@ impl GitHubApiClient {
             if path!=MANIFEST_FILE && !canonical_object_path(path) {return Err(GitHubApiError::InvalidResponse("object outside archive closure".into()));}
             if path!=MANIFEST_FILE && verified_paths.contains(path) && existing.contains_key(path) {continue;}
             let blob = self.archive_json(self.http.post(self.endpoint(&format!("repos/{owner}/{repo}/git/blobs"))).json(&serde_json::json!({"content":BASE64.encode(content),"encoding":"base64"}))).await?;
-            changes.push(serde_json::json!({"path":path,"mode":"100644","type":"blob","sha":required_json_string(&blob,"sha")?}));
+            let blob_sha = required_json_string(&blob,"sha")?;
+            // 服务器回报的 blob id 必须就是这份内容的 git SHA-1，否则提交里引用的不是我们上传的数据
+            if blob_sha!=git_blob_sha1(content) {return Err(GitHubApiError::InvalidResponse("uploaded blob id does not match its content".into()));}
+            changes.push(serde_json::json!({"path":path,"mode":"100644","type":"blob","sha":blob_sha}));
         }
         for path in existing.keys().filter(|path|!prepared.objects.contains_key(*path)) {
             changes.push(serde_json::json!({"path":path,"mode":"100644","type":"blob","sha":null}));
         }
-        let tree = self.archive_json(self.http.post(self.endpoint(&format!("repos/{owner}/{repo}/git/trees"))).json(&serde_json::json!({"base_tree":base_tree,"tree":changes}))).await?;
-        let commit = self.archive_json(self.http.post(self.endpoint(&format!("repos/{owner}/{repo}/git/commits"))).json(&serde_json::json!({"message":"Sync from NeriPlayer Desktop","tree":required_json_string(&tree,"sha")?,"parents":[head.sha]}))).await?;
+        // 一次提交太多条目会被 GitHub 拒绝，按 Android 分批叠加到上一批生成的树上
+        let mut tree_sha = base_tree;
+        for batch in changes.chunks(TREE_BATCH_ENTRIES) {
+            let tree = self.archive_json(self.http.post(self.endpoint(&format!("repos/{owner}/{repo}/git/trees"))).json(&serde_json::json!({"base_tree":tree_sha,"tree":batch}))).await?;
+            tree_sha = required_json_string(&tree,"sha")?;
+        }
+        let commit = self.archive_json(self.http.post(self.endpoint(&format!("repos/{owner}/{repo}/git/commits"))).json(&serde_json::json!({"message":"Sync from NeriPlayer Desktop","tree":tree_sha,"parents":[head.sha]}))).await?;
         let commit_sha = required_json_string(&commit,"sha")?;
         let mut endpoint = url::Url::parse(&self.api_base).map_err(|_|GitHubApiError::InvalidResponse("invalid GitHub API base".into()))?;
         endpoint.set_path(if endpoint.path().trim_end_matches('/')=="/api/v3" {"/api/graphql"} else if endpoint.path().trim_matches('/').is_empty() {"/graphql"} else {return Err(GitHubApiError::InvalidResponse("unsupported atomic GraphQL endpoint".into()));});
@@ -175,6 +191,8 @@ impl GitHubApiClient {
                 let stale=errors.iter().any(|error|error["type"].as_str()==Some("STALE_DATA") || error["extensions"]["code"].as_str()==Some("STALE_DATA"));
                 if stale {return Err(GitHubApiError::ContentConflict{status:409,message:"branch changed before atomic publication".into()});}
                 if errors.iter().any(|error|error["type"].as_str()==Some("RATE_LIMITED")) {return Err(GitHubApiError::RateLimited{status:status.as_u16(),retry_at_ms:github_rate_limit_resume_at(&headers,now_ms())});}
+                // 其它错误时分支可能已被别的设备推进：重新读一次分支头，动过就按冲突重试（对齐 Android）
+                if self.get_repository_head(owner,repo).await.is_ok_and(|current|current.sha!=head.sha) {return Err(GitHubApiError::ContentConflict{status:409,message:"branch moved during atomic publication".into()});}
                 return Err(GitHubApiError::Api{status:status.as_u16(),message:"GitHub atomic archive publication failed".into()});
             }
         }
@@ -473,6 +491,19 @@ impl GitHubApiClient {
     }
 }
 
+/// git 为 blob 计算的对象 id：`sha1("blob <len>\0" + content)`
+fn git_blob_sha1(content: &[u8]) -> String {
+    use sha1::{Digest, Sha1};
+    let mut hasher = Sha1::new();
+    hasher.update(format!("blob {}\0", content.len()).as_bytes());
+    hasher.update(content);
+    hasher.finalize().iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn is_git_object_id(value: &str) -> bool {
+    value.len() == 40 && value.bytes().all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+}
+
 fn required_json_string(value:&serde_json::Value,key:&str)->GitHubResult<String> {
     value.get(key).and_then(serde_json::Value::as_str).filter(|text|!text.is_empty()).map(String::from).ok_or_else(||GitHubApiError::InvalidResponse(format!("missing {key}")))
 }
@@ -548,11 +579,88 @@ fn truncate_error_text(value: &str) -> String {
 mod tests {
     use super::*;
 
+    const BASE_TREE: &str = "1111111111111111111111111111111111111111";
+
+    fn tree_listing(entries: &str) -> String {
+        format!(r#"{{"sha":"{BASE_TREE}","truncated":false,"tree":[{entries}]}}"#)
+    }
+
     fn archive_publication_responses(prepared:&super::super::archive::PreparedArchive,last:&str)->Vec<String> {
         let retired=format!("neriplayer-sync-v3-{}.zst","a".repeat(64));
-        let mut responses=vec![response("200 OK",r#"{"tree":{"sha":"base-tree"}}"#),response("200 OK",&format!(r#"{{"truncated":false,"tree":[{{"path":"README.md","type":"blob","mode":"100644","sha":"unrelated"}},{{"path":"{retired}","type":"blob","mode":"100644","sha":"retired"}}]}}"#))];
-        for index in 0..=prepared.objects.len(){responses.push(response("201 Created",&format!(r#"{{"sha":"blob-{index}"}}"#)));}
-        responses.extend([response("201 Created",r#"{"sha":"new-tree"}"#),response("201 Created",r#"{"sha":"new-commit"}"#),response("200 OK",last)]);responses
+        let listing=tree_listing(&format!(r#"{{"path":"README.md","type":"blob","mode":"100644","sha":"{}"}},{{"path":"{retired}","type":"blob","mode":"100644","sha":"{}"}}"#,"2".repeat(40),"3".repeat(40)));
+        let mut responses=vec![response("200 OK",&format!(r#"{{"tree":{{"sha":"{BASE_TREE}"}}}}"#)),response("200 OK",&listing)];
+        for content in prepared.objects.values().chain(std::iter::once(&prepared.content)){responses.push(response("201 Created",&format!(r#"{{"sha":"{}"}}"#,git_blob_sha1(content))));}
+        responses.extend([response("201 Created",&format!(r#"{{"sha":"{}"}}"#,"4".repeat(40))),response("201 Created",r#"{"sha":"new-commit"}"#),response("200 OK",last)]);responses
+    }
+
+    #[test]
+    fn blob_ids_and_tree_batches_follow_git_and_android_limits() {
+        assert_eq!(git_blob_sha1(b"hello"), "b6fc4c620b67d95f953a5c1c1230aaab5db5a1b0");
+        assert!(is_git_object_id(&"a".repeat(40)));
+        assert!(!is_git_object_id("blob-0"));
+        assert!(!is_git_object_id(&"A".repeat(40)));
+        let changes = vec![serde_json::Value::Null; 2500];
+        let sizes: Vec<_> = changes.chunks(TREE_BATCH_ENTRIES).map(<[serde_json::Value]>::len).collect();
+        assert_eq!(sizes, [1000, 1000, 500]);
+    }
+
+    async fn publication_error(responses: Vec<String>) -> GitHubApiError {
+        let prepared = super::super::archive::prepare(&super::super::models::SyncData::default(), None).unwrap();
+        let (base, _requests, server) = mock_server(responses).await;
+        let api = GitHubApiClient::new_with_api_base(&loopback_client(), "fixture", &base);
+        let head = GitHubHead { branch: "main".into(), sha: "old-head".into(), repository_id: "repo-node".into() };
+        let error = api
+            .publish_archive("owner", "repo", &head, &prepared, &std::collections::HashSet::new())
+            .await
+            .unwrap_err();
+        server.await.unwrap();
+        error
+    }
+
+    #[tokio::test]
+    async fn a_tree_listing_for_another_tree_or_with_duplicates_is_rejected() {
+        let commit = response("200 OK", &format!(r#"{{"tree":{{"sha":"{BASE_TREE}"}}}}"#));
+        let other_tree = format!(r#"{{"sha":"{}","truncated":false,"tree":[]}}"#, "5".repeat(40));
+        let error = publication_error(vec![commit.clone(), response("200 OK", &other_tree)]).await;
+        assert!(error.to_string().contains("does not match the base tree"));
+        let entry = format!(r#"{{"path":"README.md","type":"blob","mode":"100644","sha":"{}"}}"#, "2".repeat(40));
+        let duplicated = tree_listing(&format!("{entry},{entry}"));
+        let error = publication_error(vec![commit.clone(), response("200 OK", &duplicated)]).await;
+        assert!(error.to_string().contains("repeats a path"));
+        let invalid_id = tree_listing(r#"{"path":"README.md","type":"blob","mode":"100644","sha":"unrelated"}"#);
+        let error = publication_error(vec![commit, response("200 OK", &invalid_id)]).await;
+        assert!(error.to_string().contains("invalid object id"));
+    }
+
+    #[tokio::test]
+    async fn a_blob_id_that_does_not_match_the_upload_stops_publication() {
+        let error = publication_error(vec![
+            response("200 OK", &format!(r#"{{"tree":{{"sha":"{BASE_TREE}"}}}}"#)),
+            response("200 OK", &tree_listing("")),
+            response("201 Created", &format!(r#"{{"sha":"{}"}}"#, "6".repeat(40))),
+        ])
+        .await;
+        assert!(error.to_string().contains("does not match its content"));
+    }
+
+    #[tokio::test]
+    async fn an_unknown_graphql_failure_is_a_conflict_only_when_the_branch_moved() {
+        let prepared = super::super::archive::prepare(&super::super::models::SyncData::default(), None).unwrap();
+        let failed = r#"{"errors":[{"type":"INTERNAL","message":"something went wrong"}]}"#;
+        for (current_head, conflict) in [("moved-head", true), ("old-head", false)] {
+            let mut responses = archive_publication_responses(&prepared, failed);
+            responses.push(response("200 OK", r#"{"default_branch":"main","node_id":"repo-node"}"#));
+            responses.push(response("200 OK", &format!(r#"{{"object":{{"sha":"{current_head}"}}}}"#)));
+            let (base, _requests, server) = mock_server(responses).await;
+            let api = GitHubApiClient::new_with_api_base(&loopback_client(), "fixture", &base);
+            let head = GitHubHead { branch: "main".into(), sha: "old-head".into(), repository_id: "repo-node".into() };
+            let error = api
+                .publish_archive("owner", "repo", &head, &prepared, &std::collections::HashSet::new())
+                .await
+                .unwrap_err();
+            assert_eq!(error.is_content_conflict(), conflict, "head {current_head}");
+            server.await.unwrap();
+        }
     }
 
     #[tokio::test]
@@ -563,7 +671,7 @@ mod tests {
         let head=GitHubHead{branch:"sync-data".into(),sha:"old-head".into(),repository_id:"repo-node".into()};
         assert_eq!(api.publish_archive("owner","repo",&head,&prepared,&std::collections::HashSet::new()).await.unwrap(),"new-commit");
         let count=prepared.objects.len()+6;let mut captured=Vec::new();for _ in 0..count{captured.push(requests.recv().await.unwrap());}
-        let tree=&captured[captured.len()-3];assert!(tree.contains("\"base_tree\":\"base-tree\""));assert!(tree.contains("\"sha\":null"));assert!(!tree.contains("README.md"));
+        let tree=&captured[captured.len()-3];assert!(tree.contains(&format!("\"base_tree\":\"{BASE_TREE}\"")));assert!(tree.contains("\"sha\":null"));assert!(!tree.contains("README.md"));
         let mutation=captured.last().unwrap();assert!(mutation.starts_with("POST /graphql "));assert!(mutation.contains("\"beforeOid\":\"old-head\""));assert!(mutation.contains("\"afterOid\":\"new-commit\""));assert!(mutation.contains("\"force\":false"));assert!(!captured.iter().any(|request|request.starts_with("PATCH ")||request.starts_with("PUT ")));
         server.await.unwrap();
     }
