@@ -92,8 +92,8 @@ interface SearchResult {
 
 interface DiscoveryShelf {
   key: string
-  title: string
-  subtitle: string
+  /** i18n key 前缀，渲染时取 `${labelKey}_title` / `${labelKey}_subtitle`，跟随语言切换 */
+  labelKey: string
   platform: PlatformTab
   items: SearchResult[]
 }
@@ -103,16 +103,17 @@ const youtubeDiscoveryShelves = ref<DiscoveryShelf[]>([])
 const isLoadingBiliDiscovery = ref(false)
 const isLoadingYoutubeDiscovery = ref(false)
 
+// query 是平台侧的搜索词，不随界面语言变化
 const biliDiscoveryQueries = [
-  { key: 'bili-hot', title: 'B站音乐现场', subtitle: 'Live / 翻唱 / 演奏', query: '音乐现场' },
-  { key: 'bili-vocal', title: '热门翻唱', subtitle: 'UP 主精选音乐内容', query: '翻唱 音乐' },
-  { key: 'bili-acg', title: 'ACG 音乐', subtitle: '动画 / 游戏 / 虚拟歌手', query: 'ACG 音乐' },
+  { key: 'bili-hot', labelKey: 'explore.bili_shelf_live', query: '音乐现场' },
+  { key: 'bili-vocal', labelKey: 'explore.bili_shelf_cover', query: '翻唱 音乐' },
+  { key: 'bili-acg', labelKey: 'explore.bili_shelf_acg', query: 'ACG 音乐' },
 ]
 
 const youtubeDiscoveryQueries = [
-  { key: 'yt-new', title: 'YouTube Music 新鲜听', subtitle: 'New music and mixes', query: 'new music mix' },
-  { key: 'yt-live', title: 'Live Sessions', subtitle: '现场 / Session / Acoustic', query: 'live session music' },
-  { key: 'yt-focus', title: 'Focus & Chill', subtitle: '学习 / 工作 / 放松', query: 'focus chill music' },
+  { key: 'yt-new', labelKey: 'explore.yt_shelf_new', query: 'new music mix' },
+  { key: 'yt-live', labelKey: 'explore.yt_shelf_live', query: 'live session music' },
+  { key: 'yt-focus', labelKey: 'explore.yt_shelf_focus', query: 'focus chill music' },
 ]
 
 async function loadDiscoveryShelves(platform: 'bilibili' | 'youtube') {
@@ -126,9 +127,9 @@ async function loadDiscoveryShelves(platform: 'bilibili' | 'youtube') {
     const results = await Promise.all(queries.map(async q => {
       try {
         const items = await invoke<SearchResult[]>('search', { query: q.query, platform })
-        return { key: q.key, title: q.title, subtitle: q.subtitle, platform, items: items.slice(0, 10) }
+        return { key: q.key, labelKey: q.labelKey, platform, items: items.slice(0, 10) }
       } catch {
-        return { key: q.key, title: q.title, subtitle: q.subtitle, platform, items: [] }
+        return { key: q.key, labelKey: q.labelKey, platform, items: [] }
       }
     }))
     target.value = results.filter(shelf => shelf.items.length > 0)
@@ -153,14 +154,18 @@ watch(
   },
 )
 
+// 连续点标签时只采纳最后一次请求，避免慢响应把旧标签的歌单盖回来
+let tagRequestSeq = 0
 async function loadQualityByTag(tagKey: string) {
+  const requestId = ++tagRequestSeq
   selectedTag.value = tagKey
   isLoadingPlaylists.value = true
   try {
     const cat = TAG_TO_CAT[tagKey] || '全部'
-    qualityPlaylists.value = await recommend.fetchHighQualityPlaylists(cat, 30)
+    const playlists = await recommend.fetchHighQualityPlaylists(cat, 30)
+    if (requestId === tagRequestSeq) qualityPlaylists.value = playlists
   } finally {
-    isLoadingPlaylists.value = false
+    if (requestId === tagRequestSeq) isLoadingPlaylists.value = false
   }
 }
 
@@ -176,13 +181,20 @@ watch(searchQuery, (q) => {
   }, 300)
 })
 
+// 页面被 KeepAlive 缓存：离开探索页时 route.query 属于别的页面，不能据此清空搜索
 watch(() => route.query.q, (q) => {
+  if (route.name !== 'explore') return
   const value = typeof q === 'string' ? q.trim() : ''
   if (searchQuery.value !== value) searchQuery.value = value
 }, { immediate: true })
 
+function retrySearch() {
+  if (searchQuery.value.trim()) void searchStore.search(searchQuery.value, activeTab.value)
+}
+
 
 watch(() => route.query.platform, (platform) => {
+  if (route.name !== 'explore') return
   if (typeof platform === 'string' && PLATFORM_KEYS.includes(platform as PlatformTab)) {
     activeTab.value = platform as PlatformTab
   }
@@ -330,10 +342,17 @@ onMounted(() => {
       </div>
     </div>
 
+    <!-- 搜索失败：与无结果区分开，并允许重试 -->
+    <div v-else-if="isSearching && searchStore.error" class="empty-state" style="padding: 40px 0">
+      <span class="material-symbols-rounded" style="font-size: 32px; opacity: 0.4">wifi_off</span>
+      <p class="empty-desc" style="margin-top: 8px">{{ t('explore.search_failed') }}</p>
+      <button class="retry-btn" @click="retrySearch">{{ t('player.retry') }}</button>
+    </div>
+
     <!-- 搜索无结果 -->
     <div v-else-if="isSearching && searchStore.results.length === 0" class="empty-state" style="padding: 40px 0">
       <span class="material-symbols-rounded" style="font-size: 32px; opacity: 0.4">search_off</span>
-      <p class="empty-desc" style="margin-top: 8px">{{ t('explore.empty_desc') }}</p>
+      <p class="empty-desc" style="margin-top: 8px">{{ t('player.no_results') }}</p>
     </div>
 
     <!-- 默认内容（按平台） -->
@@ -382,7 +401,7 @@ onMounted(() => {
           <span class="tab-icon large" :style="{ maskImage: 'url(/icons/ic_bilibili.svg)' }"></span>
           <div>
             <h2>{{ t('settings.bilibili_account') }}</h2>
-            <p>{{ t('explore.bili_hint') }} · 为你预置音乐现场、翻唱和 ACG 音乐入口</p>
+            <p>{{ t('explore.bili_hint') }} · {{ t('explore.bili_discovery_hint') }}</p>
           </div>
         </div>
         <div v-if="isLoadingBiliDiscovery" class="loading-state">
@@ -392,8 +411,8 @@ onMounted(() => {
           <section v-for="shelf in biliDiscoveryShelves" :key="shelf.key" class="discovery-shelf">
             <div class="discovery-header">
               <div>
-                <h2 class="section-title">{{ shelf.title }}</h2>
-                <p>{{ shelf.subtitle }}</p>
+                <h2 class="section-title">{{ t(`${shelf.labelKey}_title`) }}</h2>
+                <p>{{ t(`${shelf.labelKey}_subtitle`) }}</p>
               </div>
             </div>
             <div class="discovery-row">
@@ -418,7 +437,7 @@ onMounted(() => {
           <span class="tab-icon large" :style="{ maskImage: 'url(/icons/ic_youtube.svg)' }"></span>
           <div>
             <h2>{{ t('settings.youtube_account') }}</h2>
-            <p>{{ auth.youtube.loggedIn ? '优先展示 YouTube Music 首页 Feed，并补充默认搜索发现' : t('explore.yt_hint') }}</p>
+            <p>{{ auth.youtube.loggedIn ? t('explore.yt_feed_hint') : t('explore.yt_hint') }}</p>
           </div>
         </div>
 
@@ -447,8 +466,8 @@ onMounted(() => {
           <section v-for="shelf in youtubeDiscoveryShelves" :key="shelf.key" class="discovery-shelf">
             <div class="discovery-header">
               <div>
-                <h2 class="section-title">{{ shelf.title }}</h2>
-                <p>{{ shelf.subtitle }}</p>
+                <h2 class="section-title">{{ t(`${shelf.labelKey}_title`) }}</h2>
+                <p>{{ t(`${shelf.labelKey}_subtitle`) }}</p>
               </div>
             </div>
             <div class="discovery-row">
@@ -834,6 +853,20 @@ onMounted(() => {
   font-size: 13px;
   color: var(--md-on-surface-variant);
   opacity: 0.6;
+}
+
+.retry-btn {
+  margin-top: 12px;
+  padding: 6px 18px;
+  border: 1px solid var(--md-outline-variant);
+  border-radius: var(--radius-full);
+  background: transparent;
+  color: var(--md-primary);
+  font-size: 13px;
+  cursor: pointer;
+  transition: background var(--duration-short) var(--ease-standard);
+
+  &:hover { background: color-mix(in srgb, var(--md-primary) 8%, transparent); }
 }
 
 /* 加载 & 搜索结果 */

@@ -356,13 +356,14 @@ onMounted(async () => {
       return true
     },
     focusSearch: () => {
-      void router.push({ name: 'explore' }).then(() => {
-        requestAnimationFrame(() => {
-          const input = document.querySelector<HTMLInputElement>('[data-shortcut-search]')
-          input?.focus()
-          input?.select()
-        })
+      const focusInput = () => requestAnimationFrame(() => {
+        const input = document.querySelector<HTMLInputElement>('[data-shortcut-search]')
+        input?.focus()
+        input?.select()
       })
+      // 已在探索页时直接聚焦，不能重新 push 把 ?q= 冲掉
+      if (router.currentRoute.value.name === 'explore') focusInput()
+      else void router.push({ name: 'explore' }).then(focusInput)
     },
     toggleShuffle: () => player.toggleShuffle(),
     cycleRepeat: () => player.toggleRepeatMode(),
