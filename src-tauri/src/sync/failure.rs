@@ -12,6 +12,17 @@ pub enum SyncFailure {
         retry_at_ms: i64,
         automatic: bool,
     },
+    #[error("WEBDAV_AUTH_FAILED")]
+    WebDavAuth,
+    #[error("WEBDAV_ACCESS_DENIED")]
+    WebDavAccessDenied,
+    #[error("WEBDAV_DIRECTORY_NOT_FOUND")]
+    WebDavDirectoryNotFound,
+    #[error("WEBDAV_NOT_DIRECTORY")]
+    WebDavNotDirectory,
+    /// 服务器既没有强 ETag 也给不了有限期的锁，没法安全地条件写入
+    #[error("WEBDAV_MISSING_CONDITION")]
+    WebDavMissingCondition,
 }
 
 /// 对齐 Android GitHubRateLimitException

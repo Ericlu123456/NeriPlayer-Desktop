@@ -349,16 +349,8 @@ async fn webdav_with_epoch_guard(
             {
                 approval::require(challenge)?;
             }
-            if lease.is_none()
-                && snapshot
-                    .as_ref()
-                    .is_some_and(|snapshot| snapshot.protocol == 0)
-            {
-                // 新清单的 ETag 不能约束旧 JSON 写入者，单文件迁移必须锁住整个集合
-                return Err(AppError::Other(
-                    "Legacy WebDAV upgrade requires a finite collection lease".into(),
-                ));
-            }
+            // 拿不到锁的服务器也能迁移旧单文件（对齐 Android）：清单以 If-None-Match: * 只创建不覆盖，
+            // 发布前再核对一次旧文件；旧客户端之后的写入由"所有设备已更新"确认兜底
             let merged = snapshot
                 .as_ref()
                 .map(|snapshot| {
@@ -523,14 +515,25 @@ mod tests {
         files: BTreeMap<String, Vec<u8>>,
     }
 
-    async fn legacy_server(
-        finite_lease: bool,
-    ) -> (
-        reqwest::Client,
-        WebDavSyncConfig,
-        SyncProtocolUpgrade,
-        tokio::task::JoinHandle<LegacyServerResult>,
-    ) {
+    const COLLECTION: &[u8] = b"<d:multistatus xmlns:d=\"DAV:\"><d:response><d:href>/</d:href><d:propstat><d:prop><d:resourcetype><d:collection/></d:resourcetype></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>";
+
+    struct LegacyServer {
+        http: reqwest::Client,
+        config: WebDavSyncConfig,
+        challenge: SyncProtocolUpgrade,
+        shutdown: tokio::sync::oneshot::Sender<()>,
+        task: tokio::task::JoinHandle<LegacyServerResult>,
+    }
+
+    impl LegacyServer {
+        async fn finish(self) -> LegacyServerResult {
+            let _ = self.shutdown.send(());
+            self.task.await.unwrap()
+        }
+    }
+
+    /// 只有旧版单文件的 WebDAV 目录；`rewrite_legacy` 模拟旧客户端在首次读取之后改写了它
+    async fn legacy_server(finite_lease: bool, rewrite_legacy: bool) -> LegacyServer {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let config = WebDavSyncConfig {
@@ -547,15 +550,17 @@ mod tests {
         let legacy = serde_json::to_vec(&SyncData::default()).unwrap();
         let api = WebDavArchiveClient::new(&http, &config).unwrap();
         let challenge = SyncProtocolUpgrade::new("webdav", api.target(), &legacy, 0);
+        let (shutdown, mut stopped) = tokio::sync::oneshot::channel::<()>();
         let task = tokio::spawn(async move {
             let mut requests = Vec::new();
             let mut files = BTreeMap::from([("neriplayer-sync.json".to_string(), legacy)]);
             loop {
-                let (mut socket, _) =
-                    tokio::time::timeout(std::time::Duration::from_secs(5), listener.accept())
-                        .await
-                        .unwrap()
-                        .unwrap();
+                let (mut socket, _) = tokio::select! {
+                    accepted = tokio::time::timeout(std::time::Duration::from_secs(5), listener.accept()) => {
+                        accepted.unwrap().unwrap()
+                    }
+                    _ = &mut stopped => break,
+                };
                 let mut request = Vec::new();
                 let end = loop {
                     let mut chunk = [0_u8; 8192];
@@ -600,10 +605,11 @@ mod tests {
                         ("201 Created", "", Vec::new())
                     }
                     "UNLOCK" => ("204 No Content", "", Vec::new()),
+                    "PROPFIND" => ("207 Multi-Status", "", COLLECTION.to_vec()),
                     _ => panic!("unexpected fixture method {method}"),
                 };
-                let finished = method == "UNLOCK"
-                    || (!finite_lease && method == "GET" && path == "neriplayer-sync.json");
+                let rewrites_source =
+                    rewrite_legacy && method == "GET" && path == "neriplayer-sync.json";
                 let mut response = format!(
                     "HTTP/1.1 {status}\r\n{extra}Content-Length: {}\r\nConnection: close\r\n\r\n",
                     body.len()
@@ -613,45 +619,76 @@ mod tests {
                 requests.push(request);
                 socket.write_all(&response).await.unwrap();
                 socket.shutdown().await.unwrap();
-                if finished {
-                    break;
+                if rewrites_source {
+                    files.insert(
+                        "neriplayer-sync.json".to_string(),
+                        b"{\"rewritten\":true}".to_vec(),
+                    );
                 }
             }
             LegacyServerResult { requests, files }
         });
-        (http, config, challenge, task)
+        LegacyServer { http, config, challenge, shutdown, task }
     }
 
     #[tokio::test]
-    async fn legacy_webdav_upgrade_without_collection_lease_fails_before_any_put() {
-        let (http, config, challenge, task) = legacy_server(false).await;
+    async fn legacy_webdav_upgrade_without_collection_lease_publishes_create_only() {
+        let server = legacy_server(false, false).await;
+        let challenge = server.challenge.clone();
         approval::approve_verified(&challenge, &challenge).unwrap();
-        let result = webdav_with_epoch_guard(&http, &config, &SyncData::default(), || Ok(())).await;
-        let error = match result {
-            Ok(_) => panic!("lease-free legacy upgrade must fail"),
-            Err(error) => error,
-        };
-        assert!(error.to_string().contains("finite collection lease"));
-        let served = task.await.unwrap();
-        assert_eq!(served.requests.len(), 3);
-        assert!(served
+        let completed =
+            webdav_with_epoch_guard(&server.http, &server.config, &SyncData::default(), || Ok(()))
+                .await
+                .unwrap();
+        assert!(completed.uploaded);
+        let served = server.finish().await;
+        assert!(served.files.contains_key(archive::MANIFEST_FILE));
+        let puts: Vec<_> = served
             .requests
             .iter()
-            .all(|request| !request.starts_with(b"PUT ")));
+            .map(|request| String::from_utf8_lossy(request).to_ascii_lowercase())
+            .filter(|request| request.starts_with("put "))
+            .collect();
+        let manifest_put = format!("put /{} ", archive::MANIFEST_FILE);
+        assert!(puts.iter().any(|put| put.starts_with(&manifest_put)));
+        for put in &puts {
+            assert!(put.contains("if-none-match: *\r\n"), "without a lease every write is create-only");
+            assert!(!put.contains("\r\nif: <"));
+        }
+        assert!(approval::require(&challenge).is_err(), "a completed upgrade consumes its approval");
+    }
+
+    #[tokio::test]
+    async fn legacy_webdav_upgrade_stops_when_an_old_client_rewrites_the_source() {
+        let server = legacy_server(false, true).await;
+        let challenge = server.challenge.clone();
+        approval::approve_verified(&challenge, &challenge).unwrap();
+        let error =
+            match webdav_with_epoch_guard(&server.http, &server.config, &SyncData::default(), || Ok(()))
+                .await
+            {
+                Ok(_) => panic!("a rewritten legacy source must not be migrated"),
+                Err(error) => error,
+            };
+        assert!(error.to_string().contains("Legacy WebDAV source changed"));
+        let served = server.finish().await;
+        assert!(served.requests.iter().all(|request| !request.starts_with(b"PUT ")));
         assert!(!served.files.contains_key(archive::MANIFEST_FILE));
         approval::consume(&challenge).unwrap();
     }
 
     #[tokio::test]
     async fn legacy_webdav_upgrade_with_finite_lease_publishes_and_validates_complete_archive() {
-        let (http, config, challenge, task) = legacy_server(true).await;
+        let server = legacy_server(true, false).await;
+        let challenge = server.challenge.clone();
         approval::approve_verified(&challenge, &challenge).unwrap();
-        let completed = webdav_with_epoch_guard(&http, &config, &SyncData::default(), || Ok(()))
-            .await
-            .unwrap();
+        let completed =
+            webdav_with_epoch_guard(&server.http, &server.config, &SyncData::default(), || Ok(()))
+                .await
+                .unwrap();
         assert!(completed.uploaded);
         assert!(completed.remote.is_some());
-        let served = task.await.unwrap();
+        let served = server.finish().await;
         let published = &served.files[archive::MANIFEST_FILE];
         assert_eq!(completed.version, archive::digest(published));
         let loaded = archive::load(published, |path| {

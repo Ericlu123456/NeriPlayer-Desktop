@@ -109,17 +109,33 @@ export function parseSyncProtocolUpgrade(error: unknown): SyncProtocolUpgrade | 
   }
 }
 
+/** 不会自己恢复的 WebDAV 失败（对齐 Android SyncWorkerFailurePolicy 的永久失败） */
+const WEBDAV_FAILURE_MESSAGES = {
+  WEBDAV_AUTH_FAILED: 'settings.webdav_auth_failed',
+  WEBDAV_ACCESS_DENIED: 'settings.webdav_access_denied',
+  WEBDAV_DIRECTORY_NOT_FOUND: 'settings.webdav_directory_not_found',
+  WEBDAV_NOT_DIRECTORY: 'settings.webdav_not_directory',
+  WEBDAV_MISSING_CONDITION: 'settings.webdav_missing_condition',
+} as const
+type WebDavFailureCode = keyof typeof WEBDAV_FAILURE_MESSAGES
+
 /** Rust 侧 SyncFailure 的稳定代码（src-tauri/src/sync/failure.rs） */
 export type SyncFailure =
   | { code: 'GITHUB_TOKEN_EXPIRED' }
   | { code: 'GITHUB_RATE_LIMITED', retryAt: number, automatic: boolean }
+  | { code: WebDavFailureCode }
 
 export function parseSyncFailure(error: unknown): SyncFailure | null {
   const message = String(error ?? '')
   if (message.includes('GITHUB_TOKEN_EXPIRED')) return { code: 'GITHUB_TOKEN_EXPIRED' }
   const limited = /GITHUB_RATE_LIMITED:(\d+):([01])/.exec(message)
   if (limited) return { code: 'GITHUB_RATE_LIMITED', retryAt: Number(limited[1]), automatic: limited[2] === '1' }
-  return null
+  const webdav = (Object.keys(WEBDAV_FAILURE_MESSAGES) as WebDavFailureCode[]).find(code => message.includes(code))
+  return webdav ? { code: webdav } : null
+}
+
+function isWebDavFailure(failure: SyncFailure | null): failure is { code: WebDavFailureCode } {
+  return failure !== null && failure.code in WEBDAV_FAILURE_MESSAGES
 }
 
 function formatRetryTime(at: number): string {
@@ -130,6 +146,7 @@ function formatRetryTime(at: number): string {
 /** 带稳定代码的失败换成本地化文案，其余保留后端原文 */
 export function describeSyncError(error: unknown, fallback = 'Sync failed'): string {
   const failure = parseSyncFailure(error)
+  if (isWebDavFailure(failure)) return t(WEBDAV_FAILURE_MESSAGES[failure.code])
   switch (failure?.code) {
     case 'GITHUB_TOKEN_EXPIRED':
       return t('settings.github_token_expired')
@@ -175,9 +192,12 @@ export const useSyncStore = defineStore('sync', () => {
   let dialogOwner: SyncProtocolUpgrade['backend'] | null = null
   let preferenceGeneration = 0
   let preferenceRead = 0
+  // 认证、目录这类 WebDAV 失败不会自己恢复：提示一次后暂停自动同步，直到手动同步成功或配置变更
+  let webdavBlockedBy: WebDavFailureCode | null = null
 
   function invalidateConfiguration(backend: SyncProtocolUpgrade['backend']) {
     clearProtocolUpgrade(backend)
+    if (backend === 'webdav') webdavBlockedBy = null
     if (dialogOwner === backend) {
       dialogOwner = null
       dialogError.value = null
@@ -559,6 +579,7 @@ export const useSyncStore = defineStore('sync', () => {
   async function syncWebDav(silent = false) {
     if (isSyncing.value) return
     if (silent && protocolUpgrades.value.some(item => item.backend === 'webdav')) return
+    if (silent && webdavBlockedBy) return
     const generation = configurationGeneration.webdav
     const toast = useToastStore()
     const history = useHistoryStore()
@@ -572,6 +593,7 @@ export const useSyncStore = defineStore('sync', () => {
       })
       if (!isCurrentConfiguration('webdav', generation)) return
       clearProtocolUpgrade('webdav')
+      webdavBlockedBy = null
       if (result.deferred) {
         requestFollowUpSync(['webdav'])
         if (!silent) toast.show(t('settings.sync_deferred'))
@@ -603,6 +625,13 @@ export const useSyncStore = defineStore('sync', () => {
       const upgrade = parseSyncProtocolUpgrade(e)
       if (upgrade) {
         rememberProtocolUpgrade(upgrade)
+        return
+      }
+      const failure = parseSyncFailure(e)
+      if (isWebDavFailure(failure)) {
+        webdavBlockedBy = failure.code
+        const reason = describeSyncError(e)
+        toast.error(webdav.value.autoSync ? t('settings.webdav_auto_sync_paused', { reason }) : reason)
         return
       }
       if (!webdav.value.autoSync || !silent) {

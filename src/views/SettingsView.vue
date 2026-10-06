@@ -1037,7 +1037,7 @@ const webdavBasePath = ref('')
 const webdavConfiguring = ref(false)
 
 async function configureWebDav() {
-  if (!webdavUrl.value.trim() || !webdavUsername.value.trim()) return
+  if (!webdavUrl.value.trim() || !webdavUsername.value.trim() || !webdavPassword.value) return
   webdavConfiguring.value = true
   const ok = await syncStore.configureWebDav(
     webdavUrl.value, webdavUsername.value, webdavPassword.value, webdavBasePath.value || undefined,
@@ -2551,7 +2551,7 @@ useEscapeClose(
           <p v-if="syncStore.dialogError" class="dialog-error">{{ syncStore.dialogError }}</p>
           <div class="dialog-actions">
             <button class="dialog-btn" @click="showWebDavDialog = false">{{ t('settings.cancel') }}</button>
-            <button class="dialog-btn primary" :disabled="webdavConfiguring || !webdavUrl.trim() || !webdavUsername.trim()" @click="configureWebDav">
+            <button class="dialog-btn primary" :disabled="webdavConfiguring || !webdavUrl.trim() || !webdavUsername.trim() || !webdavPassword" @click="configureWebDav">
               <span v-if="webdavConfiguring" class="material-symbols-rounded spinning" style="font-size: 16px">progress_activity</span>
               <span v-else>{{ t('settings.connect') }}</span>
             </button>

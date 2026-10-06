@@ -1102,6 +1102,12 @@ pub async fn configure_webdav_sync(
     password: String,
     base_path: Option<String>,
 ) -> AppResult<Value> {
+    // 对齐 Android WebDavStorage：服务器、用户名、密码缺一不可
+    if server_url.trim().is_empty() || username.trim().is_empty() || password.is_empty() {
+        return Err(AppError::Other(
+            "WebDAV server, username and password are required".into(),
+        ));
+    }
     let (request, preferences) = with_config_generations(|generations| {
         let request = generations.begin(ConfigProvider::WebDav)?;
         Ok::<_, AppError>((request, generations.webdav_preferences))

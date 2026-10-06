@@ -680,6 +680,40 @@ await regression('an expired GitHub token is reported even with silent failures 
   assert.equal(current.github.repo, 'repo', 'owner and repo survive so the user can reconnect')
 })
 
+assert.deepEqual(exports.parseSyncFailure('WEBDAV_DIRECTORY_NOT_FOUND'), { code: 'WEBDAV_DIRECTORY_NOT_FOUND' })
+assert.deepEqual(exports.parseSyncFailure('WEBDAV_NOT_DIRECTORY'), { code: 'WEBDAV_NOT_DIRECTORY' })
+
+await regression('a permanent WebDAV failure is shown once and pauses automatic sync', async current => {
+  approved.add('webdav')
+  current.webdav.configured = true
+  current.webdav.autoSync = true
+  await expectingErrors(async () => {
+    const transfer = delayInvoke('sync_webdav')
+    const pending = current.syncWebDav(true)
+    transfer.reject('WEBDAV_AUTH_FAILED')
+    await pending
+    assert.deepEqual(errors, ['settings.webdav_auto_sync_paused'], 'silent mode still reports a failure that cannot recover')
+    const before = calls.length
+    await current.syncWebDav(true)
+    assert.ok(!calls.slice(before).some(call => call.command === 'sync_webdav'), 'automatic sync stays paused')
+    await current.syncWebDav(false)
+    assert.ok(calls.slice(before).some(call => call.command === 'sync_webdav'), 'a manual sync tries again')
+  })
+  const before = calls.length
+  await current.syncWebDav(true)
+  assert.ok(calls.slice(before).some(call => call.command === 'sync_webdav'), 'a successful manual sync lifts the pause')
+})
+
+await regression('transient automatic WebDAV failures stay quiet', async current => {
+  approved.add('webdav')
+  current.webdav.configured = true
+  current.webdav.autoSync = true
+  const transfer = delayInvoke('sync_webdav')
+  const pending = current.syncWebDav(true)
+  transfer.reject('Network error: connection reset')
+  await pending
+})
+
 await regression('a follow-up requested mid-sync waits for that sync to finish', async current => {
   approved.add('github')
   current.github.configured = true

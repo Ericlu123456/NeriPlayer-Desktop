@@ -9,10 +9,13 @@ use reqwest::{Client, Method, RequestBuilder, StatusCode};
 use url::Url;
 
 use super::archive::{self, PreparedArchive};
+use super::failure::SyncFailure;
 use super::models::WebDavSyncConfig;
 use crate::error::{AppError, AppResult};
 
 const MAX_RESPONSE_BYTES: usize = 12 * 1024 * 1024;
+const DIRECTORY_PROBE_BODY: &[u8] =
+    b"<d:propfind xmlns:d=\"DAV:\"><d:prop><d:resourcetype/></d:prop></d:propfind>";
 const CONFLICT_PREFIX: &str = "WebDAV archive conflict";
 static FINITE_LEASE_TARGETS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 
@@ -138,29 +141,45 @@ impl WebDavArchiveClient {
             .header("Pragma", "no-cache")
     }
 
+    /// 旧版单文件能读到就说明目录可用；404 时 get 已经用 PROPFIND 确认过目录
     pub async fn validate_connection(&self) -> AppResult<()> {
-        if self
-            .get("neriplayer-sync.json", None, MAX_RESPONSE_BYTES)
-            .await?
-            .is_some()
-        {
-            return Ok(());
-        }
-        let body = b"<d:propfind xmlns:d=\"DAV:\"><d:prop><d:resourcetype/></d:prop></d:propfind>";
+        self.get("neriplayer-sync.json", None, MAX_RESPONSE_BYTES)
+            .await
+            .map(|_| ())
+    }
+
+    /// 用 Depth: 0 的 PROPFIND 确认同步目录存在且确实是目录（对齐 Android WebDavDirectoryProbe）
+    async fn probe_directory(&self, lease: Option<&Lease>) -> AppResult<()> {
         let (status, body, _) = self
             .execute(
                 Method::from_bytes(b"PROPFIND").unwrap(),
                 self.collection.clone(),
-                None,
+                lease,
                 Some(("Depth", "0")),
-                Some(body),
+                Some(DIRECTORY_PROBE_BODY),
                 64 * 1024,
             )
             .await?;
-        if status != StatusCode::MULTI_STATUS {
-            return Err(status_error(status, "collection probe"));
+        directory_status(status, &body)
+    }
+
+    /// 写入返回 404/409 时多半是目录没了，先确认目录；目录还在时 409 按冲突处理
+    async fn write_failure(
+        &self,
+        status: StatusCode,
+        operation: &str,
+        lease: Option<&Lease>,
+    ) -> AppError {
+        if matches!(status.as_u16(), 404 | 409) {
+            if let Err(error) = self.probe_directory(lease).await {
+                return error;
+            }
         }
-        validate_collection(&body)
+        if status == StatusCode::CONFLICT {
+            conflict(&format!("{operation} conflict"))
+        } else {
+            status_error(status, operation)
+        }
     }
 
     pub async fn acquire_lease(&self) -> AppResult<Option<Lease>> {
@@ -342,6 +361,8 @@ impl WebDavArchiveClient {
             )
             .await?;
         if status == StatusCode::NOT_FOUND {
+            // 目录不存在时远端看起来也是"空"的，首次同步会把它当成新仓库，必须先排除
+            self.probe_directory(lease).await?;
             return Ok(None);
         }
         if !status.is_success() {
@@ -375,9 +396,7 @@ impl WebDavArchiveClient {
             }
         }
         if observed.is_some_and(|file| file.etag.is_none()) && lease.is_none() {
-            return Err(invalid(
-                "publishing requires a strong ETag or finite collection lease",
-            ));
+            return Err(SyncFailure::WebDavMissingCondition.into());
         }
         for (path, content) in &prepared.objects {
             if !archive::canonical_object_path(path) || content.len() > archive::MAX_OBJECT_BYTES {
@@ -396,8 +415,14 @@ impl WebDavArchiveClient {
                     64 * 1024,
                 )
                 .await;
+            let result = match result {
+                Ok((status, _, _)) if !status.is_success() => {
+                    Err(self.write_failure(status, "object PUT", lease).await)
+                }
+                result => result,
+            };
             match result {
-                Ok((status, _, _)) if status.is_success() => {}
+                Ok(_) => {}
                 Err(error) if is_conflict(&error) => {
                     let existing = self
                         .get(path, lease, archive::MAX_OBJECT_BYTES)
@@ -407,7 +432,6 @@ impl WebDavArchiveClient {
                         return Err(invalid("content addressed object was replaced"));
                     }
                 }
-                Ok((status, _, _)) => return Err(status_error(status, "object PUT")),
                 Err(error) => return Err(error),
             }
         }
@@ -429,7 +453,7 @@ impl WebDavArchiveClient {
             )
             .await?;
         if !status.is_success() {
-            return Err(status_error(status, "manifest PUT"));
+            return Err(self.write_failure(status, "manifest PUT", lease).await);
         }
         let published = self
             .get(archive::MANIFEST_FILE, lease, archive::MAX_OBJECT_BYTES)
@@ -590,6 +614,18 @@ fn gc_journal_path(scope: &str) -> std::path::PathBuf {
     base.join(format!("sync-webdav-gc-{scope}.json"))
 }
 
+/// Depth: 0 目录探测的结果（对齐 Android WebDavDirectoryProbe / WebDavDirectoryResponse）
+fn directory_status(status: StatusCode, body: &[u8]) -> AppResult<()> {
+    match status.as_u16() {
+        207 => validate_collection(body),
+        401 => Err(SyncFailure::WebDavAuth.into()),
+        403 => Err(SyncFailure::WebDavAccessDenied.into()),
+        404 => Err(SyncFailure::WebDavDirectoryNotFound.into()),
+        200..=299 => Err(invalid("invalid directory response")),
+        _ => Err(status_error(status, "collection probe")),
+    }
+}
+
 fn validate_collection(bytes: &[u8]) -> AppResult<()> {
     let document = parse_xml(bytes)?;
     if !document.dav || document.name != "multistatus" {
@@ -603,6 +639,9 @@ fn validate_collection(bytes: &[u8]) -> AppResult<()> {
             .nth(1)
             .and_then(|code| code.parse::<u16>().ok())
             .ok_or_else(|| invalid("malformed directory status"))?;
+        if code == 404 {
+            return Err(SyncFailure::WebDavDirectoryNotFound.into());
+        }
         return Err(invalid(&format!("directory resource status {code}")));
     }
     let mut properties = resource
@@ -631,7 +670,9 @@ fn validate_collection(bytes: &[u8]) -> AppResult<()> {
     if !(200..300).contains(&code) {
         return Err(invalid(&format!("directory property status {code}")));
     }
-    required(kind, "collection")?;
+    if child(kind, "collection")?.is_none() {
+        return Err(SyncFailure::WebDavNotDirectory.into());
+    }
     Ok(())
 }
 
@@ -858,12 +899,11 @@ async fn bounded_body(mut response: reqwest::Response, maximum: usize) -> AppRes
     Ok(output)
 }
 fn status_error(status: StatusCode, operation: &str) -> AppError {
-    if matches!(status.as_u16(), 412 | 423) {
-        conflict("condition changed or collection locked")
-    } else if matches!(status.as_u16(), 401 | 403) {
-        invalid("authentication or access denied")
-    } else {
-        invalid(&format!("{operation} failed ({})", status.as_u16()))
+    match status.as_u16() {
+        412 | 423 => conflict("condition changed or collection locked"),
+        401 => SyncFailure::WebDavAuth.into(),
+        403 => SyncFailure::WebDavAccessDenied.into(),
+        code => invalid(&format!("{operation} failed ({code})")),
     }
 }
 pub fn strong_etag(value: &str) -> bool {
@@ -1260,12 +1300,88 @@ mod tests {
             etag: None,
             ..observed
         };
-        assert!(api
-            .put_archive(&prepared, Some(&weak), &HashSet::new(), None)
+        assert!(matches!(
+            api.put_archive(&prepared, Some(&weak), &HashSet::new(), None)
+                .await
+                .unwrap_err(),
+            AppError::Sync(SyncFailure::WebDavMissingCondition)
+        ));
+    }
+
+    const COLLECTION: &str = "<d:multistatus xmlns:d=\"DAV:\"><d:response><d:href>/</d:href><d:propstat><d:prop><d:resourcetype><d:collection/></d:resourcetype></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>";
+
+    fn failure_kind(result: AppResult<()>) -> String {
+        match result {
+            Ok(()) => "ok".into(),
+            Err(AppError::Sync(failure)) => failure.to_string(),
+            Err(_) => "invalid".into(),
+        }
+    }
+
+    #[test]
+    fn directory_probe_classifies_the_android_failure_kinds() {
+        let probe = |status: u16, body: &str| {
+            failure_kind(directory_status(StatusCode::from_u16(status).unwrap(), body.as_bytes()))
+        };
+        assert_eq!(probe(207, COLLECTION), "ok");
+        assert_eq!(probe(207, &COLLECTION.replace("<d:collection/>", "")), "WEBDAV_NOT_DIRECTORY");
+        assert_eq!(
+            probe(207, "<d:multistatus xmlns:d=\"DAV:\"><d:response><d:href>/</d:href><d:status>HTTP/1.1 404 Not Found</d:status></d:response></d:multistatus>"),
+            "WEBDAV_DIRECTORY_NOT_FOUND"
+        );
+        let two_responses = COLLECTION.replace(
+            "</d:multistatus>",
+            "<d:response><d:href>/other</d:href></d:response></d:multistatus>",
+        );
+        assert_eq!(probe(207, &two_responses), "invalid");
+        assert_eq!(probe(207, &COLLECTION.replace("200 OK", "404 Not Found")), "invalid");
+        assert_eq!(probe(200, COLLECTION), "invalid", "a non-207 success is not a directory listing");
+        assert_eq!(probe(401, ""), "WEBDAV_AUTH_FAILED");
+        assert_eq!(probe(403, ""), "WEBDAV_ACCESS_DENIED");
+        assert_eq!(probe(404, ""), "WEBDAV_DIRECTORY_NOT_FOUND");
+        assert_eq!(failure_kind(Err(status_error(StatusCode::UNAUTHORIZED, "GET"))), "WEBDAV_AUTH_FAILED");
+        assert_eq!(failure_kind(Err(status_error(StatusCode::FORBIDDEN, "GET"))), "WEBDAV_ACCESS_DENIED");
+    }
+
+    #[tokio::test]
+    async fn a_missing_sync_folder_is_not_mistaken_for_an_empty_remote() {
+        let (api, task) = server(vec![
+            response("404 Not Found", "", b""),
+            response("404 Not Found", "", b""),
+        ])
+        .await;
+        let result = api
+            .get(archive::MANIFEST_FILE, None, archive::MAX_OBJECT_BYTES)
             .await
-            .unwrap_err()
-            .to_string()
-            .contains("requires a strong ETag"));
+            .map(|_| ());
+        assert_eq!(failure_kind(result), "WEBDAV_DIRECTORY_NOT_FOUND");
+        let requests = task.await.unwrap();
+        let probe = String::from_utf8_lossy(&requests[1]).to_ascii_lowercase();
+        assert!(probe.starts_with("propfind / "));
+        assert!(probe.contains("depth: 0"));
+    }
+
+    #[tokio::test]
+    async fn manifest_put_409_is_a_conflict_only_while_the_folder_exists() {
+        let prepared = archive::prepare(&super::super::models::SyncData::default(), None).unwrap();
+        let verified: HashSet<String> = prepared.objects.keys().cloned().collect();
+        let (api, task) = server(vec![
+            response("409 Conflict", "", b""),
+            response("207 Multi-Status", "", COLLECTION.as_bytes()),
+        ])
+        .await;
+        let error = api.put_archive(&prepared, None, &verified, None).await.unwrap_err();
+        assert!(is_conflict(&error), "a 409 inside an existing folder is retried as a conflict");
+        task.await.unwrap();
+
+        let (api, task) = server(vec![
+            response("409 Conflict", "", b""),
+            response("404 Not Found", "", b""),
+        ])
+        .await;
+        let result = api.put_archive(&prepared, None, &verified, None).await.map(|_| ());
+        assert_eq!(failure_kind(result), "WEBDAV_DIRECTORY_NOT_FOUND");
+        task.await.unwrap();
     }
 
     #[tokio::test]
