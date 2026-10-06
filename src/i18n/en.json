@@ -909,6 +909,7 @@
     "github_sync_success": "GitHub sync complete",
     "github_disconnected": "GitHub sync disconnected",
     "webdav_sync_success": "WebDAV sync complete",
+    "sync_deferred": "Local data changed during sync. Another sync will run shortly.",
     "webdav_disconnected": "WebDAV sync disconnected",
     "download_dir": "Download Directory",
     "download_dir_desc": "Default: Music/NeriPlayer. Audio and .npmeta.json files stay in the root; lyrics use Lyrics, covers use Covers, and temporary files use .tmp. A selected directory is used directly as the root",

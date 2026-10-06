@@ -39,20 +39,30 @@ const invoke = async (command, args) => {
   if (command === 'get_sync_preferences') return { historyUpdateMode: 'immediate' }
   if (command === 'import_config') return { success: true, settings: {} }
 }
-const toast = { success() {}, error(message) { throw new Error(`Unexpected toast: ${message}`) } }
+const notices = []
+const toast = {
+  success() {},
+  show(message) { notices.push(message) },
+  error(message) { throw new Error(`Unexpected toast: ${message}`) },
+}
 const historyApplications = []
 const historyCommits = []
+let historyOutcome = 'applied'
 const mocks = {
   pinia, vue,
   '@tauri-apps/api/core': { invoke },
   './toast': { useToastStore: () => toast },
   './history': { useHistoryStore: () => ({
     getSyncSnapshot: () => ({ entries: [], deletions: [] }),
-    async applySyncPayload(payload, isCurrent = () => true) {
+    syncSnapshotEpoch: () => 7,
+    async applySyncPayload(payload, isCurrent = () => true, snapshotEpoch) {
+      assert.equal(snapshotEpoch, 7, 'the snapshot epoch must travel with the merged history')
       historyApplications.push(payload)
       const pending = queuedResponses.get('history_apply')?.shift()
       if (pending) await pending
-      if (isCurrent()) historyCommits.push(payload)
+      if (!isCurrent()) return 'skipped'
+      historyCommits.push(payload)
+      return historyOutcome
     },
   }) },
   './settings': { useSettingsStore: () => ({ applySnapshot() {} }) },
@@ -532,6 +542,79 @@ await regression('a silent-only edit does not mark untouched connection defaults
   assert.equal(current.github.autoSync, true)
   assert.equal(current.github.dataSaver, true)
   assert.equal(current.github.silentFailures, true)
+})
+
+function captureTimers() {
+  const original = globalThis.setTimeout
+  const timers = []
+  globalThis.setTimeout = (callback, delay) => {
+    timers.push({ callback, delay })
+    return timers.length
+  }
+  return { timers, restore: () => { globalThis.setTimeout = original } }
+}
+
+for (const provider of ['github', 'webdav']) {
+  const command = provider === 'github' ? 'sync_github' : 'sync_webdav'
+  const sync = (current, silent) => provider === 'github' ? current.syncGitHub(silent) : current.syncWebDav(silent)
+
+  await regression(`${provider} deferred backend result schedules one quiet follow-up`, async current => {
+    approved.add(provider)
+    current[provider].configured = true
+    const clock = captureTimers()
+    try {
+      const transfer = delayInvoke(command)
+      const pending = sync(current, false)
+      const noticesBefore = notices.length
+      transfer.resolve({ success: false, deferred: true, message: 'Local data changed during sync' })
+      await pending
+      assert.equal(current.lastResult, null, 'a deferred round reports no result')
+      assert.deepEqual(notices.slice(noticesBefore), ['settings.sync_deferred'], 'a manual sync explains the deferral instead of failing')
+      assert.deepEqual(clock.timers.map(timer => timer.delay), [exports.FOLLOW_UP_SYNC_DELAY_MS])
+      const before = calls.length
+      clock.timers[0].callback()
+      await new Promise(resolve => setImmediate(resolve))
+      assert.deepEqual(calls.slice(before).map(call => call.command).filter(name => name.startsWith('sync_')), [command])
+    } finally {
+      clock.restore()
+    }
+  })
+
+  await regression(`${provider} history deferred during apply schedules a follow-up`, async current => {
+    approved.add(provider)
+    current[provider].configured = true
+    historyOutcome = 'deferred'
+    const clock = captureTimers()
+    try {
+      const transfer = delayInvoke(command)
+      const pending = sync(current, true)
+      transfer.resolve({ success: true, message: 'Sync complete', history: { entries: [], deletions: [] } })
+      await pending
+      assert.equal(clock.timers.length, 1)
+    } finally {
+      historyOutcome = 'applied'
+      clock.restore()
+    }
+  })
+}
+
+await regression('a follow-up requested mid-sync waits for that sync to finish', async current => {
+  approved.add('github')
+  current.github.configured = true
+  current.github.autoSync = true
+  const clock = captureTimers()
+  try {
+    const transfer = delayInvoke('sync_github')
+    const pending = current.syncGitHub(true)
+    current.requestFollowUpSync()
+    current.requestFollowUpSync()
+    assert.equal(clock.timers.length, 0, 'no follow-up may start while the snapshot is still in flight')
+    transfer.resolve({ success: true, message: 'Sync complete' })
+    await pending
+    assert.equal(clock.timers.length, 1, 'repeated requests collapse into one follow-up')
+  } finally {
+    clock.restore()
+  }
 })
 
 console.log(`test-sync-protocol-upgrade: existing approval checks and ${cases - failures.length}/${cases} delayed-response regressions passed`)

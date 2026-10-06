@@ -78,8 +78,13 @@ export interface SyncResult {
   songsRemoved: number
 }
 
+export type SyncBackend = 'github' | 'webdav'
+
+/** 同步期间本地又有修改时，等这一轮结束后再补一轮（对齐 Android 的 follow-up 同步） */
+export const FOLLOW_UP_SYNC_DELAY_MS = 5_000
+
 export interface SyncProtocolUpgrade {
-  backend: 'github' | 'webdav'
+  backend: SyncBackend
   target: string
   fingerprint: string
   sourceProtocol: 0 | 3
@@ -407,6 +412,7 @@ export const useSyncStore = defineStore('sync', () => {
     const history = useHistoryStore()
     isSyncing.value = true
     try {
+      const historyEpoch = history.syncSnapshotEpoch()
       const historySnapshot = history.getSyncSnapshot()
       const result = await invoke<any>('sync_github', {
         historyEntries: historySnapshot.entries,
@@ -414,7 +420,19 @@ export const useSyncStore = defineStore('sync', () => {
       })
       if (!isCurrentConfiguration('github', generation)) return
       clearProtocolUpgrade('github')
-      if (result.history) await history.applySyncPayload(result.history, () => isCurrentConfiguration('github', generation))
+      if (result.deferred) {
+        requestFollowUpSync(['github'])
+        if (!silent) toast.show(t('settings.sync_deferred'))
+        return
+      }
+      if (result.history) {
+        const applied = await history.applySyncPayload(
+          result.history,
+          () => isCurrentConfiguration('github', generation),
+          historyEpoch,
+        )
+        if (applied === 'deferred') requestFollowUpSync(['github'])
+      }
       if (!isCurrentConfiguration('github', generation)) return
       lastResult.value = {
         success: result.success, message: result.message,
@@ -443,6 +461,7 @@ export const useSyncStore = defineStore('sync', () => {
       }
     } finally {
       isSyncing.value = false
+      scheduleFollowUpSync()
     }
   }
 
@@ -498,6 +517,7 @@ export const useSyncStore = defineStore('sync', () => {
     const history = useHistoryStore()
     isSyncing.value = true
     try {
+      const historyEpoch = history.syncSnapshotEpoch()
       const historySnapshot = history.getSyncSnapshot()
       const result = await invoke<any>('sync_webdav', {
         historyEntries: historySnapshot.entries,
@@ -505,7 +525,19 @@ export const useSyncStore = defineStore('sync', () => {
       })
       if (!isCurrentConfiguration('webdav', generation)) return
       clearProtocolUpgrade('webdav')
-      if (result.history) await history.applySyncPayload(result.history, () => isCurrentConfiguration('webdav', generation))
+      if (result.deferred) {
+        requestFollowUpSync(['webdav'])
+        if (!silent) toast.show(t('settings.sync_deferred'))
+        return
+      }
+      if (result.history) {
+        const applied = await history.applySyncPayload(
+          result.history,
+          () => isCurrentConfiguration('webdav', generation),
+          historyEpoch,
+        )
+        if (applied === 'deferred') requestFollowUpSync(['webdav'])
+      }
       if (!isCurrentConfiguration('webdav', generation)) return
       lastResult.value = {
         success: result.success, message: result.message,
@@ -531,6 +563,7 @@ export const useSyncStore = defineStore('sync', () => {
       }
     } finally {
       isSyncing.value = false
+      scheduleFollowUpSync()
     }
   }
 
@@ -562,6 +595,34 @@ export const useSyncStore = defineStore('sync', () => {
     }
   }
 
+  const followUpBackends = new Set<SyncBackend>()
+  let followUpTimer: ReturnType<typeof setTimeout> | null = null
+
+  /** 记下需要补同步的提供商，不传时取所有已开启自动同步的提供商 */
+  function requestFollowUpSync(backends?: SyncBackend[]) {
+    const requested = backends ?? [
+      ...(github.value.configured && github.value.autoSync ? ['github' as const] : []),
+      ...(webdav.value.configured && webdav.value.autoSync ? ['webdav' as const] : []),
+    ]
+    for (const backend of requested) followUpBackends.add(backend)
+    scheduleFollowUpSync()
+  }
+
+  function scheduleFollowUpSync() {
+    if (followUpBackends.size === 0 || followUpTimer || isSyncing.value) return
+    followUpTimer = setTimeout(() => {
+      followUpTimer = null
+      // 计时期间又开始了同步，由它结束时重新安排
+      if (isSyncing.value) return
+      const backends = [...followUpBackends]
+      followUpBackends.clear()
+      void (async () => {
+        if (backends.includes('github') && github.value.configured) await syncGitHub(true)
+        if (backends.includes('webdav') && webdav.value.configured) await syncWebDav(true)
+      })()
+    }, FOLLOW_UP_SYNC_DELAY_MS)
+  }
+
   async function approveProtocolUpgrade() {
     const challenge = pendingProtocolUpgrade.value
     if (!challenge || isSyncing.value) return
@@ -579,6 +640,7 @@ export const useSyncStore = defineStore('sync', () => {
       useToastStore().error(String(error))
     } finally {
       isSyncing.value = false
+      scheduleFollowUpSync()
     }
   }
 
@@ -659,7 +721,7 @@ export const useSyncStore = defineStore('sync', () => {
     pendingProtocolUpgrade, approveProtocolUpgrade,
     loadConfigs,
     validateGitHubToken, createGitHubRepo, useExistingGitHubRepo,
-    configureGitHub, syncGitHub, syncAuto, disconnectGitHub,
+    configureGitHub, syncGitHub, syncAuto, requestFollowUpSync, disconnectGitHub,
     configureWebDav, syncWebDav, disconnectWebDav,
     exportPlaylists, importPlaylists, exportConfig, importConfig,
   }

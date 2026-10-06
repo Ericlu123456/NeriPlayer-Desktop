@@ -236,8 +236,11 @@ async function handleCloseRequested(event: { preventDefault: () => void }) {
 
 function scheduleDebouncedSync() {
   const syncStore = useSyncStore()
-  // 同步进行中不调度
-  if (syncStore.isSyncing) return
+  // 这一轮同步的快照里没有这次修改，等它结束后补一轮
+  if (syncStore.isSyncing) {
+    syncStore.requestFollowUpSync()
+    return
+  }
 
   if (debounceSyncTimer) clearTimeout(debounceSyncTimer)
   debounceSyncTimer = setTimeout(() => {
@@ -248,13 +251,17 @@ function scheduleDebouncedSync() {
 
 function triggerSilentSync() {
   const syncStore = useSyncStore()
-  if (syncStore.isSyncing) return
+  if (syncStore.isSyncing) {
+    syncStore.requestFollowUpSync()
+    return
+  }
   void syncStore.syncAuto(true)
 }
 
-function scheduleHistorySync() {
+function scheduleHistorySync(event: Event) {
+  // 同步自己写回的历史不需要再同步一次
+  if ((event as CustomEvent<{ type?: string }>).detail?.type === 'sync') return
   const syncStore = useSyncStore()
-  if (syncStore.isSyncing) return
 
   if (!(
     (syncStore.github.configured && syncStore.github.autoSync) ||
@@ -267,7 +274,8 @@ function scheduleHistorySync() {
     return
   }
 
-  if (historyBatchedTimer) clearTimeout(historyBatchedTimer)
+  // 批量窗口从第一条修改开始计时；每次播放都重新计时的话，连续听歌时永远等不到同步
+  if (historyBatchedTimer) return
   historyBatchedTimer = setTimeout(() => {
     historyBatchedTimer = null
     triggerSilentSync()
@@ -421,13 +429,14 @@ onMounted(async () => {
   // 自动同步（配置开启且已配置），静默模式
   void syncStore.syncAuto(true)
 
-  // 监听后端 playlists-changed 事件，防抖触发自动同步
-  unlistenPlaylistChanged = await listen('playlists-changed', () => {
+  // 监听后端 playlists-changed 事件，防抖触发自动同步；同步自己写回的歌单带 "sync" 标记，不再触发
+  unlistenPlaylistChanged = await listen<string | null>('playlists-changed', (event) => {
+    if (event.payload === 'sync') return
     scheduleDebouncedSync()
   })
 
   // 监听前端播放历史变更事件，触发历史自动同步
-  window.addEventListener(HISTORY_CHANGED_EVENT, scheduleHistorySync as EventListener)
+  window.addEventListener(HISTORY_CHANGED_EVENT, scheduleHistorySync)
 })
 
 onUnmounted(() => {
@@ -444,7 +453,7 @@ onUnmounted(() => {
   if (historyBatchedTimer) clearTimeout(historyBatchedTimer)
   if (periodicSyncTimer) clearInterval(periodicSyncTimer)
   likedSongs.stop()
-  window.removeEventListener(HISTORY_CHANGED_EVENT, scheduleHistorySync as EventListener)
+  window.removeEventListener(HISTORY_CHANGED_EVENT, scheduleHistorySync)
   if (unlistenPlaylistChanged) unlistenPlaylistChanged()
   if (unlistenCloseRequested) unlistenCloseRequested()
 })

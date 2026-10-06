@@ -35,6 +35,8 @@ interface BackendHistoryDeletion {
   deleted_at?: number
 }
 
+export type HistorySyncApplyOutcome = 'applied' | 'deferred' | 'skipped'
+
 const STORAGE_KEY = LEGACY_HISTORY_KEY
 const DELETIONS_STORAGE_KEY = LEGACY_HISTORY_DELETIONS_KEY
 const MAX_ENTRIES = 1000
@@ -135,6 +137,8 @@ export const useHistoryStore = defineStore('history', () => {
   const entries = ref<PlayedEntry[]>([])
   const deletions = ref<HistoryDeletion[]>([])
   let mutationEpoch = 0
+  // 只统计用户自己的播放/删除/清空，同步应用远端结果时据此判断快照之后有没有新的本地修改
+  let localMutationEpoch = 0
   const database = preloadedUserData() !== null
 
   /** 数据库模式下每次修改只发出对应命令；浏览器开发模式退回整表写 localStorage */
@@ -195,8 +199,13 @@ export const useHistoryStore = defineStore('history', () => {
     }
   }
 
-  function record(track: TrackInfo) {
+  function markLocalMutation() {
     mutationEpoch++
+    localMutationEpoch++
+  }
+
+  function record(track: TrackInfo) {
+    markLocalMutation()
     const playedAt = Date.now()
     const idx = entries.value.findIndex(entry => entry.track.id === track.id)
     if (idx >= 0) entries.value.splice(idx, 1)
@@ -208,7 +217,7 @@ export const useHistoryStore = defineStore('history', () => {
   }
 
   function remove(trackId: string) {
-    mutationEpoch++
+    markLocalMutation()
     const deletedAt = Date.now()
     const removed = entries.value.find(entry => entry.track.id === trackId)?.track
     const before = entries.value.length
@@ -224,7 +233,7 @@ export const useHistoryStore = defineStore('history', () => {
   }
 
   function clear() {
-    mutationEpoch++
+    markLocalMutation()
     if (entries.value.length === 0) return
     const deletedAt = Date.now()
     const current = entries.value.map(entry => ({ track: entry.track, deletedAt }))
@@ -249,10 +258,28 @@ export const useHistoryStore = defineStore('history', () => {
     }
   }
 
-  async function applySyncPayload(payload: any, isCurrent: () => boolean = () => true) {
-    if (!payload || typeof payload !== 'object' || !isCurrent()) return
+  /** 与 getSyncSnapshot 同时取，交给 applySyncPayload 判断快照之后用户是否又改过历史 */
+  function syncSnapshotEpoch() {
+    return localMutationEpoch
+  }
+
+  /**
+   * 应用远端合并结果。快照之后用户又改过历史时返回 'deferred'：这份结果不含那些修改，
+   * 不能覆盖本地，调用方应补一轮同步把它们合并上去（对齐 Android 的延迟应用）
+   */
+  async function applySyncPayload(
+    payload: any,
+    isCurrent: () => boolean = () => true,
+    snapshotEpoch?: number,
+  ): Promise<HistorySyncApplyOutcome> {
+    if (!payload || typeof payload !== 'object' || !isCurrent()) return 'skipped'
+    const startedLocalEpoch = localMutationEpoch
+    if (snapshotEpoch !== undefined && snapshotEpoch !== startedLocalEpoch) return 'deferred'
     const epoch = ++mutationEpoch
     const canApply = () => epoch === mutationEpoch && isCurrent()
+    // 被更新的同步结果取代时直接放弃；被用户修改打断时要求补同步
+    const interrupted = (): HistorySyncApplyOutcome =>
+      isCurrent() && localMutationEpoch !== startedLocalEpoch ? 'deferred' : 'skipped'
     const previousEntries = entries.value.map(entry => entry.track)
     const previousDeletions = deletions.value.map(deletion => deletion.track)
     const rawEntries: BackendHistoryEntry[] = Array.isArray(payload.entries) ? payload.entries : []
@@ -262,7 +289,7 @@ export const useHistoryStore = defineStore('history', () => {
 
     for (const rawDeletion of rawDeletions) {
       const candidate = await findMatchingTrack(candidates, rawDeletion, canApply)
-      if (!canApply()) return
+      if (!canApply()) return interrupted()
       if (candidate) {
         resolvedDeletions.push({
           track: candidate,
@@ -280,7 +307,7 @@ export const useHistoryStore = defineStore('history', () => {
       .sort((left, right) => right.playedAt - left.playedAt)
 
     // 提交阶段没有异步等待，先复核账号意图和本地修改再一起保存
-    if (!canApply()) return
+    if (!canApply()) return interrupted()
     mutationEpoch++
     entries.value = nextEntries.slice(0, MAX_ENTRIES)
     deletions.value = resolvedDeletions
@@ -297,6 +324,7 @@ export const useHistoryStore = defineStore('history', () => {
       },
     })
     emitHistoryChanged('sync')
+    return 'applied'
   }
 
   async function findMatchingTrack(
@@ -328,6 +356,7 @@ export const useHistoryStore = defineStore('history', () => {
     remove,
     clear,
     getSyncSnapshot,
+    syncSnapshotEpoch,
     applySyncPayload,
   }
 })

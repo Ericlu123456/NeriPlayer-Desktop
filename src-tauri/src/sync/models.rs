@@ -1024,6 +1024,9 @@ pub struct SyncResult {
     pub songs_removed: i32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub history: Option<Value>,
+    /// 同步期间本地数据有变化，这一轮没有写回任何东西，前端应稍后再同步一次
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub deferred: bool,
 }
 
 /// 同步配置

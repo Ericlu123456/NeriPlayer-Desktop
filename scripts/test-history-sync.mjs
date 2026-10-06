@@ -127,8 +127,35 @@ async function regression(name, run) {
 await regression('already cancelled payload has no history side effects', async store => {
   const savedWrites = writes
   const savedEvents = [...events]
-  await store.applySyncPayload({ entries: payload().entries, deletions: [] }, () => false)
+  assert.equal(await store.applySyncPayload({ entries: payload().entries, deletions: [] }, () => false), 'skipped')
   assertPreserved(store, [candidate.id], [], savedWrites, savedEvents)
+})
+
+for (const mutation of ['record', 'remove', 'clear']) {
+  await regression(`local ${mutation} after the sync snapshot defers the merged payload`, async store => {
+    const snapshotEpoch = store.syncSnapshotEpoch()
+    now = 3_000
+    if (mutation === 'record') store.record(track('netease:new-local'))
+    else if (mutation === 'remove') store.remove(candidate.id)
+    else store.clear()
+    const savedWrites = writes
+    const savedEvents = [...events]
+    assert.equal(await store.applySyncPayload(payload(), () => true, snapshotEpoch), 'deferred')
+    assertPreserved(
+      store,
+      mutation === 'record' ? ['netease:new-local', candidate.id] : [],
+      mutation === 'record' ? [] : [candidate.id],
+      savedWrites,
+      savedEvents,
+    )
+  })
+}
+
+await regression('an unchanged snapshot epoch applies the merged payload', async store => {
+  const snapshotEpoch = store.syncSnapshotEpoch()
+  assert.equal(await store.applySyncPayload(payload(), () => true, snapshotEpoch), 'applied')
+  assert.deepEqual(store.entries.map(item => item.track.id), ['netease:old-cloud'])
+  assert.equal(store.syncSnapshotEpoch(), snapshotEpoch, 'applying a sync result is not a local edit')
 })
 
 await regression('provider disconnect during identity matching cannot commit old history', async store => {
@@ -157,7 +184,7 @@ for (const mutation of ['record', 'remove', 'clear']) {
     const savedWrites = writes
     const savedEvents = [...events]
     waiting.release()
-    await pending
+    assert.equal(await pending, 'deferred', 'a local edit during matching must ask for a follow-up sync')
     assertPreserved(
       store,
       mutation === 'record' ? ['netease:new-local', candidate.id] : [],
@@ -188,17 +215,19 @@ for (const completionOrder of ['new-first', 'old-first']) {
     const newDigest = delayDigest()
     const fresh = store.applySyncPayload(payload('netease:new-cloud'))
     assert.ok(oldDigest.used && newDigest.used)
+    const outcomes = {}
     if (completionOrder === 'new-first') {
       newDigest.release()
-      await fresh
+      outcomes.fresh = await fresh
       oldDigest.release()
-      await old
+      outcomes.old = await old
     } else {
       oldDigest.release()
-      await old
+      outcomes.old = await old
       newDigest.release()
-      await fresh
+      outcomes.fresh = await fresh
     }
+    assert.deepEqual(outcomes, { old: 'skipped', fresh: 'applied' }, 'a superseded payload needs no follow-up sync')
     assert.deepEqual(store.entries.map(item => item.track.id), ['netease:new-cloud'])
     assert.deepEqual(store.deletions.map(item => item.track.id), [candidate.id])
     assert.deepEqual(storedIds('neri:play-history'), ['netease:new-cloud'])

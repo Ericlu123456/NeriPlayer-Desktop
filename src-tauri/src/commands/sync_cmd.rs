@@ -901,7 +901,7 @@ pub async fn sync_github(
         history_deletions.as_deref(),
         local_stats_payload(&state),
     )?;
-    let outcome = manager::sync_github(
+    let outcome = deferred_on_local_change(manager::sync_github(
         &state.sync_http(),
         &config,
         &local_data,
@@ -934,15 +934,36 @@ pub async fn sync_github(
             })
         },
     )
-    .await?;
-    // 仅本地数据确有变化时通知前端：App.vue 监听该事件后会防抖触发自动同步，
-    // "Already up to date" 也无条件 emit 会形成 5s 自激同步环；
-    // 有变化时事件照发，手动同步后的 UI 刷新能力不受影响
+    .await)?;
+    let Some(outcome) = outcome else {
+        return Ok(deferred_sync_result());
+    };
+    // 仅本地数据确有变化时通知前端刷新；"sync" 标记让 App.vue 不再为这次写回触发自动同步
     if outcome.local_changed {
-        let _ = app.emit("playlists-changed", ());
+        let _ = app.emit("playlists-changed", SYNC_WRITE_BACK);
     }
     let _ = app.emit("playback-stats-changed", ());
     Ok(outcome.result)
+}
+
+/// `playlists-changed` 的载荷，表示这次变化来自同步写回而不是用户编辑
+const SYNC_WRITE_BACK: &str = "sync";
+
+/// 本地歌单在同步期间被修改时什么都没有写回，这不是失败：转成 `None` 交给前端补一轮同步
+fn deferred_on_local_change<T>(result: AppResult<T>) -> AppResult<Option<T>> {
+    match result {
+        Ok(value) => Ok(Some(value)),
+        Err(error) if manager::is_local_change_conflict(&error) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+fn deferred_sync_result() -> SyncResult {
+    SyncResult {
+        message: "Local data changed during sync; another sync will follow".into(),
+        deferred: true,
+        ..Default::default()
+    }
 }
 
 /// 断开 GitHub 同步
@@ -1040,7 +1061,7 @@ pub async fn sync_webdav(
         history_deletions.as_deref(),
         local_stats_payload(&state),
     )?;
-    let outcome = manager::sync_webdav(
+    let outcome = deferred_on_local_change(manager::sync_webdav(
         &state.sync_http(),
         &config,
         &local_data,
@@ -1073,10 +1094,13 @@ pub async fn sync_webdav(
             })
         },
     )
-    .await?;
-    // 与 sync_github 同理：无本地变化不 emit，消除自激同步环
+    .await)?;
+    let Some(outcome) = outcome else {
+        return Ok(deferred_sync_result());
+    };
+    // 与 sync_github 同理
     if outcome.local_changed {
-        let _ = app.emit("playlists-changed", ());
+        let _ = app.emit("playlists-changed", SYNC_WRITE_BACK);
     }
     let _ = app.emit("playback-stats-changed", ());
     Ok(outcome.result)

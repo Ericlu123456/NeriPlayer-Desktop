@@ -909,6 +909,7 @@
     "github_sync_success": "GitHub同期完了",
     "github_disconnected": "GitHub同期を解除しました",
     "webdav_sync_success": "WebDAV同期完了",
+    "sync_deferred": "同期中にローカルデータが変更されました。まもなく再同期します。",
     "webdav_disconnected": "WebDAV同期を解除しました",
     "download_dir": "ダウンロードフォルダ",
     "download_dir_desc": "初期保存先は Music/NeriPlayer。音声と .npmeta.json はルート、歌詞は Lyrics、カバーは Covers、一時ファイルは .tmp に保存します。選択したフォルダを直接ルートとして使用します",

@@ -754,17 +754,23 @@ pub fn save_synced_playlists(merged: &SyncData) -> AppResult<()> {
     save_synced_playlists_locked(merged)
 }
 
+const LOCAL_CHANGED_DURING_SYNC: &str =
+    "Local playlists changed during sync; remote result was not applied";
+
 /// 仅在同步期间没有本地歌单写入时应用合并结果
 ///
 /// 网络请求可能持续数秒，期间用户仍可编辑歌单。epoch 变化时拒绝回写，
 /// 保留用户刚写入的数据，下一轮同步再合并远端结果，避免静默覆盖本地编辑
 pub(super) fn ensure_local_playlist_epoch(expected_epoch: u64) -> AppResult<()> {
     if playlist::io_epoch() != expected_epoch {
-        return Err(AppError::Other(
-            "Local playlists changed during sync; remote result was not applied".into(),
-        ));
+        return Err(AppError::Other(LOCAL_CHANGED_DURING_SYNC.into()));
     }
     Ok(())
+}
+
+/// 这类失败没有写回任何本地数据，命令层应返回 deferred 结果让前端补一轮同步，而不是报错
+pub(crate) fn is_local_change_conflict(error: &AppError) -> bool {
+    matches!(error, AppError::Other(message) if message == LOCAL_CHANGED_DURING_SYNC)
 }
 
 fn save_synced_playlists_locked(merged: &SyncData) -> AppResult<()> {
@@ -1050,6 +1056,8 @@ mod tests {
         assert!(error
             .to_string()
             .contains("Local playlists changed during sync"));
+        assert!(is_local_change_conflict(&error));
+        assert!(!is_local_change_conflict(&AppError::Other("Sync failed".into())));
     }
 
     #[test]
