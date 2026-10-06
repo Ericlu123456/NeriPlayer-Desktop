@@ -53,6 +53,12 @@ import { splitArtistNames } from '@/modules/library/localArtists'
 import { openDesktopLyricsWindow } from '@/modules/desktopLyrics/bridge'
 import { getPlaybackSourceKind } from '@/modules/playback/playbackSource'
 import { usePlaybackAudioInfoDisplay } from '@/composables/usePlaybackAudioInfoDisplay'
+import {
+  actualAudioBitrateLabel,
+  canSwitchAudioQuality,
+  isLocalAudioPlayback,
+  resolveAudioQualityLabel,
+} from '@/modules/playback/audioQualityDisplay'
 
 const log = createLogger('now-playing')
 
@@ -1226,7 +1232,7 @@ function goToSubView(view: typeof moreSheetView.value) {
 
 // 点击进度条旁的音质标签直接打开音质切换面板（ST-05：让该设置真实可切换而非纯展示）
 function openQualitySwitcher() {
-  if (currentSource.value === 'local') return
+  if (!canSwitchCurrentAudioQuality.value || player.isLoadingAudio) return
   showMoreSheet.value = true
   goToSubView('quality')
 }
@@ -1431,6 +1437,12 @@ const currentSource = computed(() => {
   if (id.startsWith('youtube:')) return 'youtube'
   return 'local'
 })
+const canSwitchCurrentAudioQuality = computed(() => canSwitchAudioQuality({
+  source: currentSource.value, fromDownload: player.isPlayingFromDownload, info: player.audioInfo,
+}))
+watch(canSwitchCurrentAudioQuality, (canSwitch) => {
+  if (!canSwitch && moreSheetView.value === 'quality') goBackToMain()
+})
 
 // 偏移分桶: netease→cloud, qq→qq, youtube/bili/local→none(默认 0)
 const currentOffsetBucket = computed(() => offsetBucketForSource(currentSource.value))
@@ -1503,21 +1515,23 @@ function formatFileSize(bytes?: number) {
 const trackDetailAudioParams = computed(() => {
   const info = player.audioInfo
   if (!info) return ''
+  const local = isLocalAudioPlayback({ source: currentSource.value, fromDownload: player.isPlayingFromDownload, info })
   const parts: string[] = []
   const quality = currentAudioQualityLabel()
   if (quality) parts.push(quality)
   if (info.codec) {
-    const codec = normalizeAudioDisplayToken(info.codec)
+    const codec = normalizeAudioDisplayToken(info.codec, local)
     if (codec && !parts.includes(codec)) parts.push(codec)
   }
   if (info.format) {
-    const format = normalizeAudioDisplayToken(info.format)
+    const format = normalizeAudioDisplayToken(info.format, local)
     if (format && !parts.includes(format) && format.toLowerCase() !== (info.codec || '').toLowerCase()) {
       parts.push(format)
     }
   }
-  if (info.bitrate && info.bitrate > 0) parts.push(`${Math.round(info.bitrate)} kbps`)
-  for (const token of paperSpecFromAudioInfo(info)) {
+  const bitrate = actualAudioBitrateLabel(info)
+  if (bitrate) parts.push(bitrate)
+  for (const token of paperSpecFromAudioInfo(info, !local)) {
     if (!parts.includes(token)) parts.push(token)
   }
   return parts.join(' · ')
@@ -1623,7 +1637,7 @@ const biliQualities = [
 const isQualitySwitching = ref(false)
 
 async function switchQuality(key: string) {
-  if (isQualitySwitching.value) return
+  if (isQualitySwitching.value || !canSwitchCurrentAudioQuality.value || player.isLoadingAudio) return
   const source = currentSource.value
   const previousKey = currentQualityKey(source)
   if (!previousKey || previousKey === key) {
@@ -1789,7 +1803,7 @@ const canViewNeteaseArtist = computed(() =>
   currentSource.value === 'netease' && !!primaryArtistName.value && !!currentNeteaseSongNumericId.value)
 
 // 进度条下方音质信息（不展示 Local / download 占位）
-// 纸面规格: 最高/极高/杜比… + 可选编解码; 不展示 kbps 数字
+// 在线显示平台音质，本地文件仅显示文件实际参数
 const displayedAudioInfo = usePlaybackAudioInfoDisplay(() => ({
   info: player.audioInfo,
   fromDownload: player.isPlayingFromDownload,
@@ -1800,31 +1814,31 @@ const audioInfoParts = computed(() => {
   const info = displayedAudioInfo.value.info
   if (!info) return []
   const parts: Array<{ text: string; accent?: boolean }> = []
-  if (settings.showQualitySwitch) addAudioInfoPart(parts, currentAudioQualityLabel(info), true)
-  if (settings.showAudioCodec) addAudioInfoPart(parts, normalizeAudioDisplayToken(info.codec))
-  // showAudioSpec: 只补 sampleRate/bitDepth 类纸面规格, 不写 kbps
+  const local = isLocalAudioPlayback({ source: currentSource.value, fromDownload: displayedAudioInfo.value.fromDownload, info })
+  if (local) addAudioInfoPart(parts, actualAudioBitrateLabel(info))
+  else if (settings.showQualitySwitch) addAudioInfoPart(parts, currentAudioQualityLabel(info, displayedAudioInfo.value.fromDownload), true)
+  if (settings.showAudioCodec) {
+    addAudioInfoPart(parts, normalizeAudioDisplayToken(info.codec, local))
+    if (local) addAudioInfoPart(parts, normalizeAudioDisplayToken(info.format, true))
+  }
   if (settings.showAudioSpec) {
-    for (const token of paperSpecFromAudioInfo(info)) addAudioInfoPart(parts, token)
+    for (const token of paperSpecFromAudioInfo(info, !local)) addAudioInfoPart(parts, token)
   }
   return parts.filter(part => !isHiddenAudioInfoToken(part.text))
 })
 
-function currentAudioQualityLabel(info: AudioInfo | null = player.audioInfo) {
-  const source = info?.source && info.source !== 'local' ? info.source : currentSource.value
-  // 优先已本地化的 qualityLabel; 否则用 qualityKey 映射到 标准/极高/最高…
-  const labeled = info?.qualityLabel?.trim()
-  if (labeled && !/kbps/i.test(labeled) && labeled !== info?.qualityKey) {
-    return labeled
-  }
-  return qualityLabelFor(source, info?.qualityKey || currentQualityKey(source))
+function currentAudioQualityLabel(info: AudioInfo | null = player.audioInfo, fromDownload = player.isPlayingFromDownload) {
+  return resolveAudioQualityLabel({ source: currentSource.value, fromDownload, info },
+    (source, key) => qualityLabelFor(source, key || currentQualityKey(source)))
 }
 
-/** 从 audioInfo 抽出非码率的纸面规格 (如 48 kHz / 16 bit) */
+// 文件播放只采用探测字段，避免把平台规格当成实际文件参数
 function paperSpecFromAudioInfo(info: {
   sampleRateHz?: number
   bitDepth?: number
+  channelCount?: number
   specLabel?: string
-}): string[] {
+}, includeSpecLabel = true): string[] {
   const tokens: string[] = []
   if (info.sampleRateHz && info.sampleRateHz > 0) {
     const khz = info.sampleRateHz / 1000
@@ -1833,8 +1847,9 @@ function paperSpecFromAudioInfo(info: {
       : `${khz.toFixed(1)} kHz`)
   }
   if (info.bitDepth && info.bitDepth > 0) tokens.push(`${info.bitDepth} bit`)
+  if (!includeSpecLabel && info.channelCount && info.channelCount > 0) tokens.push(`${info.channelCount} ch`)
   // specLabel 里可能混有 kbps, 过滤掉
-  if (info.specLabel) {
+  if (includeSpecLabel && info.specLabel) {
     for (const part of info.specLabel.split('|').map(s => s.trim())) {
       if (!part || /kbps/i.test(part)) continue
       if (!tokens.includes(part)) tokens.push(part)
@@ -1854,10 +1869,11 @@ function addAudioInfoPart(
   parts.push({ text: normalized, accent })
 }
 
-function normalizeAudioDisplayToken(value?: string) {
+function normalizeAudioDisplayToken(value?: string, local = false) {
   if (!value) return ''
   const raw = value.trim()
   const lower = raw.toLowerCase()
+  if (local && lower === 'mpeg') return 'MPEG'
   // 占位词直接丢掉
   if (isHiddenAudioInfoToken(raw)) return ''
   const tokenMap: Record<string, string> = {
@@ -2158,10 +2174,10 @@ const sliderActiveColor = computed(() => {
                   class="np-audio-detail-part"
                   :class="{
                     'np-audio-detail-part--accent': part.accent,
-                    'np-audio-detail-part--clickable': part.accent && currentSource !== 'local' && !player.isLoadingAudio,
+                    'np-audio-detail-part--clickable': part.accent && canSwitchCurrentAudioQuality && !player.isLoadingAudio,
                   }"
-                  :role="part.accent && currentSource !== 'local' && !player.isLoadingAudio ? 'button' : undefined"
-                  :tabindex="part.accent && currentSource !== 'local' && !player.isLoadingAudio ? 0 : undefined"
+                  :role="part.accent && canSwitchCurrentAudioQuality && !player.isLoadingAudio ? 'button' : undefined"
+                  :tabindex="part.accent && canSwitchCurrentAudioQuality && !player.isLoadingAudio ? 0 : undefined"
                   @click="part.accent && !player.isLoadingAudio && openQualitySwitcher()"
                   @keydown.enter="part.accent && !player.isLoadingAudio && openQualitySwitcher()"
                 >{{ part.text }}</span>
@@ -2527,7 +2543,7 @@ const sliderActiveColor = computed(() => {
             </button>
 
             <!-- 音质切换（仅在线来源显示） -->
-            <button v-if="currentSource !== 'local'" class="np-more-list-item" @click="goToSubView('quality')">
+            <button v-if="canSwitchCurrentAudioQuality" class="np-more-list-item" :disabled="player.isLoadingAudio" @click="openQualitySwitcher()">
               <span class="material-symbols-rounded">music_note</span>
               <div class="np-more-list-info">
                 <span class="np-more-list-headline">{{ t('player.quality_switch') }}</span>
@@ -2927,9 +2943,7 @@ const sliderActiveColor = computed(() => {
               <div class="np-track-detail-row">
                 <span>{{ t('player.track_detail_bitrate') }}</span>
                 <strong>
-                  {{ player.audioInfo?.bitrate && player.audioInfo.bitrate > 0
-                    ? `${Math.round(player.audioInfo.bitrate)} kbps`
-                    : '-' }}
+                  {{ actualAudioBitrateLabel(player.audioInfo) || '-' }}
                 </strong>
               </div>
               <div class="np-track-detail-row">
@@ -2967,7 +2981,7 @@ const sliderActiveColor = computed(() => {
               </button>
               <h4 class="np-more-title">{{ t('player.quality_switch') }}</h4>
             </div>
-            <div v-if="qualityOptionsForSource(currentSource).length" class="np-more-quality-list">
+            <div v-if="canSwitchCurrentAudioQuality && qualityOptionsForSource(currentSource).length" class="np-more-quality-list">
               <button
                 v-for="q in qualityOptionsForSource(currentSource)"
                 :key="q.key"

@@ -14,6 +14,8 @@
     "test:desktop-lyrics": "node scripts/test-desktop-lyrics.mjs",
     "test:playback-request": "node scripts/playback-request.test.mjs",
     "test:playback-audio-info": "node scripts/test-playback-audio-info.mjs",
+    "test:local-audio-info": "node scripts/test-local-audio-info.mjs",
+    "test:now-playing-local-audio": "node scripts/test-now-playing-local-audio.mjs",
     "test:playback-queue": "node scripts/playback-queue.test.mjs",
     "test:playback-source": "node scripts/test-playback-source.mjs",
     "test:playback-settings": "node scripts/test-playback-settings.mjs",

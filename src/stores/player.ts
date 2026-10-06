@@ -52,6 +52,7 @@ import {
   restorePersistedPlaybackQueue,
 } from '@/modules/playback/playerState'
 import { summarizeLogError } from '@/utils/logSanitizer'
+import { loadLocalAudioInfo } from '@/modules/playback/localAudioInfo'
 
 const log = createLogger('player')
 const uiLog = createLogger('playback-ui')
@@ -122,12 +123,7 @@ export function tracePlaybackUi(
   })
 }
 
-/** UI 显示用的专辑名：清理 B站 "Bilibili|{cid}" 等内部格式 */
-export function displayAlbum(album: string): string {
-  if (album.startsWith('Bilibili|') || album === 'Bilibili') return 'Bilibili'
-  if (album.startsWith('Netease')) return album.replace(/^Netease/, '').trim() || album
-  return album
-}
+export { displayAlbum } from '@/modules/library/albumDisplay'
 
 export interface LyricWord {
   startMs: number
@@ -1031,6 +1027,14 @@ export const usePlayerStore = defineStore('player', () => {
     })
   }
 
+  function readLocalAudioInfo(path: string, requestGeneration: number) {
+    void loadLocalAudioInfo(
+      path,
+      () => requestGeneration === playbackRequestToken && hasPlaybackSession.value,
+      info => { audioInfo.value = info },
+    ).catch(error => log.warn('local audio properties unavailable:', error))
+  }
+
   async function play(
     track: TrackInfo,
     commandSource: PlaybackCommandSource = 'local',
@@ -1221,22 +1225,7 @@ export const usePlayerStore = defineStore('player', () => {
       }
 
       if (playedFromDownloadedFile) {
-        // 本地下载：不展示 Local/download 占位；格式从扩展名推断，码率有则显示
-        const ext = downloaded?.filePath
-          ?.split(/[\\/]/)
-          .pop()
-          ?.split('.')
-          .pop()
-          ?.toLowerCase()
-        const formatFromExt = ext && ext.length <= 5 ? ext : undefined
-        audioInfo.value = {
-          // 不写 codec: Local，避免进度条下出现 Local · download
-          format: formatFromExt,
-          // getPlaybackSourceKind 已覆盖远程源；仅当明确是 local 时回退
-          source: getPlaybackSourceKind(track)
-            ?? (track.source === 'local' ? 'local' : undefined),
-          qualityKey: undefined,
-        }
+        if (downloaded?.filePath) readLocalAudioInfo(downloaded.filePath, token)
         lastUrlResolveTime = 0
       } else if (isRemotePlaybackTrack(track)) {
         _currentLoadedFromDownloadPath = null
@@ -1497,6 +1486,7 @@ export const usePlayerStore = defineStore('player', () => {
         }
         if (token !== playbackRequestToken) return
         markLoadStartApplied(startPlan)
+        readLocalAudioInfo(track.audioUrl, token)
       }
 
       commitTrack()

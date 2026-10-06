@@ -969,7 +969,7 @@ onUnmounted(() => {
           </div>
           <div class="track-info">
             <div class="track-title">{{ track.title }}</div>
-            <div class="track-meta">{{ track.artist }}<template v-if="track.album"> · {{ displayAlbum(track.album) }}</template></div>
+            <div class="track-meta">{{ track.artist }}<template v-if="displayAlbum(track.album)"> · {{ displayAlbum(track.album) }}</template></div>
           </div>
           <span
             v-if="downloadStore.isDownloaded(track.id)"
