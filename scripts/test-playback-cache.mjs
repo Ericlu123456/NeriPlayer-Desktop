@@ -105,23 +105,63 @@ try {
     await first
     assert.equal((await second).url, 'https://rr.googlevideo.com/new-generation')
   })
-  await run('a foreground generation does not inherit a generationless in-flight prefetch', async () => {
+  await run('a foreground generation joins a generationless in-flight prefetch', async () => {
     const resolver = new source.PlaybackUrlResolver()
-    const old = deferred()
+    const prefetch = deferred()
     let calls = 0
-    globalThis.__cacheInvoke = async () => ++calls === 1 ? old.promise : stream('https://rr.googlevideo.com/foreground')
+    globalThis.__cacheInvoke = async () => { calls++; return prefetch.promise }
     const first = resolver.resolve(youtube, settings)
     const second = resolver.resolve(youtube, settings, { requestGeneration: 2 })
-    try {
-      await new Promise(setImmediate)
-      assert.equal(calls, 2)
-    } finally {
-      old.resolve(stream('https://rr.googlevideo.com/generationless'))
-      await Promise.all([first, second])
+    await new Promise(setImmediate)
+    assert.equal(calls, 1, 'pressing next during the prefetch must not start the resolve over')
+    prefetch.resolve(stream('https://rr.googlevideo.com/generationless'))
+    const [prefetched, foreground] = await Promise.all([first, second])
+    assert.equal(foreground.url, 'https://rr.googlevideo.com/generationless')
+    assert.deepEqual(prefetched, foreground)
+    assert.equal((await resolver.resolve(youtube, settings, { requestGeneration: 3 })).url, 'https://rr.googlevideo.com/generationless')
+    assert.equal(calls, 1, 'completed cache remains reusable by later generations')
+  })
+  await run('prefetched URLs stay valid for the current track duration plus 30 seconds', async () => {
+    const { genericUrlPrefetchTtlMs } = await import(await load('../src/modules/playback/playbackPrefetch.ts'))
+    assert.equal(genericUrlPrefetchTtlMs(0), 90_000)
+    assert.equal(genericUrlPrefetchTtlMs(240_000), 270_000)
+    assert.equal(genericUrlPrefetchTtlMs(20 * 60_000), 600_000)
+    const manager = new PlaybackPrefetchManager()
+    const netease = { ...youtube, id: 'netease:777', source: 'netease' }
+    globalThis.__cacheInvoke = async () => ({ url: 'https://m.music.126.net/next', format: 'mp3', bitrate: 320_000, level: 'exhigh', song_id: 777 })
+    manager.prefetch(netease, settings, new source.PlaybackUrlResolver(), undefined, genericUrlPrefetchTtlMs(240_000))
+    await new Promise(setImmediate)
+    now += 200_000
+    assert.ok(manager.take(netease, settings), 'still valid when the current 4-minute track ends')
+    manager.prefetch(netease, settings, new source.PlaybackUrlResolver(), undefined, genericUrlPrefetchTtlMs(240_000))
+    await new Promise(setImmediate)
+    now += 271_000
+    assert.equal(manager.take(netease, settings), null)
+  })
+  await run('YouTube prefetches run one at a time', async () => {
+    const manager = new PlaybackPrefetchManager()
+    const gates = []
+    let inFlight = 0
+    let peak = 0
+    globalThis.__cacheInvoke = async (_, args) => {
+      inFlight++
+      peak = Math.max(peak, inFlight)
+      const gate = deferred()
+      gates.push(gate)
+      await gate.promise
+      inFlight--
+      return stream(`https://rr.googlevideo.com/${args.videoId}`)
     }
-    assert.equal((await second).url, 'https://rr.googlevideo.com/foreground')
-    assert.equal((await resolver.resolve(youtube, settings, { requestGeneration: 3 })).url, 'https://rr.googlevideo.com/foreground')
-    assert.equal(calls, 2, 'completed cache remains reusable by later generations')
+    const tracks = ['a', 'b', 'c'].map(id => ({ ...youtube, id: `youtube:serial-${id}` }))
+    manager.prefetchWindow(tracks, settings, new source.PlaybackUrlResolver())
+    for (let index = 0; index < tracks.length; index++) {
+      await new Promise(setImmediate)
+      assert.equal(gates.length, index + 1)
+      gates[index].resolve()
+    }
+    await new Promise(setImmediate)
+    assert.equal(peak, 1)
+    for (const track of tracks) assert.ok(manager.take(track, settings))
   })
   await run('matching playback generations share their pending resolution', async () => {
     const resolver = new source.PlaybackUrlResolver()

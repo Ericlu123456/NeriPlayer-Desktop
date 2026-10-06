@@ -35,7 +35,7 @@ import {
   playbackFailureMessageKey,
   shouldThrottlePlaybackRefresh,
 } from '@/modules/playback/playbackFailure'
-import { playbackPrefetchManager } from '@/modules/playback/playbackPrefetch'
+import { genericUrlPrefetchTtlMs, playbackPrefetchManager } from '@/modules/playback/playbackPrefetch'
 import {
   PlaybackStartupWatchdog,
   resolvePlaybackFailureAdvanceAction,
@@ -713,7 +713,8 @@ export const usePlayerStore = defineStore('player', () => {
   }
 
   function nextPrefetchTracks(): TrackInfo[] {
-    if (!queue.value.length) return []
+    // 单曲循环不会切到下一首，预取只会浪费请求（对齐 Android）
+    if (!queue.value.length || repeatMode.value === 'one') return []
 
     const firstIndex = (() => {
       if (shuffleEnabled.value) {
@@ -728,8 +729,9 @@ export const usePlayerStore = defineStore('player', () => {
     if (firstIndex < 0) return []
 
     const tracks: TrackInfo[] = []
+    // YouTube 只预取后两首（对齐 Android），更多会在 PoToken 队列里挤占当前请求
     const maxWindow = getPlaybackSourceKindForPrefetch(queue.value[firstIndex]) === 'youtube'
-      ? 6
+      ? 2
       : 1
     let index = firstIndex
     for (let count = 0; count < maxWindow; count += 1) {
@@ -750,7 +752,10 @@ export const usePlayerStore = defineStore('player', () => {
     return track ? getPlaybackSourceKind(track) : null
   }
 
-  /** 预热后续曲目的解析结果，当前播放需求始终拥有优先级 */
+  /**
+   * 预热后续曲目的解析结果，当前播放需求始终拥有优先级。
+   * 预取不带播放代际：切歌不会作废它，按下一首时前台解析直接等它完成（对齐 Android join）。
+   */
   function maybePrefetchNext() {
     const tracks = nextPrefetchTracks()
     if (tracks.length === 0) return
@@ -759,7 +764,8 @@ export const usePlayerStore = defineStore('player', () => {
       tracks,
       playbackSourceSettings(),
       playbackUrlResolver,
-      playbackRequestToken,
+      undefined,
+      genericUrlPrefetchTtlMs(Math.max(durationMs.value, currentTrack.value?.durationMs ?? 0)),
     )
   }
 
@@ -771,7 +777,6 @@ export const usePlayerStore = defineStore('player', () => {
       [...candidates],
       playbackSourceSettings(),
       playbackUrlResolver,
-      playbackRequestToken,
     )
   }
 
@@ -2013,6 +2018,8 @@ export const usePlayerStore = defineStore('player', () => {
       // 后端确认后才钉死目标位置；失败时 catch 会回滚
       setRenderedPosition(safePosMs)
       seekGuardUntil = Math.max(seekGuardUntil, Date.now() + SEEK_EVENT_GUARD_MS)
+      // 长时间停留后跳转，之前的下一首预取可能已过期：跳转成功后重新预热（对齐 Android STATE_READY 重新预取）
+      maybePrefetchNext()
     }).catch((e) => {
       if (!isPlaybackSeekCompletionCurrent(
         requestGeneration,

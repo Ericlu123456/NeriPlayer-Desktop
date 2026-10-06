@@ -351,8 +351,10 @@ export class PlaybackUrlResolver {
         if (cached.expiresAt > Date.now()) return cached.result
         this.cache.delete(cacheKey)
       }
+      // 无代际的请求（预取）不会被新播放取消，任何请求都可以等它；
+      // 带代际的请求只能共享同一代际，旧代际的请求随时会被后端作废
       const existing = this.inFlight.get(cacheKey)
-      if (existing && existing.requestGeneration === options.requestGeneration) {
+      if (existing && (existing.requestGeneration === undefined || existing.requestGeneration === options.requestGeneration)) {
         return existing.promise
       }
     }
