@@ -108,6 +108,7 @@ async function runtime(options = {}) {
     '@/i18n': { default: { global: { t: key => key } } },
     '@/modules/playback/playbackSource': playback,
     '@/modules/playback/playbackFailure': failure,
+    '@/modules/playback/playedQualityMemory': { rememberPlayedQuality() {}, recallPlayedQuality: async () => null },
     '@/modules/playback/playbackPrefetch': { playbackPrefetchManager: { replacePlaybackDemand() {}, take: () => null, prefetchWindow() {} } },
     '@/modules/playback/playbackPolicy': { ...policy, PlaybackStartupWatchdog: class { cancel() {} schedule() {} } },
     '@/modules/playback/playbackQueue': queue,

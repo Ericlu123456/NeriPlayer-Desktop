@@ -259,20 +259,34 @@ try {
     now += 11_000
     assert.equal(manager.take(youtube, settings), null)
   })
-  await run('NetEase uses actual returned quality and verifies song identity', async () => {
+  await run('NetEase reports the actual quality, keys the cache by the preferred one and verifies song identity', async () => {
     const track = { ...youtube, id: 'netease:123', source: 'netease' }
-    globalThis.__cacheInvoke = async () => ({ url: 'https://m.music.126.net/audio', format: 'flac', bitrate: 999_000, level: 'lossless', song_id: 123 })
-    const result = await new source.PlaybackUrlResolver().resolve(track, settings)
-    assert.equal(result.qualityKey, 'lossless')
+    globalThis.__cacheInvoke = async () => ({ url: 'https://m.music.126.net/audio', format: 'flac', bitrate: 999_000, level: 'exhigh', song_id: 123 })
+    const preferLossless = { ...settings, neteaseQuality: 'lossless' }
+    const result = await new source.PlaybackUrlResolver().resolve(track, preferLossless)
+    assert.equal(result.qualityKey, 'exhigh')
+    assert.equal(result.audioInfo.qualityKey, 'exhigh')
     assert.match(result.cacheKey, /-lossless$/)
+    assert.equal(source.playbackCacheWriteOptions(result, 0).cacheKey, source.playbackCacheReadCandidates(track, preferLossless)[0].cacheKey)
     globalThis.__cacheInvoke = async () => ({ url: 'https://m.music.126.net/wrong', format: 'mp3', bitrate: 128_000, song_id: 999 })
     assert.equal((await new source.PlaybackUrlResolver().resolve(track, settings)).type, 'failure')
   })
-  await run('Bilibili uses the actual stream quality and matching cache key', async () => {
-    globalThis.__cacheInvoke = async () => ({ url: 'https://a.bilivideo.com/audio', bandwidth: 192_000, codecs: 'mp4a.40.2', quality_key: 'high', mime_type: 'audio/mp4' })
-    const result = await new source.PlaybackUrlResolver().resolve({ ...youtube, id: 'bilibili:BV1test', source: 'bilibili', album: 'Bilibili|42' }, { ...settings, biliQuality: 'lossless' })
+  await run('Bilibili caches under the key it reads, even when a lower stream played', async () => {
+    const biliTrack = { ...youtube, id: 'bilibili:BV1test', source: 'bilibili', album: 'Bilibili|42' }
+    const preferLossless = { ...settings, biliQuality: 'lossless' }
+    globalThis.__cacheInvoke = async () => ({
+      url: 'https://a.bilivideo.com/audio', bandwidth: 192_000, codecs: 'mp4a.40.2', quality_key: 'high', mime_type: 'audio/mp4',
+      candidates: [
+        { url: 'https://a.bilivideo.com/audio', bandwidth: 192_000, codecs: 'mp4a.40.2', quality_key: 'high', mime_type: 'audio/mp4' },
+        { url: 'https://b.bilivideo.com/audio', bandwidth: 132_000, codecs: 'mp4a.40.2', quality_key: 'medium', mime_type: 'audio/mp4' },
+      ],
+    })
+    const result = await new source.PlaybackUrlResolver().resolve(biliTrack, preferLossless)
     assert.equal(result.qualityKey, 'high')
-    assert.match(result.cacheKey, /-high$/)
+    assert.match(result.cacheKey, /-lossless$/)
+    assert.equal(result.cacheKey, source.playbackCacheReadCandidates(biliTrack, preferLossless)[0].cacheKey)
+    // 切换列表只列出这条视频实际提供的音质
+    assert.deepEqual(result.audioInfo.qualityOptions.map(option => option.key), ['high', 'medium'])
   })
   await run('Bilibili quality fallback displays and caches the candidate that actually played', async () => {
     globalThis.__cacheInvoke = async () => ({
@@ -284,8 +298,18 @@ try {
     assert.equal(selected.url, 'https://b.bilivideo.com/aac')
     assert.equal(selected.audioInfo.qualityKey, 'medium')
     assert.equal(selected.audioInfo.codecLabel, 'AAC')
-    assert.match(source.playbackCacheWriteOptions(resolved, 1).cacheKey, /-medium$/)
+    assert.match(source.playbackCacheWriteOptions(resolved, 1).cacheKey, /-dolby$/)
     assert.equal(resolved.audioInfo.qualityKey, 'dolby')
+  })
+  await run('YouTube labels the stream by its actual bitrate but keys the cache by preference', async () => {
+    globalThis.__cacheInvoke = async () => [{ url: 'https://rr.googlevideo.com/aac128', bitrate: 128_000, mime_type: 'audio/mp4' }]
+    const preferVeryHigh = { ...settings, youtubeQuality: 'very_high' }
+    const result = await new source.PlaybackUrlResolver().resolve(youtube, preferVeryHigh)
+    assert.equal(result.audioInfo.qualityKey, 'high')
+    assert.match(result.cacheKey, /-very_high$/)
+    assert.equal(source.youtubeQualityFromBitrate(160_000), 'very_high')
+    assert.equal(source.youtubeQualityFromBitrate(96_000), 'medium')
+    assert.equal(source.youtubeQualityFromBitrate(48_000), 'low')
   })
   await run('HLS recovery bypasses direct links and carries an explicit stream type', async () => {
     globalThis.__cacheInvoke = async (_, args) => {

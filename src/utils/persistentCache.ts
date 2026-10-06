@@ -6,7 +6,7 @@
 import { invoke } from '@tauri-apps/api/core'
 import { hasUserDataBackend, persistUserData } from '@/modules/persistence/userData'
 
-export type CacheBucket = 'platform_detail' | 'lyrics'
+export type CacheBucket = 'platform_detail' | 'lyrics' | 'playback_quality'
 
 export interface CacheOptions {
   maxAgeMs: number

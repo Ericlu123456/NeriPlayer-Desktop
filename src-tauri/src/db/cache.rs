@@ -11,8 +11,10 @@ use crate::error::{AppError, AppResult};
 pub const PLATFORM_DETAIL_BUCKET: &str = "platform_detail";
 /// 解析后的歌词行
 pub const LYRICS_BUCKET: &str = "lyrics";
+/// 音频缓存按首选音质建键；这里记下该键实际播放的音质，缓存命中时据此展示
+pub const PLAYBACK_QUALITY_BUCKET: &str = "playback_quality";
 
-const ALLOWED_BUCKETS: &[&str] = &[PLATFORM_DETAIL_BUCKET, LYRICS_BUCKET];
+const ALLOWED_BUCKETS: &[&str] = &[PLATFORM_DETAIL_BUCKET, LYRICS_BUCKET, PLAYBACK_QUALITY_BUCKET];
 /// 单桶字节上限的硬顶，防止前端传入异常值让缓存无限增长
 const MAX_BUCKET_BYTES: i64 = 256 * 1024 * 1024;
 

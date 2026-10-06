@@ -106,7 +106,9 @@ await run('continues below preview quality and selects the first full resource',
   assert.equal(resolved?.qualityKey, 'higher')
   assert.equal(resolved?.isPreview, false)
   assert.equal(resolved?.expectedContentLength, 4_800_000)
-  assert.match(resolved?.cacheKey ?? '', /-higher$/)
+  // 降级到 higher 播放，但缓存仍按首选 exhigh 建键，下次同样的设置能直接命中（对齐 Android）
+  assert.match(resolved?.cacheKey ?? '', /-exhigh$/)
+  assert.equal(resolved?.cacheKey, playbackCacheReadCandidates(track(101), settings)[0].cacheKey)
 })
 
 await run('keeps only the final preview fallback and forbids formal cache writes', async () => {
@@ -131,7 +133,7 @@ await run('keeps only the final preview fallback and forbids formal cache writes
   assert.deepEqual(playbackCacheWriteOptions(resolved, 0), {})
 })
 
-await run('candidate streams use isolated formal cache keys', async () => {
+await run('candidate streams share the preferred-quality cache key', async () => {
   const resolved = {
     type: 'success',
     url: 'https://audio.example/primary',
@@ -150,16 +152,17 @@ await run('candidate streams use isolated formal cache keys', async () => {
   assert.deepEqual(
     playbackCacheWriteOptions(resolved, 1, resolved.candidateUrls[0]),
     {
-      cacheKey: 'resolved-cache|candidate:1',
+      cacheKey: 'resolved-cache',
     },
   )
 })
 
-await run('cache-first keys match resolution keys and include NetEase fallbacks', async () => {
+await run('cache-first reads only the preferred-quality key', async () => {
   const neteaseCandidates = playbackCacheReadCandidates(track(105), settings)
+  // 不再沿音质阶梯往下读：调高音质后不能继续命中旧的低音质副本
   assert.deepEqual(
     neteaseCandidates.map(candidate => candidate.qualityKey),
-    ['exhigh', 'higher', 'standard'],
+    ['exhigh'],
   )
 
   const biliTrack = {

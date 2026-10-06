@@ -36,6 +36,7 @@ import {
   shouldThrottlePlaybackRefresh,
 } from '@/modules/playback/playbackFailure'
 import { genericUrlPrefetchTtlMs, playbackPrefetchManager } from '@/modules/playback/playbackPrefetch'
+import { recallPlayedQuality, rememberPlayedQuality } from '@/modules/playback/playedQualityMemory'
 import {
   PlaybackStartupWatchdog,
   resolvePlaybackFailureAdvanceAction,
@@ -1385,7 +1386,9 @@ export const usePlayerStore = defineStore('player', () => {
               retryable: true,
             }))
           : null
-        const cacheCandidates = playbackCacheReadCandidates(track, playbackSourceSettings())
+        // 强制重新解析（切换音质、断流恢复）不读缓存，否则会重播刚要替换掉的那份副本
+        const qualityMemoryKey = playbackCacheReadCandidates(track, playbackSourceSettings())[0]?.cacheKey ?? ''
+        const cacheCandidates = forceResolve ? [] : playbackCacheReadCandidates(track, playbackSourceSettings())
         tracePlaybackUi(
           'remote_pipeline_start',
           track,
@@ -1423,6 +1426,18 @@ export const usePlayerStore = defineStore('player', () => {
               qualityLabel: qualityLabelFromKey(cached.source, cached.qualityKey),
               qualityOptions: qualityOptionsFromSource(cached.source),
             }
+            // 缓存键是首选音质，实际写入的可能是降级流：换成记录下来的实际音质
+            void recallPlayedQuality(qualityMemoryKey).then((played) => {
+              if (!played?.qualityKey || token !== playbackRequestToken || !audioInfo.value) return
+              audioInfo.value = {
+                ...audioInfo.value,
+                qualityKey: played.qualityKey,
+                qualityLabel: qualityLabelFromKey(cached.source, played.qualityKey),
+                codec: audioInfo.value.codec ?? played.codecLabel,
+                bitrate: audioInfo.value.bitrate ?? played.bitrateKbps,
+                mimeType: audioInfo.value.mimeType ?? played.mimeType,
+              }
+            })
             tracePlaybackUi(
               'cache_lookup_hit',
               track,
@@ -1570,6 +1585,14 @@ export const usePlayerStore = defineStore('player', () => {
           if (token !== playbackRequestToken) return
           // 直链（一起听）也标记 isPreview 以免进缓存，不能据此提示试听
           playingPreviewClip = result.source === 'netease' && result.isPreview === true && !result.cacheKey.endsWith('|direct')
+          if (!result.isPreview && result.source !== 'local') {
+            rememberPlayedQuality(qualityMemoryKey, {
+              qualityKey: result.audioInfo?.qualityKey ?? result.qualityKey,
+              codecLabel: result.audioInfo?.codecLabel ?? result.codec,
+              bitrateKbps: result.audioInfo?.bitrateKbps ?? normalizeBitrateKbps(result.bitrate),
+              mimeType: result.audioInfo?.mimeType,
+            })
+          }
           {
             const qKey = result.audioInfo?.qualityKey ?? result.qualityKey
             const rawLabel = result.audioInfo?.qualityLabel

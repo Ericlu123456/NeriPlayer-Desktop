@@ -126,6 +126,18 @@ const NETEASE_QUALITY_OPTIONS = NETEASE_QUALITY_FALLBACK_ORDER.map(key => ({
 const YOUTUBE_QUALITY_OPTIONS = ['low', 'medium', 'high', 'very_high']
   .map(key => ({ key, label: key }))
 
+const BILI_QUALITY_OPTION_ORDER = ['dolby', 'hires', 'lossless', 'high', 'medium', 'low']
+
+/** YouTube 的音质档位按实际码率判断（对齐 Android PlaybackAudioQualityPolicy） */
+export function youtubeQualityFromBitrate(bitrate?: number | null): string | undefined {
+  const kbps = normalizeBitrateKbps(bitrate)
+  if (!kbps) return undefined
+  if (kbps >= 160) return 'very_high'
+  if (kbps >= 128) return 'high'
+  if (kbps >= 96) return 'medium'
+  return 'low'
+}
+
 const RESOLUTION_TTL_MS = 90_000
 const YOUTUBE_RESOLUTION_TTL_MS = 8 * 60_000
 const SIGNED_URL_EXPIRY_MARGIN_MS = 90_000
@@ -264,16 +276,16 @@ export function playbackCacheReadCandidates(
   if (isDirectStreamUrl(track.audioUrl)) return []
   const adapter = getPlaybackSourceAdapter(track)
   if (!adapter) return []
-  const configuredQuality = adapter.qualityKey(settings).trim().toLowerCase()
-  const preferred = configuredQuality || (adapter.kind === 'netease' ? 'exhigh' : 'default')
-  const qualities = adapter.kind === 'netease'
-    ? neteaseQualityFallbacks(preferred)
-    : [preferred]
-  return qualities.flatMap(qualityKey => {
-    const cacheKey = stablePlaybackCacheKey(track, adapter.kind, qualityKey)
-    const keys = adapter.kind === 'youtube' ? [cacheKey, `${cacheKey}-hls`] : [cacheKey]
-    return keys.map(key => ({ cacheKey: key, source: adapter.kind, qualityKey }))
-  })
+  // 对齐 Android：缓存按「首选音质」建键，实际播放的流（含降级、候选）都写在这个键下，
+  // 读取也只读这一个键；调高音质后键随之变化，不会继续命中旧的低音质副本
+  const qualityKey = preferredCacheQuality(adapter.kind, adapter.qualityKey(settings))
+  const cacheKey = stablePlaybackCacheKey(track, adapter.kind, qualityKey)
+  const keys = adapter.kind === 'youtube' ? [cacheKey, `${cacheKey}-hls`] : [cacheKey]
+  return keys.map(key => ({ cacheKey: key, source: adapter.kind, qualityKey }))
+}
+
+function preferredCacheQuality(kind: PlaybackSourceKind, configured: string): string {
+  return configured.trim().toLowerCase() || (kind === 'netease' ? 'exhigh' : 'default')
 }
 
 export function playbackPrefetchCacheId(
@@ -469,11 +481,9 @@ export function playbackCacheWriteOptions(
   }
   const primaryCacheKey = resolved.cacheKeyOverride || resolved.cacheKey
   if (candidateIndex !== 0) {
-    return {
-      // 候选 URL 往往含短时签名，不能把完整 URL 写进键，否则每次刷新
-      // 都会生成永不复用的磁盘缓存文件（SR-08）
-      cacheKey: `${primaryCacheKey}|candidate:${candidateIndex}`,
-    }
+    // 候选流与主流同属首选音质，写进同一个稳定键（对齐 Android）；
+    // 不能把含短时签名的完整 URL 写进键，否则每次刷新都会生成永不复用的缓存文件（SR-08）
+    return { cacheKey: primaryCacheKey }
   }
   return {
     cacheKey: primaryCacheKey,
@@ -740,7 +750,7 @@ function resolveNetease(
         durationMs: result.duration_ms ?? undefined,
         isPreview: result.is_preview === true,
         qualityKey: actualQuality,
-        cacheKey: stablePlaybackCacheKey(track, 'netease', actualQuality),
+        cacheKey: stablePlaybackCacheKey(track, 'netease', preferred),
         audioInfo,
       })
       if (resolved.isPreview) {
@@ -910,11 +920,13 @@ function resolveBilibili(
       .filter(candidate => isDirectStreamUrl(candidate.url))
       .map(candidate => candidate.url)
     const actualQuality = result.quality_key || quality
+    const preferredKey = stablePlaybackCacheKey(track, 'bilibili', preferredCacheQuality('bilibili', quality))
     const mimeType = normalizeMimeType(result.mime_type) || mimeTypeForCodec(result.codecs)
     const codec = normalizeCodecName(result.codecs)
-    const availableQualityKeys = [quality, ...(result.candidates ?? [])
-      .map(candidate => candidate.quality_key || inferBiliQualityKey(candidate.bandwidth, candidate.codecs))
-    ].filter((key, index, values) => values.indexOf(key) === index)
+    // 只列出这条视频实际提供的音质（对齐 Android），首选音质不可用时不应出现在切换列表里
+    const offered = new Set([actualQuality, ...(result.candidates ?? [])
+      .map(candidate => candidate.quality_key || inferBiliQualityKey(candidate.bandwidth, candidate.codecs))])
+    const availableQualityKeys = BILI_QUALITY_OPTION_ORDER.filter(key => offered.has(key))
     return createSuccess(track, 'bilibili', settings, {
       url: result.url,
       candidateUrls: candidates.filter(url => url !== result.url),
@@ -923,7 +935,7 @@ function resolveBilibili(
         const candidateMime = normalizeMimeType(candidate.mime_type) || mimeTypeForCodec(candidate.codecs)
         const candidateCodec = normalizeCodecName(candidate.codecs)
         return {
-          url: candidate.url, qualityKey: key, cacheKey: stablePlaybackCacheKey(track, 'bilibili', key),
+          url: candidate.url, qualityKey: key, cacheKey: preferredKey,
           bitrate: candidate.bandwidth, codec: candidateCodec, mimeType: candidateMime,
           audioInfo: createAudioInfo('bilibili', key, candidateCodec, candidateMime, candidate.bandwidth),
         }
@@ -932,7 +944,7 @@ function resolveBilibili(
       codec,
       mimeType,
       qualityKey: actualQuality,
-      cacheKey: stablePlaybackCacheKey(track, 'bilibili', actualQuality),
+      cacheKey: preferredKey,
       audioInfo: {
         source: 'bilibili',
         qualityKey: actualQuality,
@@ -987,7 +999,7 @@ function resolveYoutube(
           streamType: stream.stream_type ?? 'direct',
           bitrate: stream.bitrate, codec: deriveCodecLabel(stream.mime_type), format: stream.mime_type,
           mimeType: normalizeMimeType(stream.mime_type), expectedContentLength: stream.content_length,
-          audioInfo: createAudioInfo('youtube', quality, deriveCodecLabel(stream.mime_type), normalizeMimeType(stream.mime_type), stream.bitrate),
+          audioInfo: createAudioInfo('youtube', youtubeQualityFromBitrate(stream.bitrate) ?? quality, deriveCodecLabel(stream.mime_type), normalizeMimeType(stream.mime_type), stream.bitrate),
         })),
         bitrate: primary.bitrate,
         codec,
@@ -998,8 +1010,8 @@ function resolveYoutube(
         cacheKey: youtubeStreamCacheKey(track, quality, primary.stream_type),
         audioInfo: {
           source: 'youtube',
-          qualityKey: quality,
-          qualityLabel: quality,
+          qualityKey: youtubeQualityFromBitrate(primary.bitrate) ?? quality,
+          qualityLabel: youtubeQualityFromBitrate(primary.bitrate) ?? quality,
           qualityOptions: YOUTUBE_QUALITY_OPTIONS,
           codecLabel: codec,
           mimeType,

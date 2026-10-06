@@ -1446,9 +1446,16 @@ const currentSource = computed(() => {
   if (id.startsWith('youtube:')) return 'youtube'
   return 'local'
 })
+// 音质列表按播放层报告的可选项过滤（B 站只列这条视频实际提供的音质）；只有一档时不显示切换（对齐 Android）
+const switchableQualities = computed(() => {
+  const all = qualityOptionsForSource(currentSource.value)
+  const info = player.audioInfo
+  const offered = info?.source === currentSource.value ? info.qualityOptions?.map(option => option.key) : undefined
+  return offered?.length ? all.filter(option => offered.includes(option.key)) : all
+})
 const canSwitchCurrentAudioQuality = computed(() => canSwitchAudioQuality({
   source: currentSource.value, fromDownload: player.isPlayingFromDownload, info: player.audioInfo,
-}))
+}) && switchableQualities.value.length > 1)
 watch(canSwitchCurrentAudioQuality, (canSwitch) => {
   if (!canSwitch && moreSheetView.value === 'quality') goBackToMain()
 })
@@ -2987,9 +2994,9 @@ const sliderActiveColor = computed(() => {
               </button>
               <h4 class="np-more-title">{{ t('player.quality_switch') }}</h4>
             </div>
-            <div v-if="canSwitchCurrentAudioQuality && qualityOptionsForSource(currentSource).length" class="np-more-quality-list">
+            <div v-if="canSwitchCurrentAudioQuality" class="np-more-quality-list">
               <button
-                v-for="q in qualityOptionsForSource(currentSource)"
+                v-for="q in switchableQualities"
                 :key="q.key"
                 class="np-more-quality-item"
                 :class="{ active: currentQualityKey() === q.key }"
