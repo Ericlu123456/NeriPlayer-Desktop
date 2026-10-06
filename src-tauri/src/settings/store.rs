@@ -121,7 +121,7 @@ impl Default for AppSettings {
             show_audio_codec: true,
             show_audio_spec: true,
             show_audio_bitrate: true,
-            show_audio_format: false,
+            show_audio_format: true,
             show_audio_channels: false,
             show_audio_sample_rate: false,
             show_audio_bit_depth: false,
@@ -510,10 +510,10 @@ fn non_empty_or_default(value: &str, fallback: &str) -> String {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn audio_display_settings_new_defaults_only_show_bitrate() {
+    fn audio_display_settings_new_defaults_show_bitrate_and_format() {
         let settings: AppSettings = serde_json::from_str("{}").expect("new settings");
         assert!(settings.show_audio_bitrate);
-        assert!(!settings.show_audio_format);
+        assert!(settings.show_audio_format);
         assert!(!settings.show_audio_channels);
         assert!(!settings.show_audio_sample_rate);
         assert!(!settings.show_audio_bit_depth);

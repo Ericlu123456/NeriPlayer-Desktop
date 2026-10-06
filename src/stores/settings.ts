@@ -120,7 +120,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   showAudioCodec: true,
   showAudioSpec: true,
   showAudioBitrate: true,
-  showAudioFormat: false,
+  showAudioFormat: true,
   showAudioChannels: false,
   showAudioSampleRate: false,
   showAudioBitDepth: false,

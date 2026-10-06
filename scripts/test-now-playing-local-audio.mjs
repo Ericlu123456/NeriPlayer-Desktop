@@ -84,7 +84,7 @@ const downloadIndicator = downloadRender({ displayedAudioInfo: { fromDownload: t
 const visibleText = node => typeof node === 'string' ? node
   : typeof node.children === 'string' ? node.children
     : Array.isArray(node.children) ? node.children.map(visibleText).join('') : ''
-assert.equal(visibleText(downloadIndicator).trim(), 'check', 'download playback indicator contains only a check icon')
+assert.equal(visibleText(downloadIndicator).trim(), 'download_done', 'download playback indicator contains only an underlined check icon')
 assert.equal(downloadIndicator.props.title, '正在播放下载')
 assert.equal(downloadIndicator.props['aria-label'], '正在播放下载')
 
@@ -98,7 +98,7 @@ const partFunctions = ['currentAudioQualityLabel', 'paperSpecFromAudioInfo', 'ad
   return declaration.getText(parsed)
 }).join('\n')
 const defaults = {
-  showAudioBitrate: true, showAudioFormat: false, showAudioChannels: false,
+  showAudioBitrate: true, showAudioFormat: true, showAudioChannels: false,
   showAudioSampleRate: false, showAudioBitDepth: false, showQualitySwitch: false,
   showAudioCodec: false, showAudioSpec: false,
 }
@@ -132,8 +132,10 @@ for (const playback of [
   display.currentSource.value = playback.source
   display.displayedAudioInfo.value = { info: fullInfo, fromDownload: playback.fromDownload }
   Object.assign(display.settings, defaults)
-  assert.deepEqual(labels(), ['318 kbps'], 'both local files and streams show only factual bitrate by default')
+  assert.deepEqual(labels(), ['318 kbps', 'MPEG'], 'both local files and streams show factual bitrate and format by default')
   display.settings.showAudioBitrate = false
+  assert.deepEqual(labels(), ['MPEG'], 'format remains visible when bitrate is disabled')
+  display.settings.showAudioFormat = false
   assert.deepEqual(labels(), [], 'bitrate must follow its independent visibility switch')
   for (const [setting, expected] of [
     ['showAudioFormat', 'MPEG'], ['showAudioChannels', '2 ch'],

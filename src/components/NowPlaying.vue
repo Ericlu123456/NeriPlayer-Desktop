@@ -2155,7 +2155,7 @@ const sliderActiveColor = computed(() => {
             <span v-if="displayedAudioInfo.fromDownload" class="np-download-chip"
               role="img"
               :title="t('player.playing_from_download')" :aria-label="t('player.playing_from_download')">
-              <span class="material-symbols-rounded" aria-hidden="true">check</span>
+              <span class="material-symbols-rounded" aria-hidden="true">download_done</span>
             </span>
             <span v-if="audioInfoParts.length" class="np-audio-detail" :class="{ separated: displayedAudioInfo.fromDownload }">
               <template v-for="(part, index) in audioInfoParts" :key="`${part.text}:${index}`">

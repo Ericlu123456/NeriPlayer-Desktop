@@ -58,11 +58,11 @@ async function regression(name, run) {
   }
 }
 
-await regression('new installations display only bitrate by default', async store => {
+await regression('new installations display bitrate and format by default', async store => {
   await store.hydrate()
   for (const key of granularKeys) {
-    assert.equal(store[key], key === 'showAudioBitrate', key)
-    assert.equal(saved[0][key], key === 'showAudioBitrate', key)
+    assert.equal(store[key], key === 'showAudioBitrate' || key === 'showAudioFormat', key)
+    assert.equal(saved[0][key], key === 'showAudioBitrate' || key === 'showAudioFormat', key)
   }
   assert.equal(store.showQualitySwitch, false)
   assert.equal(saved[0].showQualitySwitch, false)
@@ -149,7 +149,7 @@ await regression('malformed display flags cannot enable hidden details', store =
     showAudioBitrate: 'false', showAudioFormat: 'true', showAudioChannels: 1,
     showAudioSampleRate: null, showAudioBitDepth: [], showQualitySwitch: 'true',
   })
-  for (const key of granularKeys) assert.equal(store[key], key === 'showAudioBitrate', key)
+  for (const key of granularKeys) assert.equal(store[key], key === 'showAudioBitrate' || key === 'showAudioFormat', key)
   assert.equal(store.showQualitySwitch, false)
 })
 
