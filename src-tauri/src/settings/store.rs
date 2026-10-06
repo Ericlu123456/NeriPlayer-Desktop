@@ -6,7 +6,10 @@ use crate::error::{AppError, AppResult};
 
 pub const SETTINGS_FORMAT_VERSION: u32 = 1;
 pub const SETTINGS_STORE_FILE: &str = "settings.json";
-pub const DEFAULT_DOWNLOAD_NAME_TEMPLATE: &str = "{source} - {artist} - {title}";
+pub const DEFAULT_DOWNLOAD_NAME_TEMPLATE: &str = "%title% - %artist% - %album% - %source%";
+pub const MIN_DOWNLOAD_PARALLELISM: i32 = 1;
+pub const MAX_DOWNLOAD_PARALLELISM: i32 = 8;
+pub const DEFAULT_DOWNLOAD_PARALLELISM: i32 = 6;
 pub const MIN_MEDIA_CACHE_SIZE_MB: i32 = 256;
 pub const MAX_MEDIA_CACHE_SIZE_MB: i32 = 512 * 1024;
 
@@ -76,6 +79,14 @@ pub struct AppSettings {
     pub max_cache_size: i32,
     pub download_name_template: String,
     pub download_dir: String,
+    pub download_parallelism: i32,
+    pub download_auto_fill_metadata: bool,
+    pub download_embed_lyrics: bool,
+    pub download_follow_playback_quality: bool,
+    pub download_netease_quality: String,
+    pub download_qq_music_quality: String,
+    pub download_youtube_quality: String,
+    pub download_bili_quality: String,
     pub lt_server_url: String,
     pub lt_nickname: String,
     pub lt_allow_member_control: bool,
@@ -146,6 +157,14 @@ impl Default for AppSettings {
             max_cache_size: 1024,
             download_name_template: DEFAULT_DOWNLOAD_NAME_TEMPLATE.into(),
             download_dir: String::new(),
+            download_parallelism: DEFAULT_DOWNLOAD_PARALLELISM,
+            download_auto_fill_metadata: true,
+            download_embed_lyrics: false,
+            download_follow_playback_quality: true,
+            download_netease_quality: "exhigh".into(),
+            download_qq_music_quality: "high".into(),
+            download_youtube_quality: "high".into(),
+            download_bili_quality: "high".into(),
             lt_server_url: "https://neriplayer.hancat.work".into(),
             lt_nickname: String::new(),
             lt_allow_member_control: true,
@@ -198,6 +217,9 @@ impl AppSettings {
         self.max_cache_size = self
             .max_cache_size
             .clamp(MIN_MEDIA_CACHE_SIZE_MB, MAX_MEDIA_CACHE_SIZE_MB);
+        self.download_parallelism = self
+            .download_parallelism
+            .clamp(MIN_DOWNLOAD_PARALLELISM, MAX_DOWNLOAD_PARALLELISM);
         self.volume = clamp_f32(self.volume, 0.0, 1.0, 1.0);
         self.playback_speed = clamp_f32(self.playback_speed, 0.25, 3.0, 1.0);
         self.loudness_gain_mb = self.loudness_gain_mb.clamp(0, 1_500);
@@ -234,6 +256,38 @@ impl AppSettings {
         );
         self.youtube_playback_source =
             normalize_youtube_playback_source(&self.youtube_playback_source);
+        if self.download_netease_quality.trim() == "high" {
+            self.download_netease_quality = "higher".into();
+        }
+        self.download_netease_quality = normalize_choice(
+            &self.download_netease_quality,
+            &[
+                "standard",
+                "higher",
+                "exhigh",
+                "lossless",
+                "hires",
+                "jyeffect",
+                "sky",
+                "jymaster",
+            ],
+            "exhigh",
+        );
+        self.download_qq_music_quality = normalize_choice(
+            &self.download_qq_music_quality,
+            &["standard", "high", "lossless"],
+            "high",
+        );
+        self.download_youtube_quality = normalize_choice(
+            &self.download_youtube_quality,
+            &["low", "medium", "high", "very_high"],
+            "high",
+        );
+        self.download_bili_quality = normalize_choice(
+            &self.download_bili_quality,
+            &["low", "medium", "high", "dolby", "lossless", "hires"],
+            "high",
+        );
         self.equalizer_preset_id = normalize_equalizer_preset(&self.equalizer_preset_id);
         self.log_level = normalize_choice(
             &self.log_level,
@@ -414,6 +468,68 @@ fn non_empty_or_default(value: &str, fallback: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn download_settings_adopt_android_defaults_for_old_snapshots() {
+        let settings: AppSettings = serde_json::from_str("{}").expect("old settings");
+        assert_eq!(settings.download_parallelism, 6);
+        assert!(settings.download_auto_fill_metadata);
+        assert!(!settings.download_embed_lyrics);
+        assert!(settings.download_follow_playback_quality);
+        assert_eq!(settings.download_netease_quality, "exhigh");
+        assert_eq!(settings.download_youtube_quality, "high");
+        assert_eq!(settings.download_bili_quality, "high");
+        assert_eq!(
+            settings.download_name_template,
+            "%title% - %artist% - %album% - %source%"
+        );
+    }
+
+    #[test]
+    fn download_settings_normalize_and_round_trip() {
+        let settings: AppSettings = serde_json::from_value(serde_json::json!({
+            "downloadParallelism": 99,
+            "downloadAutoFillMetadata": false,
+            "downloadEmbedLyrics": true,
+            "downloadFollowPlaybackQuality": false,
+            "downloadNeteaseQuality": " lossless ",
+            "downloadYoutubeQuality": "invalid",
+            "downloadBiliQuality": "hires",
+            "downloadNameTemplate": " {artist} - {title} ",
+            "downloadDir": " E:\\Music ",
+        }))
+        .expect("download settings");
+        let json = serde_json::to_value(settings.normalized()).expect("settings");
+        assert_eq!(json["downloadParallelism"], 8);
+        assert_eq!(json["downloadAutoFillMetadata"], false);
+        assert_eq!(json["downloadEmbedLyrics"], true);
+        assert_eq!(json["downloadFollowPlaybackQuality"], false);
+        assert_eq!(json["downloadNeteaseQuality"], "lossless");
+        assert_eq!(json["downloadYoutubeQuality"], "high");
+        assert_eq!(json["downloadBiliQuality"], "hires");
+        assert_eq!(json["downloadNameTemplate"], "{artist} - {title}");
+        assert_eq!(json["downloadDir"], "E:\\Music");
+        let restored: AppSettings = serde_json::from_value(json.clone()).expect("restored settings");
+        assert_eq!(serde_json::to_value(restored).expect("restored JSON"), json);
+        let mut settings = AppSettings {
+            download_parallelism: 0,
+            ..AppSettings::default()
+        };
+        settings.normalize();
+        assert_eq!(settings.download_parallelism, 1);
+    }
+
+    #[test]
+    fn download_netease_quality_alias_normalizes_to_android_canonical_value() {
+        for value in ["high", " high ", "higher", " higher "] {
+            let mut settings = AppSettings {
+                download_netease_quality: value.into(),
+                ..AppSettings::default()
+            };
+            settings.normalize();
+            assert_eq!(settings.download_netease_quality, "higher");
+        }
+    }
+
     #[test]
     fn android_alignment_output_device_settings_are_backward_compatible() {
         let mut settings: AppSettings = serde_json::from_str("{}").expect("old settings");

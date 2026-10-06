@@ -16,6 +16,8 @@ import {
   type ContextMenuPosition,
 } from '@/utils/contextMenu'
 import { createLogger } from '@/utils/logger'
+import { useSettingsStore } from '@/stores/settings'
+import CustomSelect from '@/components/ui/CustomSelect.vue'
 
 const log = createLogger('downloads-view')
 
@@ -23,13 +25,25 @@ const { t } = useI18n()
 const downloadStore = useDownloadStore()
 const player = usePlayerStore()
 const toast = useToastStore()
+const settings = useSettingsStore()
+const props = defineProps<{ embedded?: boolean; searchQuery?: string }>()
 
-const searchQuery = ref('')
+const ownSearchQuery = ref('')
+const searchQuery = computed({
+  get: () => props.searchQuery ?? ownSearchQuery.value,
+  set: value => { ownSearchQuery.value = value },
+})
+const sortBy = ref('date')
+const sortDescending = ref(true)
+const sortOptions = computed(() => ['date', 'title', 'artist', 'size'].map(value => ({ value, label: t(`download.sort_${value}`) })))
+const parallelism = computed({ get: () => String(settings.downloadParallelism), set: value => { settings.downloadParallelism = Number(value) } })
+const parallelismOptions = Array.from({ length: 8 }, (_, index) => ({ value: String(index + 1), label: String(index + 1) }))
 const selectionMode = ref(false)
 const selectedIds = ref<Set<string>>(new Set())
 const showDeleteDialog = ref(false)
 const deleteTarget = ref<DownloadedTrack | null>(null)
 const batchDeleting = ref(false)
+const deletionProgress = ref({ done: 0, total: 0, failed: 0 })
 
 type DownloadContextTarget =
   | { kind: 'downloaded'; track: DownloadedTrack }
@@ -40,12 +54,18 @@ const downloadContextMenuPosition = ref<ContextMenuPosition>({ x: 0, y: 0 })
 const downloadContextMenuTarget = ref<DownloadContextTarget | null>(null)
 
 onMounted(() => {
-  downloadStore.initEvents()
+  void downloadStore.initEvents().catch(error => log.error('Download listener failed:', error))
   downloadStore.loadDownloads()
 })
 
 const sortedDownloads = computed(() => {
-  return [...downloadStore.downloads].sort((a, b) => (b.downloadedAt || 0) - (a.downloadedAt || 0))
+  return [...downloadStore.downloads].sort((a, b) => {
+    const order = sortBy.value === 'title' ? a.title.localeCompare(b.title)
+      : sortBy.value === 'artist' ? a.artist.localeCompare(b.artist)
+      : sortBy.value === 'size' ? a.fileSize - b.fileSize
+      : (a.downloadedAt || 0) - (b.downloadedAt || 0)
+    return sortDescending.value ? -order : order
+  })
 })
 
 const filteredDownloads = computed(() => {
@@ -58,9 +78,13 @@ const filteredDownloads = computed(() => {
   })
 })
 
-const activeTasks = computed(() => downloadStore.activeDownloads)
+const activeTasks = computed(() => {
+  const query = searchQuery.value.trim().toLowerCase()
+  return downloadStore.activeDownloads.filter(task => !query || [task.title, task.artist, task.source].some(value => value.toLowerCase().includes(query)))
+})
 const downloadedCount = computed(() => downloadStore.downloads.length)
-const activeCount = computed(() => activeTasks.value.length)
+const activeCount = computed(() => downloadStore.runningDownloadCount)
+const finishedTaskCount = computed(() => downloadStore.activeDownloads.length - activeCount.value)
 const totalSize = computed(() => downloadStore.downloads.reduce((sum, item) => sum + (item.fileSize || 0), 0))
 const selectedCount = computed(() => selectedIds.value.size)
 const selectableVisibleDownloads = computed(() => filteredDownloads.value.filter(item => !isTrackInUse(item)))
@@ -83,7 +107,10 @@ const downloadContextMenuItems = computed<readonly ContextMenuItem[]>(() => {
   if (!target) return []
 
   if (target.kind === 'active') {
-    const canCancel = target.task.status === 'resolving' || target.task.status === 'downloading'
+    if (target.task.status === 'error' || target.task.status === 'cancelled') {
+      return [createContextMenuItem(t('download.retry'), { id: 'retry', icon: 'refresh' })]
+    }
+    const canCancel = downloadStore.isDownloading(target.task.trackId)
     return [createContextMenuItem(t('download.cancel_task'), {
       id: 'cancel',
       icon: 'close',
@@ -157,6 +184,8 @@ function sourceLabel(source?: string): string {
 
 function statusIcon(task: ActiveDownloadTask): string {
   switch (task.status) {
+    case 'queued': return 'hourglass_top'
+    case 'processing': return 'edit_note'
     case 'resolving': return 'network_node'
     case 'cancelling': return 'hourglass_top'
     case 'cancelled': return 'cancel'
@@ -168,6 +197,8 @@ function statusIcon(task: ActiveDownloadTask): string {
 
 function activeDownloadStatusText(status: string) {
   switch (status) {
+    case 'queued': return t('download.queued')
+    case 'processing': return t('download.processing')
     case 'resolving': return t('download.resolving')
     case 'cancelling': return t('download.cancelling')
     case 'cancelled': return t('download.cancelled')
@@ -178,7 +209,7 @@ function activeDownloadStatusText(status: string) {
 }
 
 function activeDownloadProgressText(task: ActiveDownloadTask) {
-  if (task.status === 'resolving' || task.status === 'cancelling' || task.status === 'cancelled' || task.status === 'already_exists') {
+  if (['queued', 'resolving', 'processing', 'cancelling', 'cancelled', 'already_exists'].includes(task.status)) {
     return activeDownloadStatusText(task.status)
   }
   if (task.status === 'error') {
@@ -191,9 +222,10 @@ function activeDownloadProgressText(task: ActiveDownloadTask) {
   const total = typeof task.totalBytes === 'number' && task.totalBytes > 0 ? formatFileSize(task.totalBytes) : ''
   const percent = typeof task.progress === 'number' ? `${task.progress}%` : ''
 
-  if (downloaded && total && percent) return `${downloaded} / ${total} · ${percent}`
-  if (downloaded && total) return `${downloaded} / ${total}`
-  if (downloaded && percent) return `${downloaded} · ${percent}`
+  const speed = task.speedBytesPerSecond ? ` · ${formatFileSize(task.speedBytesPerSecond)}/s` : ''
+  if (downloaded && total && percent) return `${downloaded} / ${total} · ${percent}${speed}`
+  if (downloaded && total) return `${downloaded} / ${total}${speed}`
+  if (downloaded) return `${downloaded}${percent ? ` · ${percent}` : ''}${speed}`
   return activeDownloadStatusText(task.status)
 }
 
@@ -252,6 +284,7 @@ function handleDownloadContextMenuClick(item: ContextMenuActionItem) {
 
   if (target.kind === 'active') {
     if (item.id === 'cancel') void downloadStore.cancelDownload(target.task.trackId)
+    if (item.id === 'retry') downloadStore.retryDownload(target.task.trackId)
     return
   }
 
@@ -333,22 +366,41 @@ function requestBatchDelete() {
 async function confirmDelete() {
   if (batchDeleting.value) return
   batchDeleting.value = true
+  deletionProgress.value = { done: 0, total: deleteTarget.value ? 1 : selectedCount.value, failed: 0 }
   try {
     if (deleteTarget.value) {
       const target = deleteTarget.value
+      if (isTrackInUse(target)) {
+        toast.show(t('download.in_use_hint'), 'info')
+        return
+      }
       await downloadStore.deleteDownload(target.id)
       player.handleDownloadedFileRemoved(target.id, target.filePath)
     } else {
       const targets = downloadStore.downloads.filter(track => selectedIds.value.has(track.id) && !isTrackInUse(track))
+      let deleted = 0
       for (const target of targets) {
-        await downloadStore.deleteDownload(target.id, { silent: true })
-        player.handleDownloadedFileRemoved(target.id, target.filePath)
+        try {
+          if (isTrackInUse(target)) throw new Error(t('download.in_use_hint'))
+          await downloadStore.deleteDownload(target.id, { silent: true })
+          player.handleDownloadedFileRemoved(target.id, target.filePath)
+          deleted++
+        } catch (error) {
+          deletionProgress.value.failed++
+          log.error('Delete selected download failed:', error)
+        } finally {
+          deletionProgress.value.done++
+        }
       }
-      if (targets.length > 0) toast.success(t('download.batch_deleted', { count: targets.length }))
-      leaveSelectionMode()
+      if (deleted > 0) toast.success(t('download.batch_deleted', { count: deleted }))
+      if (deletionProgress.value.failed > 0) {
+        toast.error(t('download.deletion_failed', { count: deletionProgress.value.failed }))
+      } else leaveSelectionMode()
     }
     showDeleteDialog.value = false
     deleteTarget.value = null
+  } catch (error) {
+    toast.error(String(error))
   } finally {
     batchDeleting.value = false
   }
@@ -360,7 +412,11 @@ async function redownloadTrack(track: DownloadedTrack) {
     return
   }
   player.handleDownloadedFileRemoved(track.id, track.filePath)
-  await downloadStore.redownloadTrack(downloadToTrack(track))
+  try {
+    await downloadStore.redownloadTrack(downloadToTrack(track))
+  } catch (error) {
+    toast.error(String(error))
+  }
 }
 
 async function revealDownloadFile(track: DownloadedTrack) {
@@ -377,22 +433,25 @@ async function refreshDownloads() {
 }
 
 function progressWidth(task: ActiveDownloadTask) {
+  if (task.status === 'queued') return '0%'
   if (task.status === 'cancelled' || task.status === 'already_exists') return '100%'
   return `${Math.max(4, task.progress ?? 0)}%`
 }
 </script>
 
 <template>
-  <div class="downloads-view">
+  <div class="downloads-view" :class="{ embedded }">
     <header class="downloads-header">
-      <button class="back-btn" :title="t('download.back')" @click="$router.back()">
+      <button v-if="!embedded" class="back-btn" :title="t('download.back')" @click="$router.back()">
         <span class="material-symbols-rounded">arrow_back</span>
       </button>
       <div class="header-copy">
-        <h1>{{ t('download.manager_title') }}</h1>
+        <h1 v-if="!embedded">{{ t('download.manager_title') }}</h1>
         <p>{{ summaryText }}</p>
       </div>
       <div class="header-actions">
+        <button v-if="finishedTaskCount > 0" class="text-button" @click="downloadStore.clearFinishedTasks()">{{ t('download.clear_finished') }}</button>
+        <label class="parallelism-control"><span>{{ t('settings.download_parallelism') }}</span><CustomSelect v-model="parallelism" :options="parallelismOptions" :label="t('settings.download_parallelism')" /></label>
         <button class="icon-button" :title="t('download.refresh')" @click="refreshDownloads">
           <span class="material-symbols-rounded">refresh</span>
         </button>
@@ -432,18 +491,25 @@ function progressWidth(task: ActiveDownloadTask) {
             <div
               class="progress-track"
               :class="{
-                indeterminate: task.status === 'downloading' && !task.totalBytes,
+                indeterminate: task.status === 'processing' || task.status === 'resolving' || (task.status === 'downloading' && !task.totalBytes),
                 error: task.status === 'error',
-                muted: task.status === 'cancelling' || task.status === 'cancelled' || task.status === 'already_exists',
+                muted: task.status === 'queued' || task.status === 'cancelling' || task.status === 'cancelled' || task.status === 'already_exists',
               }"
             >
               <div class="progress-fill" :style="{ width: progressWidth(task) }" />
             </div>
           </div>
           <button
+            v-if="task.status === 'error' || task.status === 'cancelled'"
+            class="icon-action"
+            :title="t('download.retry')"
+            @click="downloadStore.retryDownload(task.trackId)"
+          ><span class="material-symbols-rounded">refresh</span></button>
+          <button
+            v-else
             class="icon-action danger"
             :title="t('download.cancel_task')"
-            :disabled="task.status === 'cancelling' || task.status === 'cancelled' || task.status === 'error' || task.status === 'already_exists'"
+            :disabled="task.status === 'cancelling' || task.status === 'already_exists'"
             @click="downloadStore.cancelDownload(task.trackId)"
           >
             <span class="material-symbols-rounded">close</span>
@@ -459,7 +525,9 @@ function progressWidth(task: ActiveDownloadTask) {
           <p>{{ downloadedDesc }}</p>
         </div>
         <div class="toolbar-actions">
-          <div class="search-box">
+          <CustomSelect v-model="sortBy" :options="sortOptions" :label="t('download.sort')" />
+          <button class="icon-action" :title="t(sortDescending ? 'download.sort_ascending' : 'download.sort_descending')" @click="sortDescending = !sortDescending"><span class="material-symbols-rounded">{{ sortDescending ? 'south' : 'north' }}</span></button>
+          <div v-if="!embedded" class="search-box">
             <span class="material-symbols-rounded">search</span>
             <input v-model="searchQuery" :placeholder="t('download.search_placeholder')" />
             <button v-if="searchQuery" @click="searchQuery = ''">
@@ -564,6 +632,7 @@ function progressWidth(task: ActiveDownloadTask) {
           ? t('download.delete_confirm_msg', { name: deleteTarget.title })
           : t('download.batch_delete_msg', { count: selectedCount }) }}
       </p>
+      <p v-if="batchDeleting" role="status">{{ t('download.delete_progress', { done: deletionProgress.done, total: deletionProgress.total }) }}</p>
     </M3Dialog>
   </div>
 </template>
@@ -572,6 +641,18 @@ function progressWidth(task: ActiveDownloadTask) {
 .downloads-view {
   padding: 16px 28px 36px;
   max-width: 1180px;
+}
+
+.downloads-view.embedded {
+  padding: 0 0 24px;
+  max-width: none;
+}
+
+.parallelism-control {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
 }
 
 .icon-action {

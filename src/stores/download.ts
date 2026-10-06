@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import { ref, computed } from 'vue'
+import { ref, computed, watch } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import type { TrackInfo } from './player'
@@ -8,6 +8,7 @@ import { useToastStore } from './toast'
 import i18n from '@/i18n'
 import { createLogger } from '@/utils/logger'
 import { resolveDownloadSource } from '@/modules/playback/playbackSource'
+import { DownloadQueue } from '@/modules/download/downloadQueue'
 import {
   consumeResolvingCancellation,
   markResolvingTasksCancelled,
@@ -41,17 +42,26 @@ export interface ActiveDownloadTask {
   title: string
   artist: string
   source: string
-  status: 'resolving' | 'downloading' | 'cancelling' | 'cancelled' | 'error' | 'already_exists'
+  status: 'queued' | 'resolving' | 'downloading' | 'processing' | 'cancelling' | 'cancelled' | 'error' | 'already_exists'
   progress?: number
   downloadedBytes?: number
   totalBytes?: number
   message?: string
+  speedBytesPerSecond?: number
 }
 
 export const useDownloadStore = defineStore('download', () => {
   const downloads = ref<DownloadedTrack[]>([])
   const downloading = ref<Map<string, ActiveDownloadTask>>(new Map())
   const activeDownloads = computed(() => Array.from(downloading.value.values()))
+  const runningDownloadCount = computed(() => activeDownloads.value.filter(task =>
+    ['queued', 'resolving', 'downloading', 'processing', 'cancelling'].includes(task.status),
+  ).length)
+  const settings = useSettingsStore()
+  const queue = new DownloadQueue(() => settings.downloadParallelism)
+  const requestedTracks = new Map<string, TrackInfo>()
+  const speedSamples = new Map<string, { bytes: number; time: number }>()
+  watch(() => settings.downloadParallelism, () => queue.refresh())
 
   // resolving 阶段的请求 token 集合，后端尚无任务时先在前端取消（DL-7）
   const resolvingCancelled = new Set<string>()
@@ -59,14 +69,16 @@ export const useDownloadStore = defineStore('download', () => {
   const resolvingRequestTokens = new Map<string, string>()
 
   let eventsInitialized = false
+  let eventsReady: Promise<void> | null = null
   let eventsGeneration = 0
   const terminalCleanupTimers = new Map<string, ReturnType<typeof setTimeout>>()
 
   let unlistenProgress: (() => void) | null = null
   let unlistenDirFallback: (() => void) | null = null
+  let unlistenDownloadsChanged: (() => void) | null = null
 
   function initEvents() {
-    if (eventsInitialized) return
+    if (eventsInitialized) return eventsReady ?? Promise.resolve()
     eventsInitialized = true
     const generation = ++eventsGeneration
 
@@ -76,11 +88,14 @@ export const useDownloadStore = defineStore('download', () => {
       import.meta.hot.dispose(() => {
         if (eventsGeneration !== generation) return
         eventsInitialized = false
+        eventsReady = null
         eventsGeneration += 1
         unlistenProgress?.()
         unlistenDirFallback?.()
+        unlistenDownloadsChanged?.()
         unlistenProgress = null
         unlistenDirFallback = null
+        unlistenDownloadsChanged = null
       })
     }
 
@@ -91,7 +106,9 @@ export const useDownloadStore = defineStore('download', () => {
         const toast = useToastStore()
         const current = downloading.value.get(trackId)
 
-        if (status === 'start') {
+        if (status === 'queued' || status === 'processing') {
+          setTaskStatus(trackId, status)
+        } else if (status === 'start') {
           clearTerminalCleanup(trackId)
           downloading.value = new Map(downloading.value.set(trackId, {
             trackId,
@@ -109,6 +126,13 @@ export const useDownloadStore = defineStore('download', () => {
             ? Math.max(0, Math.min(100, Math.round((downloadedBytes || 0) / totalBytes * 100)))
             : undefined
 
+          const time = Date.now()
+          const sample = speedSamples.get(trackId)
+          const bytes = downloadedBytes ?? current?.downloadedBytes ?? 0
+          const speed = sample && time > sample.time && bytes >= sample.bytes
+            ? (bytes - sample.bytes) * 1000 / (time - sample.time)
+            : current?.speedBytesPerSecond
+          speedSamples.set(trackId, { bytes, time })
           downloading.value = new Map(downloading.value.set(trackId, {
             trackId,
             title: current?.title || trackId,
@@ -118,25 +142,33 @@ export const useDownloadStore = defineStore('download', () => {
             progress,
             downloadedBytes: downloadedBytes ?? current?.downloadedBytes,
             totalBytes: totalBytes ?? current?.totalBytes,
+            speedBytesPerSecond: speed,
           }))
         } else if (status === 'complete') {
           clearTerminalCleanup(trackId)
           downloading.value.delete(trackId)
           downloading.value = new Map(downloading.value)
+          requestedTracks.delete(trackId)
+          speedSamples.delete(trackId)
+          queue.finish(trackId)
           void handleCompletedDownload(trackId, toast)
         } else if (status === 'error') {
           setTaskTerminalStatus(trackId, 'error', message)
+          queue.finish(trackId)
           toast.error((i18n.global as any).t('download.download_failed') + (message ? `: ${message}` : ''))
         } else if (status === 'cancelled') {
           setTaskTerminalStatus(trackId, 'cancelled')
+          queue.finish(trackId)
           toast.show((i18n.global as any).t('download.cancelled'), 'info')
         } else if (status === 'already_exists') {
           setTaskTerminalStatus(trackId, 'already_exists')
+          requestedTracks.delete(trackId)
+          queue.finish(trackId)
           toast.show((i18n.global as any).t('download.already_exists'), 'info')
         }
       },
     )
-    void progressListening
+    const progressReady = progressListening
       .then((un) => {
         if (eventsGeneration === generation && eventsInitialized) {
           unlistenProgress = un
@@ -144,7 +176,19 @@ export const useDownloadStore = defineStore('download', () => {
           un()
         }
       })
-      .catch((error) => log.error('Register download progress listener failed:', error))
+      .catch((error) => {
+        if (eventsGeneration === generation) {
+          eventsGeneration++
+          eventsInitialized = false
+          eventsReady = null
+          unlistenDirFallback?.()
+          unlistenDownloadsChanged?.()
+          unlistenDirFallback = null
+          unlistenDownloadsChanged = null
+        }
+        log.error('Register download progress listener failed:', error)
+        throw error
+      })
 
     // 自定义下载目录不可用回退默认目录时提示用户（DL-11），避免以为文件落在所选目录
     const fallbackListening = listen<{ requestedDir: string }>('download-dir-fallback', () => {
@@ -160,6 +204,16 @@ export const useDownloadStore = defineStore('download', () => {
         }
       })
       .catch((error) => log.error('Register download fallback listener failed:', error))
+    void listen('downloads-changed', () => { void loadDownloads() })
+      .then((unlisten) => {
+        if (eventsGeneration === generation && eventsInitialized) unlistenDownloadsChanged = unlisten
+        else unlisten()
+      })
+      .catch(error => log.error('Register downloads changed listener failed:', error))
+    eventsReady = progressReady
+    // 旧调用方只注册事件，下载入口仍通过返回的 Promise 等待并处理失败
+    void eventsReady.catch(() => {})
+    return eventsReady
   }
 
   function clearTerminalCleanup(trackId: string) {
@@ -182,12 +236,16 @@ export const useDownloadStore = defineStore('download', () => {
       downloadedBytes: current?.downloadedBytes,
       totalBytes: current?.totalBytes,
       message,
+      speedBytesPerSecond: current?.speedBytesPerSecond,
     }))
   }
 
   function setTaskTerminalStatus(trackId: string, status: Extract<ActiveDownloadTask['status'], 'cancelled' | 'error' | 'already_exists'>, message?: string) {
     clearTerminalCleanup(trackId)
+    if (!downloading.value.has(trackId) && !requestedTracks.has(trackId)) return
     setTaskStatus(trackId, status, message)
+    speedSamples.delete(trackId)
+    if (status === 'error' || status === 'cancelled') return
     const timer = setTimeout(() => {
       terminalCleanupTimers.delete(trackId)
       const current = downloading.value.get(trackId)
@@ -195,7 +253,7 @@ export const useDownloadStore = defineStore('download', () => {
         downloading.value.delete(trackId)
         downloading.value = new Map(downloading.value)
       }
-    }, status === 'error' ? 3500 : 1800)
+    }, 1800)
     terminalCleanupTimers.set(trackId, timer)
   }
 
@@ -258,7 +316,6 @@ export const useDownloadStore = defineStore('download', () => {
    * 下载曲目：先解析音频 URL（按来源分支），再调用后端下载
    */
   async function downloadTrack(track: TrackInfo) {
-    initEvents()
     const toast = useToastStore()
 
     if (isDownloaded(track.id)) {
@@ -266,7 +323,7 @@ export const useDownloadStore = defineStore('download', () => {
       return
     }
 
-    if (downloading.value.has(track.id)) {
+    if (queue.has(track.id)) {
       return // 正在下载中
     }
 
@@ -280,6 +337,21 @@ export const useDownloadStore = defineStore('download', () => {
           ? 'youtube'
           : 'local'
 
+    if (source === 'local') {
+      toast.error((i18n.global as any).t('player.not_available'))
+      return
+    }
+    clearTerminalCleanup(track.id)
+    requestedTracks.set(track.id, { ...track })
+    downloading.value = new Map(downloading.value.set(track.id, {
+      trackId: track.id, title: track.title, artist: track.artist, source,
+      status: 'queued', progress: 0, downloadedBytes: 0,
+    }))
+    queue.enqueue(track.id, () => { void startDownload(track, source) })
+  }
+
+  async function startDownload(track: TrackInfo, source: string) {
+    const toast = useToastStore()
     const requestToken = `${track.id}:${++resolvingTokenSequence}`
     resolvingRequestTokens.set(track.id, requestToken)
     downloading.value = new Map(downloading.value.set(track.id, {
@@ -294,24 +366,19 @@ export const useDownloadStore = defineStore('download', () => {
     toast.success((i18n.global as any).t('download.downloading'))
 
     try {
-      if (source === 'local') {
-        // 本地文件无需下载
-        toast.error((i18n.global as any).t('player.not_available'))
-        if (resolvingRequestTokens.get(track.id) === requestToken) {
-          resolvingRequestTokens.delete(track.id)
-        }
-        resolvingCancelled.delete(requestToken)
-        downloading.value.delete(track.id)
-        downloading.value = new Map(downloading.value)
+      await initEvents()
+      if (consumeResolvingCancellation(resolvingCancelled, requestToken)) {
+        resolvingRequestTokens.delete(track.id)
+        setTaskTerminalStatus(track.id, 'cancelled')
+        queue.finish(track.id)
         return
       }
-
-      const settings = useSettingsStore()
-      const youtubeQuality = settings.youtubeQuality
+      const follow = settings.downloadFollowPlaybackQuality
+      const youtubeQuality = follow ? settings.youtubeQuality : settings.downloadYoutubeQuality
       const resolved = await resolveDownloadSource(track, {
-        neteaseQuality: settings.neteaseQuality,
-        qqMusicQuality: settings.qqMusicQuality,
-        biliQuality: settings.biliQuality,
+        neteaseQuality: follow ? settings.neteaseQuality : settings.downloadNeteaseQuality,
+        qqMusicQuality: follow ? settings.qqMusicQuality : settings.downloadQqMusicQuality,
+        biliQuality: follow ? settings.biliQuality : settings.downloadBiliQuality,
         youtubeQuality,
         youtubePlaybackSource: settings.youtubePlaybackSource,
       })
@@ -321,8 +388,8 @@ export const useDownloadStore = defineStore('download', () => {
         if (resolvingRequestTokens.get(track.id) === requestToken) {
           resolvingRequestTokens.delete(track.id)
         }
-        downloading.value.delete(track.id)
-        downloading.value = new Map(downloading.value)
+        setTaskTerminalStatus(track.id, 'cancelled')
+        queue.finish(track.id)
         return
       }
 
@@ -348,10 +415,12 @@ export const useDownloadStore = defineStore('download', () => {
       // 取消可能与启动命令并发发生，命令返回后再消费一次 token，
       // 确保后端任务已注册后仍能收到取消请求
       if (consumeResolvingCancellation(resolvingCancelled, requestToken)) {
-        try {
-          await invoke('cancel_download', { trackId: track.id })
-        } catch (cancelError) {
-          log.error('Cancel download after launch failed:', cancelError)
+        if (resolvingRequestTokens.get(track.id) === requestToken) {
+          try {
+            await invoke('cancel_download', { trackId: track.id })
+          } catch (cancelError) {
+            log.error('Cancel download after launch failed:', cancelError)
+          }
         }
       }
       if (resolvingRequestTokens.get(track.id) === requestToken) {
@@ -359,15 +428,20 @@ export const useDownloadStore = defineStore('download', () => {
       }
     } catch (e: any) {
       log.error('Download failed:', e)
-      downloading.value.delete(track.id)
-      downloading.value = new Map(downloading.value)
+      const wasCancelled = resolvingCancelled.has(requestToken)
       if (resolvingRequestTokens.get(track.id) === requestToken) {
         resolvingRequestTokens.delete(track.id)
       }
       resolvingCancelled.delete(requestToken)
       const msg = typeof e === 'string' ? e : e?.message || String(e)
       const lowerMsg = msg.toLowerCase()
-      if (!msg.includes('already downloaded') && !lowerMsg.includes('cancelled') && !lowerMsg.includes('canceled')) {
+      if (wasCancelled || lowerMsg.includes('cancelled') || lowerMsg.includes('canceled')) {
+        setTaskTerminalStatus(track.id, 'cancelled')
+      } else {
+        setTaskTerminalStatus(track.id, 'error', msg)
+      }
+      queue.finish(track.id)
+      if (!wasCancelled && !msg.includes('already downloaded') && !lowerMsg.includes('cancelled') && !lowerMsg.includes('canceled')) {
         toast.error((i18n.global as any).t('download.download_failed') + `: ${msg}`)
       }
     }
@@ -383,6 +457,7 @@ export const useDownloadStore = defineStore('download', () => {
       }
     } catch (e) {
       log.error('Delete download failed:', e)
+      throw e
     }
   }
 
@@ -399,7 +474,8 @@ export const useDownloadStore = defineStore('download', () => {
   }
 
   function isDownloading(trackId: string): boolean {
-    return downloading.value.has(trackId)
+    const status = downloading.value.get(trackId)?.status
+    return !!status && ['queued', 'resolving', 'downloading', 'processing', 'cancelling'].includes(status)
   }
 
   function getDownloadedTrack(trackId: string): DownloadedTrack | undefined {
@@ -409,7 +485,16 @@ export const useDownloadStore = defineStore('download', () => {
   async function cancelDownload(trackId: string) {
     const current = downloading.value.get(trackId)
     const resolvingToken = resolvingRequestTokens.get(trackId)
+    if (queue.cancelPending(trackId)) {
+      setTaskTerminalStatus(trackId, 'cancelled')
+      return true
+    }
     if (current?.status === 'cancelling') return true
+    if (!current || !isDownloading(trackId)) return false
+    if (current.status === 'resolving' && resolvingToken) {
+      // 在等待 IPC 前取消解析代际，避免解析先完成后漏掉后台任务
+      resolvingCancelled.add(resolvingToken)
+    }
 
     try {
       if (current) {
@@ -421,22 +506,23 @@ export const useDownloadStore = defineStore('download', () => {
       }
       // 后端查无任务：任务仍处于 resolving 阶段（URL 解析中）。标记取消，
       // 待解析完成时跳过后端下载，而不是误报取消失败（DL-7）
-      if (
-        current?.status === 'resolving'
-        && resolvingToken
-        && resolvingRequestTokens.get(trackId) === resolvingToken
-      ) {
-        resolvingCancelled.add(resolvingToken)
-        setTaskTerminalStatus(trackId, 'cancelled')
+      if (current.status === 'resolving' && resolvingToken) {
+        if (resolvingRequestTokens.get(trackId) === resolvingToken) {
+          setTaskTerminalStatus(trackId, 'cancelled')
+        }
         return true
       }
-      if (current) {
-        setTaskTerminalStatus(trackId, 'error', (i18n.global as any).t('download.cancel_failed'))
+      if (downloading.value.get(trackId)?.status === 'cancelling') {
+        setTaskStatus(trackId, current.status, (i18n.global as any).t('download.cancel_failed'))
       }
     } catch (e) {
       log.error('Cancel download failed:', e)
-      if (current) {
-        setTaskTerminalStatus(trackId, 'error', (i18n.global as any).t('download.cancel_failed'))
+      if (current.status === 'resolving' && resolvingToken) {
+        if (resolvingRequestTokens.get(trackId) === resolvingToken) setTaskTerminalStatus(trackId, 'cancelled')
+        return true
+      }
+      if (downloading.value.get(trackId)?.status === 'cancelling') {
+        setTaskStatus(trackId, current.status, (i18n.global as any).t('download.cancel_failed'))
       }
     }
     return false
@@ -445,8 +531,11 @@ export const useDownloadStore = defineStore('download', () => {
   async function cancelAllDownloads() {
     const toast = useToastStore()
     const visibleActiveCount = Array.from(downloading.value.values())
-      .filter(task => task.status === 'resolving' || task.status === 'downloading')
+      .filter(task => isDownloading(task.trackId))
       .length
+    for (const task of activeDownloads.value) {
+      if (queue.cancelPending(task.trackId)) setTaskTerminalStatus(task.trackId, 'cancelled')
+    }
     const resolvingIds = markResolvingTasksCancelled(
       downloading.value.values(),
       resolvingCancelled,
@@ -465,7 +554,7 @@ export const useDownloadStore = defineStore('download', () => {
       if (cancelled > 0) {
         const next = new Map(downloading.value)
         for (const [trackId, task] of next.entries()) {
-          if (task.status === 'downloading') {
+          if (task.status === 'downloading' || task.status === 'processing') {
             next.set(trackId, { ...task, status: 'cancelling' })
           }
         }
@@ -493,10 +582,28 @@ export const useDownloadStore = defineStore('download', () => {
     }
   }
 
+  function retryDownload(trackId: string) {
+    const track = requestedTracks.get(trackId)
+    if (track && !isDownloading(trackId)) void downloadTrack(track)
+  }
+
+  function clearFinishedTasks() {
+    for (const task of activeDownloads.value) {
+      if (isDownloading(task.trackId)) continue
+      clearTerminalCleanup(task.trackId)
+      requestedTracks.delete(task.trackId)
+      downloading.value.delete(task.trackId)
+    }
+    downloading.value = new Map(downloading.value)
+  }
+
   return {
     downloads,
     downloading,
     activeDownloads,
+    runningDownloadCount,
+    retryDownload,
+    clearFinishedTasks,
     loadDownloads,
     downloadTrack,
     redownloadTrack,

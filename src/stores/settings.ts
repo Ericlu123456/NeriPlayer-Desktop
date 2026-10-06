@@ -63,6 +63,14 @@ export interface AppSettings {
   maxCacheSize: number
   downloadNameTemplate: string
   downloadDir: string
+  downloadParallelism: number
+  downloadAutoFillMetadata: boolean
+  downloadEmbedLyrics: boolean
+  downloadFollowPlaybackQuality: boolean
+  downloadNeteaseQuality: string
+  downloadQqMusicQuality: string
+  downloadYoutubeQuality: string
+  downloadBiliQuality: string
   ltServerUrl: string
   ltNickname: string
   ltAllowMemberControl: boolean
@@ -87,7 +95,10 @@ type SettingRefs = { [K in SettingKey]: Ref<AppSettings[K]> }
 
 const SETTINGS_FORMAT_VERSION = 1
 const LEGACY_PREFIX = 'neri:'
-export const DEFAULT_DOWNLOAD_NAME_TEMPLATE = '{source} - {artist} - {title}'
+export const DEFAULT_DOWNLOAD_NAME_TEMPLATE = '%title% - %artist% - %album% - %source%'
+export const MIN_DOWNLOAD_PARALLELISM = 1
+export const MAX_DOWNLOAD_PARALLELISM = 8
+export const DEFAULT_DOWNLOAD_PARALLELISM = 6
 export const MIN_MEDIA_CACHE_SIZE_MB = 256
 export const MAX_MEDIA_CACHE_SIZE_MB = 512 * 1024
 
@@ -145,6 +156,14 @@ const DEFAULT_SETTINGS: AppSettings = {
   maxCacheSize: 1024,
   downloadNameTemplate: DEFAULT_DOWNLOAD_NAME_TEMPLATE,
   downloadDir: '',
+  downloadParallelism: DEFAULT_DOWNLOAD_PARALLELISM,
+  downloadAutoFillMetadata: true,
+  downloadEmbedLyrics: false,
+  downloadFollowPlaybackQuality: true,
+  downloadNeteaseQuality: 'exhigh',
+  downloadQqMusicQuality: 'high',
+  downloadYoutubeQuality: 'high',
+  downloadBiliQuality: 'high',
   ltServerUrl: 'https://neriplayer.hancat.work',
   ltNickname: '',
   ltAllowMemberControl: true,
@@ -210,6 +229,14 @@ const LEGACY_KEYS: Partial<Record<SettingKey, string>> = {
   maxCacheSize: 'cache_size',
   downloadNameTemplate: 'download_template',
   downloadDir: 'download_dir',
+  downloadParallelism: 'download_parallelism',
+  downloadAutoFillMetadata: 'download_auto_fill_metadata',
+  downloadEmbedLyrics: 'download_embed_lyrics',
+  downloadFollowPlaybackQuality: 'download_follow_playback_quality',
+  downloadNeteaseQuality: 'download_netease_quality',
+  downloadQqMusicQuality: 'download_qq_quality',
+  downloadYoutubeQuality: 'download_youtube_quality',
+  downloadBiliQuality: 'download_bili_quality',
   ltServerUrl: 'lt_server_url',
   ltNickname: 'lt_nickname',
   ltAllowMemberControl: 'lt_allow_member_control',
@@ -299,6 +326,19 @@ function normalizeSnapshot(input: unknown): AppSettings {
   if (!['off', 'error', 'warn', 'info', 'debug', 'trace'].includes(result.logLevel)) result.logLevel = DEFAULT_SETTINGS.logLevel
   if (result.themeColor.startsWith('#')) result.themeColor = result.themeColor === '#6750A4' ? 'purple' : DEFAULT_SETTINGS.themeColor
   result.youtubePlaybackSource = normalizeYouTubePlaybackSource(result.youtubePlaybackSource)
+  result.downloadParallelism = Number.isFinite(result.downloadParallelism)
+    ? clamp(Math.round(result.downloadParallelism), MIN_DOWNLOAD_PARALLELISM, MAX_DOWNLOAD_PARALLELISM)
+    : DEFAULT_DOWNLOAD_PARALLELISM
+  result.downloadNameTemplate = result.downloadNameTemplate.trim() || DEFAULT_DOWNLOAD_NAME_TEMPLATE
+  result.downloadDir = result.downloadDir.trim()
+  result.downloadNeteaseQuality = normalizeChoice(
+    result.downloadNeteaseQuality.trim() === 'high' ? 'higher' : result.downloadNeteaseQuality,
+    ['standard', 'higher', 'exhigh', 'lossless', 'hires', 'jyeffect', 'sky', 'jymaster'],
+    'exhigh',
+  )
+  result.downloadQqMusicQuality = normalizeChoice(result.downloadQqMusicQuality, ['standard', 'high', 'lossless'], 'high')
+  result.downloadYoutubeQuality = normalizeChoice(result.downloadYoutubeQuality, ['low', 'medium', 'high', 'very_high'], 'high')
+  result.downloadBiliQuality = normalizeChoice(result.downloadBiliQuality, ['low', 'medium', 'high', 'dolby', 'lossless', 'hires'], 'high')
 
   result.lyricFontScale = clamp(result.lyricFontScale, 0.5, 1.5)
   result.fadeInDuration = clamp(result.fadeInDuration, 0, 10000)
@@ -332,6 +372,11 @@ function normalizeYouTubePlaybackSource(value: string): YouTubePlaybackSource {
   else if (source === 'androidvr') source = 'android_vr'
   else if (source === 'creator') source = 'web_creator'
   return YOUTUBE_PLAYBACK_SOURCES.find(option => option === source) ?? 'automatic'
+}
+
+function normalizeChoice(value: string, allowed: string[], fallback: string): string {
+  const normalized = value.trim()
+  return allowed.includes(normalized) ? normalized : fallback
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -403,6 +448,14 @@ export const useSettingsStore = defineStore('settings', () => {
   const maxCacheSize = ref(initial.maxCacheSize)
   const downloadNameTemplate = ref(initial.downloadNameTemplate)
   const downloadDir = ref(initial.downloadDir)
+  const downloadParallelism = ref(initial.downloadParallelism)
+  const downloadAutoFillMetadata = ref(initial.downloadAutoFillMetadata)
+  const downloadEmbedLyrics = ref(initial.downloadEmbedLyrics)
+  const downloadFollowPlaybackQuality = ref(initial.downloadFollowPlaybackQuality)
+  const downloadNeteaseQuality = ref(initial.downloadNeteaseQuality)
+  const downloadQqMusicQuality = ref(initial.downloadQqMusicQuality)
+  const downloadYoutubeQuality = ref(initial.downloadYoutubeQuality)
+  const downloadBiliQuality = ref(initial.downloadBiliQuality)
   const ltServerUrl = ref(initial.ltServerUrl)
   const ltNickname = ref(initial.ltNickname)
   const ltAllowMemberControl = ref(initial.ltAllowMemberControl)
@@ -430,6 +483,9 @@ export const useSettingsStore = defineStore('settings', () => {
     backgroundImageUri, backgroundImageBlur, backgroundImageAlpha, devModeEnabled,
     logToFile, logLevel,
     maxCacheSize, downloadNameTemplate, downloadDir, ltServerUrl, ltNickname,
+    downloadParallelism, downloadAutoFillMetadata, downloadEmbedLyrics,
+    downloadFollowPlaybackQuality, downloadNeteaseQuality, downloadQqMusicQuality,
+    downloadYoutubeQuality, downloadBiliQuality,
     ltAllowMemberControl, ltAutoPauseOnMemberChange, ltShareAudioLinks, volume, audioOutputDevice,
     playbackSpeed, loudnessGainMb, equalizerEnabled, equalizerPresetId,
     equalizerBands,
@@ -516,6 +572,9 @@ export const useSettingsStore = defineStore('settings', () => {
     internationalizationEnabled, backgroundImageUri, backgroundImageBlur,
     backgroundImageAlpha, devModeEnabled, logToFile, logLevel, maxCacheSize, downloadNameTemplate,
     downloadDir, ltServerUrl, ltNickname, ltAllowMemberControl,
+    downloadParallelism, downloadAutoFillMetadata, downloadEmbedLyrics,
+    downloadFollowPlaybackQuality, downloadNeteaseQuality, downloadQqMusicQuality,
+    downloadYoutubeQuality, downloadBiliQuality,
     ltAutoPauseOnMemberChange, ltShareAudioLinks, volume, audioOutputDevice, playbackSpeed,
     loudnessGainMb, equalizerEnabled, equalizerPresetId, equalizerBands,
   }

@@ -11,6 +11,8 @@ import { writeText } from '@tauri-apps/plugin-clipboard-manager'
 import {
   MAX_MEDIA_CACHE_SIZE_MB,
   MIN_MEDIA_CACHE_SIZE_MB,
+  MAX_DOWNLOAD_PARALLELISM,
+  MIN_DOWNLOAD_PARALLELISM,
   YOUTUBE_PLAYBACK_SOURCES,
   useSettingsStore,
 } from '@/stores/settings'
@@ -63,6 +65,9 @@ const {
   backgroundImageUri, backgroundImageBlur, backgroundImageAlpha,
   devModeEnabled, logToFile, logLevel,
   maxCacheSize, downloadNameTemplate, downloadDir,
+  downloadParallelism, downloadAutoFillMetadata, downloadEmbedLyrics,
+  downloadFollowPlaybackQuality, downloadNeteaseQuality, downloadQqMusicQuality,
+  downloadYoutubeQuality, downloadBiliQuality,
   ltServerUrl, ltNickname, ltAllowMemberControl, ltAutoPauseOnMemberChange, ltShareAudioLinks,
   locale: settingLocale,
 } = storeToRefs(settings)
@@ -289,6 +294,10 @@ const neteaseQualityOptions = computed(() => [
   { value: 'sky', label: t('settings.q_sky') },
   { value: 'jymaster', label: t('settings.q_master') },
 ])
+
+const downloadNeteaseQualityOptions = computed(() => neteaseQualityOptions.value.map(option => (
+  option.value === 'high' ? { ...option, value: 'higher' } : option
+)))
 
 const qqQualityOptions = computed(() => [
   { value: 'standard', label: t('settings.q_standard') },
@@ -572,7 +581,7 @@ function selectSettingsSection(id: SettingsSectionId) {
 onMounted(() => {
   auth.checkStatus()
   syncStore.loadConfigs()
-  downloadStore.initEvents()
+  void downloadStore.initEvents().catch(error => log.error('Download listener failed:', error))
   downloadStore.loadDownloads()
   // 加载构建信息
   loadBuildInfo()
@@ -620,7 +629,7 @@ async function importConfig() {
 }
 
 // 下载管理
-const activeDownloadCount = computed(() => downloadStore.downloading.size)
+const activeDownloadCount = computed(() => downloadStore.runningDownloadCount)
 const completedDownloadCount = computed(() => downloadStore.downloads.length)
 const activeDownloadTasks = computed(() => downloadStore.activeDownloads)
 
@@ -633,7 +642,9 @@ function formatDownloadSize(bytes?: number): string {
 
 function activeDownloadStatusText(status: string) {
   switch (status) {
+    case 'queued': return t('download.queued')
     case 'resolving': return t('download.resolving')
+    case 'processing': return t('download.processing')
     case 'cancelling': return t('download.cancelling')
     case 'cancelled': return t('download.cancelled')
     case 'error': return t('download.download_failed')
@@ -649,7 +660,7 @@ function activeDownloadProgressText(task: {
   totalBytes?: number
   message?: string
 }) {
-  if (task.status === 'resolving' || task.status === 'cancelling' || task.status === 'cancelled' || task.status === 'already_exists') {
+  if (['queued', 'resolving', 'processing', 'cancelling', 'cancelled', 'already_exists'].includes(task.status)) {
     return activeDownloadStatusText(task.status)
   }
   if (task.status === 'error') {
@@ -720,6 +731,10 @@ const templatePreview = computed(() => {
     ['{artist}', '周杰伦'], ['%artist%', '周杰伦'],
     ['{album}', '叶惠美'], ['%album%', '叶惠美'],
     ['{source}', 'netease'], ['%source%', 'netease'],
+    ['{id}', 'netease:123456'], ['%id%', 'netease:123456'],
+    ['{audioId}', '123456'], ['%audioId%', '123456'],
+    ['{subAudioId}', ''], ['%subAudioId%', ''],
+    ['{hash}', '4c853a1f'], ['%hash%', '4c853a1f'],
   ]) {
     preview = replaceTemplateToken(preview, token, value)
   }
@@ -1685,9 +1700,9 @@ watch(() => syncStore.pendingProtocolUpgrade, () => { hideProtocolUpgrade.value 
           <div
             class="settings-download-progress"
             :class="{
-              indeterminate: task.status === 'downloading' && !task.totalBytes,
+              indeterminate: task.status === 'processing' || task.status === 'resolving' || (task.status === 'downloading' && !task.totalBytes),
               error: task.status === 'error',
-              muted: task.status === 'cancelling' || task.status === 'cancelled' || task.status === 'already_exists',
+              muted: task.status === 'queued' || task.status === 'cancelling' || task.status === 'cancelled' || task.status === 'already_exists',
             }"
           >
             <div
@@ -2007,6 +2022,70 @@ watch(() => syncStore.pendingProtocolUpgrade, () => { hideProtocolUpgrade.value 
         />
       </div>
 
+      <div class="setting-card">
+        <div class="setting-icon-wrap"><span class="material-symbols-rounded">downloading</span></div>
+        <div class="setting-info">
+          <div class="setting-title">{{ t('settings.download_parallelism') }}</div>
+          <div class="setting-desc">{{ t('settings.download_parallelism_desc') }}</div>
+          <EditableRangeValue
+            v-model="downloadParallelism"
+            class="setting-desc"
+            :min="MIN_DOWNLOAD_PARALLELISM"
+            :max="MAX_DOWNLOAD_PARALLELISM"
+            :step="1"
+            :display-value="t('settings.download_parallelism_value', { count: downloadParallelism })"
+            :aria-label="t('settings.download_parallelism')"
+          />
+        </div>
+        <input v-model.number="downloadParallelism" type="range" class="m3-slider" :min="MIN_DOWNLOAD_PARALLELISM" :max="MAX_DOWNLOAD_PARALLELISM" step="1" :aria-label="t('settings.download_parallelism')" />
+      </div>
+
+      <div class="setting-card">
+        <div class="setting-icon-wrap"><span class="material-symbols-rounded">audio_file</span></div>
+        <div class="setting-info">
+          <div class="setting-title">{{ t('settings.download_metadata') }}</div>
+          <div class="setting-desc">{{ t('settings.download_metadata_desc') }}</div>
+        </div>
+        <label class="m3-switch"><input type="checkbox" v-model="downloadAutoFillMetadata" /><span class="track"><span class="thumb"><span v-if="downloadAutoFillMetadata" class="material-symbols-rounded" style="font-size: 14px">check</span></span></span></label>
+      </div>
+
+      <div class="setting-card sub-card">
+        <div class="setting-icon-wrap"><span class="material-symbols-rounded">lyrics</span></div>
+        <div class="setting-info">
+          <div class="setting-title">{{ t('settings.download_embed_lyrics') }}</div>
+          <div class="setting-desc">{{ t('settings.download_embed_lyrics_desc') }}</div>
+        </div>
+        <label class="m3-switch"><input type="checkbox" v-model="downloadEmbedLyrics" :disabled="!downloadAutoFillMetadata" /><span class="track"><span class="thumb"><span v-if="downloadEmbedLyrics" class="material-symbols-rounded" style="font-size: 14px">check</span></span></span></label>
+      </div>
+
+      <div class="setting-card">
+        <div class="setting-icon-wrap"><span class="material-symbols-rounded">high_quality</span></div>
+        <div class="setting-info">
+          <div class="setting-title">{{ t('settings.download_follow_playback_quality') }}</div>
+          <div class="setting-desc">{{ t('settings.download_follow_playback_quality_desc') }}</div>
+        </div>
+        <label class="m3-switch"><input type="checkbox" v-model="downloadFollowPlaybackQuality" /><span class="track"><span class="thumb"><span v-if="downloadFollowPlaybackQuality" class="material-symbols-rounded" style="font-size: 14px">check</span></span></span></label>
+      </div>
+
+      <template v-if="!downloadFollowPlaybackQuality">
+        <div class="setting-card sub-card">
+          <div class="setting-info"><div class="setting-title">{{ t('settings.netease_quality') }}</div></div>
+          <CustomSelect v-model="downloadNeteaseQuality" :options="downloadNeteaseQualityOptions" :label="t('settings.netease_quality')" />
+        </div>
+        <div class="setting-card sub-card">
+          <div class="setting-info"><div class="setting-title">{{ t('settings.qq_quality') }}</div></div>
+          <CustomSelect v-model="downloadQqMusicQuality" :options="qqQualityOptions" :label="t('settings.qq_quality')" />
+        </div>
+        <div class="setting-card sub-card">
+          <div class="setting-info"><div class="setting-title">{{ t('settings.youtube_quality') }}</div></div>
+          <CustomSelect v-model="downloadYoutubeQuality" :options="youtubeQualityOptions" :label="t('settings.youtube_quality')" />
+        </div>
+        <div class="setting-card sub-card">
+          <div class="setting-info"><div class="setting-title">{{ t('settings.bili_quality') }}</div></div>
+          <CustomSelect v-model="downloadBiliQuality" :options="biliQualityOptions" :label="t('settings.bili_quality')" />
+        </div>
+      </template>
+
       <div class="setting-card" style="cursor: pointer" @click="openDownloadTemplateDialog">
         <div class="setting-icon-wrap"><span class="material-symbols-rounded">text_fields</span></div>
         <div class="setting-info">
@@ -2021,6 +2100,7 @@ watch(() => syncStore.pendingProtocolUpgrade, () => { hideProtocolUpgrade.value 
         <div class="setting-info">
           <div class="setting-title">{{ t('settings.download_dir') }}</div>
           <div class="setting-desc" style="word-break: break-all">{{ displayDownloadDir }}</div>
+          <div class="setting-desc">{{ t('settings.download_dir_desc') }}</div>
         </div>
         <div class="chip-row">
           <button class="m3-chip sm" :disabled="activeDownloadCount > 0" @click="selectDownloadDir">{{ t('settings.download_dir_select') }}</button>
