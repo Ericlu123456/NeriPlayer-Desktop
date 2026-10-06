@@ -1,6 +1,12 @@
 import { invoke } from '@tauri-apps/api/core'
 import type { TrackInfo } from '@/stores/player'
 import { trustedInboundStreamUrls } from '@/stores/listenTogether/mapper'
+import {
+  BILI_VIDEO_INFO_UNAVAILABLE,
+  PlaybackFailure,
+  retrySongUrlResolution,
+  type PlaybackFailureReason,
+} from './playbackFailure'
 
 export type PlaybackSourceKind = 'netease' | 'qq' | 'bilibili' | 'youtube'
 export type PlaybackAudioSource = PlaybackSourceKind | 'local'
@@ -61,7 +67,7 @@ export type PlaybackResolution =
   | ResolvedPlaybackSource
   | { type: 'waiting_for_authoritative_stream' }
   | { type: 'requires_login'; message?: string }
-  | { type: 'failure'; message: string; retryable: boolean }
+  | { type: 'failure'; message: string; retryable: boolean; reason?: PlaybackFailureReason }
 
 export interface PlaybackResolveOptions {
   forceRefresh?: boolean
@@ -292,6 +298,8 @@ export class PlaybackUrlResolver {
   }>()
   private readonly inFlight = new Map<string, { promise: Promise<PlaybackResolution>; requestGeneration?: number }>()
 
+  constructor(private readonly retryDelay?: (ms: number) => Promise<void>) {}
+
   async resolve(
     track: TrackInfo,
     settings: PlaybackSourceSettings,
@@ -349,13 +357,19 @@ export class PlaybackUrlResolver {
       }
     }
 
-    const pending = adapter.resolve(track, resolvedSettings, options)
-      .then(result => result ?? {
-        type: 'failure' as const,
+    const attempt = (): Promise<PlaybackResolution> => adapter.resolve(track, resolvedSettings, options)
+      .then((result): PlaybackResolution => result ?? {
+        type: 'failure',
+        reason: 'no_play_url',
         message: 'No playable stream returned',
         retryable: true,
       })
       .catch(error => classifyPlaybackError(error))
+    // 重试整体留在同一个 in-flight 条目里：并发请求共享结果，缓存被清空或强制刷新取代后停止
+    const pending: Promise<PlaybackResolution> = retrySongUrlResolution(attempt, {
+      delay: this.retryDelay,
+      shouldContinue: () => this.inFlight.get(cacheKey)?.promise === pending,
+    })
       .then(result => {
         if (result.type === 'success' && this.inFlight.get(cacheKey)?.promise === pending) {
           if (!this.cache.has(cacheKey) && this.cache.size >= MAX_RESOLUTION_CACHE_ENTRIES) {
@@ -665,88 +679,82 @@ function resolveNetease(
   const songId = Number.parseInt(trackValue(track, 'netease'), 10)
   const preferred = settings.neteaseQuality.trim().toLowerCase() || 'exhigh'
   const qualities = neteaseQualityFallbacks(preferred)
-  let lastError: unknown = null
   let previewFallback: ResolvedPlaybackSource | null = null
   let unavailable = false
   let requiresLogin = false
   const requestGeneration = options.requestGeneration
 
   return (async () => {
+    // 只有平台明确答复「该音质不可用 / 仅试听」才降一档；传输错误直接抛出交给外层重试，
+    // 否则一次超时就会静默降成低音质并被缓存（对齐 Android）
     for (const quality of qualities) {
-      try {
-        const result = await invoke<{
-          url: string | null
-          bitrate: number
-          format: string
-          expected_content_length?: number | null
-          expected_content_md5?: string | null
-          duration_ms?: number | null
-          level?: string | null
-          song_id?: number | null
-          is_preview?: boolean
-          unavailable_reason?: 'requires_login' | 'no_permission' | 'no_play_url' | 'unknown' | null
-        }>(
-          'get_netease_song_url',
-          { songId, quality, requestGeneration },
-        )
-        if (result.unavailable_reason === 'requires_login') {
-          requiresLogin = true
-          continue
-        }
-        if (result.unavailable_reason === 'unknown') {
-          unavailable = false
-          break
-        }
-        if (!result.url) {
-          unavailable = result.unavailable_reason === 'no_permission'
-          continue
-        }
-        if (result.song_id != null && result.song_id !== songId) throw new Error('Playback source song identity mismatch')
-        const actualQuality = result.level?.trim().toLowerCase() || quality
-        const mimeType = normalizeMimeType(result.format)
-        const codec = deriveCodecLabel(mimeType) ?? normalizeCodecName(result.format)
-        const audioInfo = createAudioInfo(
-          'netease',
-          actualQuality,
-          codec,
-          mimeType,
-          result.bitrate,
-        )
-        audioInfo.qualityOptions = NETEASE_QUALITY_OPTIONS
-        const resolved = createSuccess(track, 'netease', settings, {
-          url: result.url,
-          bitrate: result.bitrate,
-          codec,
-          format: result.format,
-          mimeType,
-          expectedContentLength: result.expected_content_length ?? undefined,
-          expectedContentMd5: result.expected_content_md5 ?? undefined,
-          durationMs: result.duration_ms ?? undefined,
-          isPreview: result.is_preview === true,
-          qualityKey: actualQuality,
-          cacheKey: stablePlaybackCacheKey(track, 'netease', actualQuality),
-          audioInfo,
-        })
-        if (resolved.isPreview) {
-          previewFallback = resolved
-          continue
-        }
-        return resolved
-      } catch (error) {
-        if (/requires login|song identity mismatch/i.test(error instanceof Error ? error.message : String(error))) {
-          throw error
-        }
-        lastError = error
+      const result = await invoke<{
+        url: string | null
+        bitrate: number
+        format: string
+        expected_content_length?: number | null
+        expected_content_md5?: string | null
+        duration_ms?: number | null
+        level?: string | null
+        song_id?: number | null
+        is_preview?: boolean
+        unavailable_reason?: 'requires_login' | 'no_permission' | 'no_play_url' | 'unknown' | null
+      }>(
+        'get_netease_song_url',
+        { songId, quality, requestGeneration },
+      )
+      if (result.unavailable_reason === 'requires_login') {
+        requiresLogin = true
+        continue
       }
+      if (result.unavailable_reason === 'unknown') {
+        unavailable = false
+        break
+      }
+      if (!result.url) {
+        unavailable = result.unavailable_reason === 'no_permission'
+        continue
+      }
+      if (result.song_id != null && result.song_id !== songId) throw new Error('Playback source song identity mismatch')
+      const actualQuality = result.level?.trim().toLowerCase() || quality
+      const mimeType = normalizeMimeType(result.format)
+      const codec = deriveCodecLabel(mimeType) ?? normalizeCodecName(result.format)
+      const audioInfo = createAudioInfo(
+        'netease',
+        actualQuality,
+        codec,
+        mimeType,
+        result.bitrate,
+      )
+      audioInfo.qualityOptions = NETEASE_QUALITY_OPTIONS
+      const resolved = createSuccess(track, 'netease', settings, {
+        url: result.url,
+        bitrate: result.bitrate,
+        codec,
+        format: result.format,
+        mimeType,
+        expectedContentLength: result.expected_content_length ?? undefined,
+        expectedContentMd5: result.expected_content_md5 ?? undefined,
+        durationMs: result.duration_ms ?? undefined,
+        isPreview: result.is_preview === true,
+        qualityKey: actualQuality,
+        cacheKey: stablePlaybackCacheKey(track, 'netease', actualQuality),
+        audioInfo,
+      })
+      if (resolved.isPreview) {
+        previewFallback = resolved
+        continue
+      }
+      return resolved
     }
     if (options.allowFallback !== false && (previewFallback || unavailable)) {
       const fallback = await resolveNeteaseFallback(track, settings, options)
       if (fallback) return fallback
     }
     if (previewFallback) return previewFallback
-    if (requiresLogin) throw new Error('Playback requires login')
-    if (lastError) throw lastError
-    return null
+    if (requiresLogin) throw new PlaybackFailure('requires_login', 'Playback requires login')
+    if (unavailable) throw new PlaybackFailure('no_permission', 'NetEase track is restricted on this account')
+    throw new PlaybackFailure('no_play_url', 'NetEase returned no playable URL')
   })()
 }
 
@@ -1118,10 +1126,17 @@ function uniqueUrls(urls: string[] = []): string[] {
 
 function classifyPlaybackError(error: unknown): PlaybackResolution {
   const message = error instanceof Error ? error.message : String(error)
-  if (/login|unauthorized|登录|未登录|需要登录/i.test(message)) {
-    return { type: 'requires_login', message }
+  if (error instanceof PlaybackFailure) {
+    if (error.reason === 'requires_login') return { type: 'requires_login', message }
+    // 受限资源是平台的明确答复，重试不会成功
+    return { type: 'failure', reason: error.reason, message, retryable: error.reason !== 'no_permission' }
   }
-  return { type: 'failure', message, retryable: true }
+  // 只有网易云明确的「需要登录」才提示登录；YouTube 的 LOGIN_REQUIRED 是可重试的取流失败（对齐 Android）
+  if (/\bPlayback requires login\b/i.test(message)) return { type: 'requires_login', message }
+  if (message.includes(BILI_VIDEO_INFO_UNAVAILABLE)) {
+    return { type: 'failure', reason: 'video_info_unavailable', message, retryable: true }
+  }
+  return { type: 'failure', reason: 'url_error', message, retryable: true }
 }
 
 const PLAYBACK_SOURCE_ADAPTERS: PlaybackSourceAdapter[] = [

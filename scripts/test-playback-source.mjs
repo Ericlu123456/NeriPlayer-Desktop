@@ -2,6 +2,14 @@ import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import ts from 'typescript'
 
+// 取流失败的重试间隔（250ms × 次数）在这里立即执行，只记录请求的等待时长
+const retryDelays = []
+const realSetTimeout = globalThis.setTimeout
+globalThis.setTimeout = (callback, ms, ...args) => {
+  retryDelays.push(ms)
+  return realSetTimeout(callback, 0, ...args)
+}
+
 const mockModule = Buffer.from(`
   export const invoke = (command, args) => globalThis.__playbackInvoke(command, args)
 `).toString('base64')
@@ -17,11 +25,13 @@ const queueUrl = transpileUrl(await readFile(new URL('../src/stores/listenTogeth
 const mapperUrl = transpileUrl((await readFile(new URL('../src/stores/listenTogether/mapper.ts', import.meta.url), 'utf8'))
   .replace("from './protocol'", `from '${protocolUrl}'`)
   .replace("from './queue'", `from '${queueUrl}'`))
+const failureUrl = transpileUrl(await readFile(new URL('../src/modules/playback/playbackFailure.ts', import.meta.url), 'utf8'))
 const sourceUrl = new URL('../src/modules/playback/playbackSource.ts', import.meta.url)
 const source = (await readFile(sourceUrl, 'utf8')).replace(
   "from '@tauri-apps/api/core'",
   `from '${mockModuleUrl}'`,
 ).replace("from '@/stores/listenTogether/mapper'", `from '${mapperUrl}'`)
+  .replace("from './playbackFailure'", `from '${failureUrl}'`)
 const compiled = ts.transpileModule(source, {
   compilerOptions: {
     module: ts.ModuleKind.ES2022,
@@ -337,9 +347,9 @@ await run('surfaces the Android-aligned login requirement', async () => {
 })
 
 await run('does not retry lower qualities after an unknown response failure', async () => {
-  let calls = 0
-  globalThis.__playbackInvoke = async () => {
-    calls++
+  const qualities = []
+  globalThis.__playbackInvoke = async (_command, args) => {
+    qualities.push(args.quality)
     return {
       url: null,
       bitrate: 0,
@@ -352,7 +362,81 @@ await run('does not retry lower qualities after an unknown response failure', as
   const resolved = await resolvePlaybackSource(track(104), settings)
 
   assert.equal(resolved, null)
+  // 整次解析按 Android 重试 5 次，但每次都停在首选音质，不往下降
+  assert.deepEqual(qualities, Array(6).fill('exhigh'))
+})
+
+await run('retries a transient resolution failure with Android backoff', async () => {
+  retryDelays.length = 0
+  let calls = 0
+  globalThis.__playbackInvoke = async (_command, args) => {
+    calls++
+    if (calls <= 2) throw new Error('Network error: error sending request')
+    return { url: `https://audio.example/${args.songId}.mp3`, bitrate: 320_000, format: 'mp3', level: 'exhigh' }
+  }
+  const resolution = await resolvePlaybackResult(track(105), settings)
+  assert.equal(resolution.type, 'success')
+  assert.equal(calls, 3)
+  assert.deepEqual(retryDelays, [250, 500])
+})
+
+await run('gives up after five retries and reports a localized reason', async () => {
+  let calls = 0
+  globalThis.__playbackInvoke = async () => { calls++; throw new Error('Network error: timed out') }
+  const resolution = await resolvePlaybackResult(track(106), settings)
+  assert.equal(resolution.type, 'failure')
+  assert.equal(resolution.reason, 'url_error')
+  assert.equal(calls, 6)
+})
+
+await run('does not retry superseded requests or restricted tracks', async () => {
+  let calls = 0
+  globalThis.__playbackInvoke = async () => { calls++; throw new Error('Audio error: Playback request superseded') }
+  assert.equal((await resolvePlaybackResult(track(107), settings)).type, 'failure')
   assert.equal(calls, 1)
+
+  const restricted = []
+  globalThis.__playbackInvoke = async (_command, args) => {
+    restricted.push(args.quality)
+    return { url: null, bitrate: 0, format: 'mp3', unavailable_reason: 'no_permission' }
+  }
+  const resolution = await resolvePlaybackResult(track(108), settings)
+  assert.equal(resolution.type, 'failure')
+  assert.equal(resolution.reason, 'no_permission')
+  assert.deepEqual(restricted, ['exhigh', 'higher', 'standard'], 'one pass down the ladder, no retries')
+})
+
+await run('a NetEase transport error is retried at the preferred quality instead of downgrading', async () => {
+  const qualities = []
+  globalThis.__playbackInvoke = async (_command, args) => {
+    qualities.push(args.quality)
+    if (qualities.length === 1) throw new Error('Network error: error sending request')
+    return { url: `https://audio.example/${args.songId}.flac`, bitrate: 900_000, format: 'flac', level: args.quality }
+  }
+  const resolution = await resolvePlaybackResult(track(109), { ...settings, neteaseQuality: 'lossless' })
+  assert.equal(resolution.type, 'success')
+  assert.equal(resolution.qualityKey, 'lossless')
+  assert.deepEqual(qualities, ['lossless', 'lossless'])
+})
+
+await run('a YouTube LOGIN_REQUIRED stream error is a retryable failure, not a login prompt', async () => {
+  let calls = 0
+  globalThis.__playbackInvoke = async () => {
+    calls++
+    throw new Error('API error: YouTube playback failed: VISIONOS:LOGIN_REQUIRED | ANDROID_VR:UNPLAYABLE')
+  }
+  const resolution = await resolvePlaybackResult({ ...track(110), id: 'youtube:dQw4w9WgXcQ', source: 'youtube' }, settings)
+  assert.equal(resolution.type, 'failure')
+  assert.equal(calls, 6)
+})
+
+await run('Bilibili video info failures map to the video-info reason', async () => {
+  globalThis.__playbackInvoke = async () => {
+    throw new Error('API error: Bilibili video info unavailable: Network error: timed out')
+  }
+  const resolution = await resolvePlaybackResult({ ...track(111), id: 'bilibili:BV1xx411c7mD', source: 'bilibili' }, settings)
+  assert.equal(resolution.type, 'failure')
+  assert.equal(resolution.reason, 'video_info_unavailable')
 })
 
 await run('retains only trusted room stream candidates associated with the primary URL', async () => {

@@ -30,6 +30,11 @@ import {
   type PlaybackResolution,
   type ResolvedPlaybackSource,
 } from '@/modules/playback/playbackSource'
+import {
+  PlaybackFailure,
+  playbackFailureMessageKey,
+  shouldThrottlePlaybackRefresh,
+} from '@/modules/playback/playbackFailure'
 import { playbackPrefetchManager } from '@/modules/playback/playbackPrefetch'
 import {
   PlaybackStartupWatchdog,
@@ -205,6 +210,14 @@ const BILI_QUALITY_I18N: Record<string, string> = {
   dolby: '杜比全景声',
 }
 
+// 取流失败按原因给出与 Android 一致的提示；其他错误（解码、设备）保留原始信息
+function playbackFailureText(reason: PlaybackFailure['reason'] | null, message: string): string {
+  const t = (i18n.global as any).t
+  if (!reason) return t('player.play_failed', { msg: message })
+  if (reason === 'url_error') return t('player.playback_url_error', { msg: summarizeLogError(message) })
+  return t(playbackFailureMessageKey(reason))
+}
+
 function qualityLabelFromKey(source?: string | null, key?: string | null): string | undefined {
   if (!key) return undefined
   const k = key.trim().toLowerCase()
@@ -283,8 +296,11 @@ const PAUSE_BACKWARD_TOLERANCE_MS = 250
 // 连续失败熔断
 let consecutivePlayFailures = 0
 const MAX_CONSECUTIVE_FAILURES = 10
+// 需要登录的曲目直接跳过、不计入失败（对齐 Android）；整个队列都需要登录时停下
+let consecutiveLoginSkips = 0
 let _isAutoSkipping = false
 let _stallRecovering = false
+let _lastStallRecovery: { key: string; at: number } | null = null
 
 // Shuffle 三栈模型
 let shuffleBag: number[] = []       // 未播放索引池
@@ -1050,6 +1066,23 @@ export const usePlayerStore = defineStore('player', () => {
       if (e.payload.requestGeneration !== playbackRequestToken) return
       const track = currentTrack.value
       if (!track || _stallRecovering) return
+      // 同一首在冷却期内再次断流：不再原地重试（否则每次重启都会清零失败计数而无限循环），
+      // 按失败处理并跳到下一首（对齐 Android URL_REFRESH_COOLDOWN_MS）
+      const now = Date.now()
+      if (shouldThrottlePlaybackRefresh(_lastStallRecovery, track.id, now)) {
+        _lastStallRecovery = null
+        consecutivePlayFailures++
+        useToastStore().error((i18n.global as any).t('player.playback_network_error'))
+        if (consecutivePlayFailures >= MAX_CONSECUTIVE_FAILURES) {
+          void pause()
+          useToastStore().error((i18n.global as any).t('player.too_many_failures'))
+        } else if (!_isAutoSkipping) {
+          _isAutoSkipping = true
+          void next(true, 'local').finally(() => { _isAutoSkipping = false })
+        }
+        return
+      }
+      _lastStallRecovery = { key: track.id, at: now }
       _stallRecovering = true
       const resumeAt = Math.max(0, Math.round(e.payload.positionMs))
       void play(track, 'local', resumeAt, true)
@@ -1294,6 +1327,7 @@ export const usePlayerStore = defineStore('player', () => {
       let dur = 0
       let playedFromDownloadedFile = false
       let playedFromPlaybackCache = false
+      let playingPreviewClip = false
       playError.value = null
       audioInfo.value = null
       decodedAudioInfo = null
@@ -1423,12 +1457,12 @@ export const usePlayerStore = defineStore('player', () => {
             )
             if (resolution.type !== 'success') {
               if (resolution.type === 'requires_login') {
-                throw new Error(resolution.message || 'Playback requires login')
+                throw new PlaybackFailure('requires_login', resolution.message || 'Playback requires login')
               }
               if (resolution.type === 'waiting_for_authoritative_stream') {
                 throw new Error('Waiting for authoritative playback stream')
               }
-              throw new Error(resolution.message)
+              throw new PlaybackFailure(resolution.reason ?? 'url_error', resolution.message)
             }
             result = resolution
           }
@@ -1529,6 +1563,8 @@ export const usePlayerStore = defineStore('player', () => {
             }
           }
           if (token !== playbackRequestToken) return
+          // 直链（一起听）也标记 isPreview 以免进缓存，不能据此提示试听
+          playingPreviewClip = result.source === 'netease' && result.isPreview === true && !result.cacheKey.endsWith('|direct')
           {
             const qKey = result.audioInfo?.qualityKey ?? result.qualityKey
             const rawLabel = result.audioInfo?.qualityLabel
@@ -1667,7 +1703,11 @@ export const usePlayerStore = defineStore('player', () => {
 
       // 重置连续失败计数
       consecutivePlayFailures = 0
+      consecutiveLoginSkips = 0
       startupRecoveryAttempts = 0
+      if (playingPreviewClip) {
+        useToastStore().show((i18n.global as any).t('player.playback_preview_only'), 'info')
+      }
       // 记录 URL 解析时间（用于过期检测）
       if (playedFromPlaybackCache) {
         lastUrlResolveTime = 0
@@ -1736,10 +1776,14 @@ export const usePlayerStore = defineStore('player', () => {
       isLoadingAudio.value = false
 
       const toast = useToastStore()
-      toast.error((i18n.global as any).t('player.play_failed', { msg }))
+      const failureReason = e instanceof PlaybackFailure ? e.reason : null
+      toast.error(playbackFailureText(failureReason, msg))
 
-      // 连续失败熔断 + 自动 skip
-      consecutivePlayFailures++
+      // 连续失败熔断 + 自动 skip；需要登录的曲目只跳过不计失败，但整队列都跳过一轮后停下
+      const loginSkip = failureReason === 'requires_login'
+      if (loginSkip) consecutiveLoginSkips++
+      else consecutivePlayFailures++
+      const loginSkipsExhausted = loginSkip && consecutiveLoginSkips >= Math.max(1, queue.value.length)
       const failureAction = resolvePlaybackFailureAdvanceAction({
         currentIndex: queueIndex.value,
         queueSize: queue.value.length,
@@ -1750,6 +1794,7 @@ export const usePlayerStore = defineStore('player', () => {
       })
       if (
         consecutivePlayFailures < MAX_CONSECUTIVE_FAILURES
+        && !loginSkipsExhausted
         && failureAction !== 'stop'
       ) {
         _isAutoSkipping = true
@@ -2084,7 +2129,10 @@ export const usePlayerStore = defineStore('player', () => {
     log.info('next:', { source: commandSource, force, shuffle: shuffleEnabled.value, repeat: repeatMode.value, index: queueIndex.value, queueLen: queue.value.length })
     if (queue.value.length === 0) return
     // 用户手动操作重置失败计数（自动 skip 不重置）
-    if (!_isAutoSkipping) consecutivePlayFailures = 0
+    if (!_isAutoSkipping) {
+      consecutivePlayFailures = 0
+      consecutiveLoginSkips = 0
+    }
 
     let nextIdx: number
     if (shuffleEnabled.value) {
@@ -2140,6 +2188,7 @@ export const usePlayerStore = defineStore('player', () => {
     markCommandSource(commandSource)
     log.info('previous:', { source: commandSource, shuffle: shuffleEnabled.value, positionMs: Math.round(positionMs.value) })
     consecutivePlayFailures = 0
+    consecutiveLoginSkips = 0
     if (queue.value.length === 0) return
 
     // 播放超过 3 秒则回到开头

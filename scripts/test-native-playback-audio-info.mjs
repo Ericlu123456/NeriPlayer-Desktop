@@ -48,6 +48,7 @@ const state = await load(await readFile(new URL('modules/playback/playerState.ts
 const display = await load(await readFile(new URL('modules/playback/audioQualityDisplay.ts', root), 'utf8'))
 const metadataText = await readFile(new URL('modules/playback/playbackAudioInfo.ts', root), 'utf8')
 const localInfoText = await readFile(new URL('modules/playback/localAudioInfo.ts', root), 'utf8')
+const failure = await load(await readFile(new URL('modules/playback/playbackFailure.ts', root), 'utf8'))
 const deferred = () => {
   let resolve, reject
   const promise = new Promise((yes, no) => { resolve = yes; reject = no })
@@ -85,6 +86,7 @@ async function runtime(options = {}) {
   const playback = await load(sourceText, {
     '@tauri-apps/api/core': core,
     '@/stores/listenTogether/mapper': { trustedInboundStreamUrls: () => [] },
+    './playbackFailure': failure,
   })
   const localInfo = await load(localInfoText, { '@tauri-apps/api/core': core })
   const playbackInfo = await load(metadataText, { '@tauri-apps/api/core': core })
@@ -105,6 +107,7 @@ async function runtime(options = {}) {
     './listenTogether': { useListenTogetherStore: () => ({ isConnected: false }) },
     '@/i18n': { default: { global: { t: key => key } } },
     '@/modules/playback/playbackSource': playback,
+    '@/modules/playback/playbackFailure': failure,
     '@/modules/playback/playbackPrefetch': { playbackPrefetchManager: { replacePlaybackDemand() {}, take: () => null, prefetchWindow() {} } },
     '@/modules/playback/playbackPolicy': { ...policy, PlaybackStartupWatchdog: class { cancel() {} schedule() {} } },
     '@/modules/playback/playbackQueue': queue,

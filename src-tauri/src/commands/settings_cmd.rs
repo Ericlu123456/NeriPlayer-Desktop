@@ -262,19 +262,10 @@ pub async fn get_bili_audio_url(
     }
     let client = state.bilibili();
 
-    // 确定 bvid 和 cid
-    let (real_bvid, real_cid) = if let Some(aid) = avid {
-        resolve_bili_numeric_source(&client, aid, cid).await?
-    } else {
-        let info = client.get_video_info(&bvid).await?;
-        if let Some(cid) = cid {
-            if !info.pages.iter().any(|page| page.cid == cid) {
-                return Err(AppError::Api("Requested Bilibili part does not belong to this video".into()));
-            }
-        }
-        let c = cid.unwrap_or(info.cid);
-        (bvid, c)
-    };
+    // 视频信息取不到时带固定前缀，前端据此提示「暂时无法获取视频音频信息」（对齐 Android）
+    let (real_bvid, real_cid) = resolve_bili_playback_target(&client, bvid, avid, cid)
+        .await
+        .map_err(|error| AppError::Api(format!("{BILI_VIDEO_INFO_UNAVAILABLE}: {error}")))?;
 
     let streams = client.get_audio_url(&real_bvid, real_cid).await?;
     let best = select_bili_audio_stream(streams.clone(), quality.as_deref())
@@ -291,6 +282,28 @@ pub async fn get_bili_audio_url(
         quality_key,
         mime_type: best.mime_type,
     })
+}
+
+const BILI_VIDEO_INFO_UNAVAILABLE: &str = "Bilibili video info unavailable";
+
+async fn resolve_bili_playback_target(
+    client: &BiliClient,
+    bvid: String,
+    avid: Option<u64>,
+    cid: Option<u64>,
+) -> AppResult<(String, u64)> {
+    if let Some(aid) = avid {
+        return resolve_bili_numeric_source(client, aid, cid).await;
+    }
+    let info = client.get_video_info(&bvid).await?;
+    if let Some(cid) = cid {
+        if !info.pages.iter().any(|page| page.cid == cid) {
+            return Err(AppError::Api(
+                "Requested Bilibili part does not belong to this video".into(),
+            ));
+        }
+    }
+    Ok((bvid, cid.unwrap_or(info.cid)))
 }
 
 async fn resolve_bili_numeric_source(
