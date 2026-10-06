@@ -45,6 +45,7 @@
     "test:escape-close": "node scripts/test-escape-close.mjs",
     "test:settings-integrity": "node scripts/test-settings-integrity.mjs",
     "test:playback-failure": "node scripts/test-playback-failure.mjs",
+    "test:youtube-seek-policy": "node scripts/test-youtube-seek-policy.mjs",
     "test:local-artists": "node scripts/test-local-artists.mjs",
     "test:local-scan-preview": "node scripts/test-local-scan-preview.mjs",
     "test:local-scan-store": "node scripts/test-local-scan-store.mjs",

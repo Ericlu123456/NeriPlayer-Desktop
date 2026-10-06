@@ -38,6 +38,10 @@ import {
 import { genericUrlPrefetchTtlMs, playbackPrefetchManager } from '@/modules/playback/playbackPrefetch'
 import { recallPlayedQuality, rememberPlayedQuality } from '@/modules/playback/playedQualityMemory'
 import {
+  shouldRefreshUrlBeforeResume,
+  shouldRefreshUrlBeforeSeek,
+} from '@/modules/playback/youtubeSeekRefreshPolicy'
+import {
   PlaybackStartupWatchdog,
   resolvePlaybackFailureAdvanceAction,
 } from '@/modules/playback/playbackPolicy'
@@ -1985,10 +1989,15 @@ export const usePlayerStore = defineStore('player', () => {
       return
     }
 
-    // URL 过期检测（10min）：在线来源 URL 过期后需重新解析
+    // URL 过期检测（10min）：在线来源 URL 过期后需重新解析；
+    // YouTube 另按地址本身判断（缺 PoToken、签名即将过期，对齐 Android shouldRefreshUrlBeforeResume）
     const isOnlineSource = isRemotePlaybackTrack(currentTrack.value)
-    if (isOnlineSource && lastUrlResolveTime > 0
-      && Date.now() - lastUrlResolveTime > URL_EXPIRY_MS) {
+    const youtubeNeedsRefresh = shouldRefreshUrlBeforeResume(
+      getPlaybackSourceKind(currentTrack.value) === 'youtube',
+      currentStreamUrl.value,
+    )
+    if (isOnlineSource && (youtubeNeedsRefresh || (lastUrlResolveTime > 0
+      && Date.now() - lastUrlResolveTime > URL_EXPIRY_MS))) {
       // URL 已过期，重新解析
       await play(currentTrack.value, commandSource, currentRenderedPosition(), true)
       return
@@ -2027,6 +2036,15 @@ export const usePlayerStore = defineStore('player', () => {
         positionMs: safePosMs,
         seekSeq,
       }
+      return
+    }
+
+    // YouTube 直链缺 PoToken、快过期或无法按范围读取时，先换新地址再从目标位置起播（对齐 Android）；
+    // 下方 403 的被动重解析保留为兜底
+    const seekTrack = currentTrack.value
+    if (seekTrack && shouldRefreshUrlBeforeSeek(getPlaybackSourceKind(seekTrack) === 'youtube', currentStreamUrl.value)) {
+      log.info('Refreshing YouTube stream URL before seek')
+      void play(seekTrack, commandSource, safePosMs, true)
       return
     }
 
