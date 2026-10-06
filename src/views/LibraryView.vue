@@ -31,6 +31,7 @@ import {
   type LocalArtistSummary,
 } from '@/modules/library/localArtists'
 import { createLogger } from '@/utils/logger'
+import { isEmptyLocalFilesPlaylist } from '@/modules/library/localPlaylists'
 import { usePointerListReorder } from '@/composables/usePointerListReorder'
 import {
   ARTIST_FAVORITE_SOURCES,
@@ -223,6 +224,7 @@ async function loadPlaylists() {
     const localFiles: PlaylistInfo[] = []
     const normal: PlaylistInfo[] = []
     for (const pl of raw) {
+      if (isEmptyLocalFilesPlaylist(pl)) continue
       if (LIKED_NAMES.includes(pl.name)) liked.push(pl)
       else if (LOCAL_NAMES.includes(pl.name)) localFiles.push(pl)
       else normal.push(pl)
