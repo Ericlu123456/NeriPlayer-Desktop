@@ -81,10 +81,7 @@ async fn github_snapshot(
             challenge,
         }));
     }
-    for filename in [
-        serializer::get_filename(config.data_saver),
-        serializer::get_filename(!config.data_saver),
-    ] {
+    for filename in serializer::legacy_backup_filenames(config.data_saver) {
         if let Some(content) = api
             .get_file_at_ref(
                 &config.owner,

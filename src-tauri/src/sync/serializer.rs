@@ -36,6 +36,16 @@ const MAX_JSON_BYTES: usize = 8 * 1024 * 1024;
 const MAX_DECOMPRESSED_BYTES: u64 = 16 * 1024 * 1024;
 
 /// 返回省流模式使用的文件名
+/// Android 旧版单文件备份的读取顺序（SyncDataSerializer）：省流模式自 2026-07 起写 `backup-raw.bin`
+/// （裸 GZIP ProtoBuf），更早的是 `backup.bin` / `backup.json`。只有 404 才继续尝试下一个文件
+pub fn legacy_backup_filenames(data_saver: bool) -> [&'static str; 3] {
+    if data_saver {
+        ["backup-raw.bin", "backup.bin", "backup.json"]
+    } else {
+        ["backup.json", "backup-raw.bin", "backup.bin"]
+    }
+}
+
 pub fn get_filename(data_saver: bool) -> &'static str {
     if data_saver { "backup.bin" } else { "backup.json" }
 }
@@ -897,6 +907,12 @@ fn proto_to_playlist_song_deletion(p: &ProtoSyncPlaylistSongDeletion) -> SyncPla
 #[cfg(test)]
 mod compressed_contract_tests {
     use super::*;
+
+    #[test]
+    fn legacy_backup_read_order_matches_android() {
+        assert_eq!(legacy_backup_filenames(true), ["backup-raw.bin", "backup.bin", "backup.json"]);
+        assert_eq!(legacy_backup_filenames(false), ["backup.json", "backup-raw.bin", "backup.bin"]);
+    }
 
     fn sample_sync_data() -> SyncData {
         let mut data = SyncData {
