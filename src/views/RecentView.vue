@@ -12,6 +12,7 @@ import TrackSelectionToolbar from '@/components/TrackSelectionToolbar.vue'
 import LocateTrackFab from '@/components/LocateTrackFab.vue'
 import { useTrackSelection } from '@/composables/useTrackSelection'
 import { useLocateCurrentTrack } from '@/composables/useLocateCurrentTrack'
+import { useTrackDownloadMenu } from '@/composables/useTrackDownloadMenu'
 import {
   createContextMenuItem,
   type ContextMenuActionItem,
@@ -135,6 +136,8 @@ function closeTrackMenu() {
   trackMenu.value.show = false
 }
 
+const { downloadMenuItem, downloadFromMenu } = useTrackDownloadMenu(() => trackMenu.value.track, closeTrackMenu)
+
 function addToQueueNext(track: TrackInfo) {
   closeTrackMenu()
   player.addToQueueNext(track)
@@ -183,6 +186,7 @@ const trackMenuItems = computed<ContextMenuItem[]>(() => [
   createContextMenuItem(t('player.play_next'), { id: 'play-next', icon: 'queue_play_next' }),
   createContextMenuItem(t('player.add_to_queue'), { id: 'add-to-queue', icon: 'add_to_queue' }),
   createContextMenuItem(t('player.add_to_playlist'), { id: 'add-to-playlist', icon: 'playlist_add' }),
+  downloadMenuItem.value,
 ])
 
 function handleTrackMenuClick(item: ContextMenuActionItem) {
@@ -202,6 +206,9 @@ function handleTrackMenuClick(item: ContextMenuActionItem) {
       break
     case 'add-to-playlist':
       openAddToPlaylist(track)
+      break
+    case 'download':
+      void downloadFromMenu()
       break
   }
 }

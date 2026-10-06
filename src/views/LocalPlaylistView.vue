@@ -9,6 +9,7 @@ import {
   tracePlaybackUi,
 } from '@/stores/player'
 import { useDownloadStore } from '@/stores/download'
+import { useTrackDownloadMenu } from '@/composables/useTrackDownloadMenu'
 import { useToastStore } from '@/stores/toast'
 import { useI18n } from 'vue-i18n'
 import { invoke } from '@tauri-apps/api/core'
@@ -322,6 +323,8 @@ function closeTrackMenu() {
   trackMenu.value.show = false
 }
 
+const { downloadMenuItem, downloadFromMenu } = useTrackDownloadMenu(() => trackMenu.value.track, closeTrackMenu)
+
 function openAddToPlaylist(track: TrackInfo) {
   closeTrackMenu()
   addToPlaylistTarget.value = track
@@ -396,6 +399,7 @@ const trackMenuItems = computed<ContextMenuItem[]>(() => [
   createContextMenuItem(t('player.play_next'), { id: 'play-next', icon: 'queue_play_next' }),
   createContextMenuItem(t('player.add_to_queue'), { id: 'add-to-queue', icon: 'add_to_queue' }),
   createContextMenuItem(t('player.add_to_playlist'), { id: 'add-to-playlist', icon: 'playlist_add' }),
+  downloadMenuItem.value,
   createContextMenuItem(t('library.remove_from_playlist'), {
     id: 'remove-from-playlist',
     icon: 'delete',
@@ -408,6 +412,9 @@ function handleTrackMenuClick(item: ContextMenuActionItem) {
   if (!track) return
 
   switch (item.id) {
+    case 'download':
+      void downloadFromMenu()
+      break
     case 'select':
       closeTrackMenu()
       enterSelectionMode(track)
@@ -748,7 +755,9 @@ function addSelectedToQueueEnd() {
 }
 
 function downloadSelected() {
-  for (const track of selectedTracks.value) downloadStore.downloadTrack(track)
+  const targets = [...selectedTracks.value]
+  leaveSelectionMode()
+  for (const track of targets) void downloadStore.downloadTrack(track)
 }
 
 function playAll() {
@@ -803,8 +812,6 @@ function schedulePlaylistRefresh() {
 
 onMounted(async () => {
   loadDetail()
-  downloadStore.initEvents()
-  downloadStore.loadDownloads()
   try {
     const unlisten = await listen('playlists-changed', () => {
       schedulePlaylistRefresh()

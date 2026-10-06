@@ -5,7 +5,7 @@ use lofty::config::ParseOptions;
 use lofty::file::{AudioFile, FileType, TaggedFileExt};
 use lofty::probe::Probe;
 use lofty::properties::FileProperties;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 use crate::error::{AppError, AppResult};
 use crate::library::{playlist::PlaylistStore, scanner};
 use crate::state::TrackInfo;
@@ -147,6 +147,9 @@ pub async fn get_local_playlist_tracks() -> AppResult<Vec<TrackInfo>> {
 
 #[tauri::command]
 pub async fn edit_local_file_tags(app: AppHandle, scan_root: String, file_path: String, title: String, artist: String, album: String) -> AppResult<()> {
+    super::player_cmd::release_player_file(
+        Arc::clone(&app.state::<crate::state::AppState>().player), file_path.clone(),
+    ).await?;
     tokio::task::spawn_blocking(move || {
         let root = std::path::Path::new(&scan_root);
         let audio = std::path::Path::new(&file_path);

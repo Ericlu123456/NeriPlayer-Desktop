@@ -8,6 +8,7 @@ import BilibiliCoverImage from '@/components/BilibiliCoverImage.vue'
 import ContextMenu from '@/components/ui/ContextMenu.vue'
 import LocateTrackFab from '@/components/LocateTrackFab.vue'
 import { useLocateCurrentTrack } from '@/composables/useLocateCurrentTrack'
+import { useTrackDownloadMenu } from '@/composables/useTrackDownloadMenu'
 import {
   createContextMenuItem,
   type ContextMenuActionItem,
@@ -94,9 +95,12 @@ function closeTrackMenu() {
   trackMenu.value.show = false
 }
 
+const { downloadMenuItem, downloadFromMenu } = useTrackDownloadMenu(() => trackMenu.value.track, closeTrackMenu)
+
 const trackMenuItems = computed<ContextMenuItem[]>(() => [
   createContextMenuItem(t('player.play_next'), { id: 'play-next', icon: 'queue_play_next' }),
   createContextMenuItem(t('player.add_to_queue'), { id: 'add-to-queue', icon: 'add_to_queue' }),
+  downloadMenuItem.value,
 ])
 
 function handleTrackMenuClick(item: ContextMenuActionItem) {
@@ -108,6 +112,9 @@ function handleTrackMenuClick(item: ContextMenuActionItem) {
       break
     case 'add-to-queue':
       player.addToQueueEnd(track)
+      break
+    case 'download':
+      void downloadFromMenu()
       break
   }
   closeTrackMenu()

@@ -152,6 +152,10 @@ enum AudioCmd {
     Pause,
     Resume,
     Stop,
+    ReleaseFile {
+        path: String,
+        reply: mpsc::Sender<Option<u64>>,
+    },
     SetVolume(f32),
     SetOutputDevice {
         name: Option<String>,
@@ -419,9 +423,7 @@ fn matches_output_session(
     current_generation == reported_generation && Arc::ptr_eq(current_cancel, reported_cancel)
 }
 
-/// 全局收尸线程：接管 stop 时尚未退出的解码 worker 句柄，在后台 join。
-/// stop 的调用者（音频控制线程/命令路径）绝不能被 join 阻塞，
-/// 而直接丢弃句柄又会让阻塞中的孤儿线程无人回收——移交给专用线程两全
+// 远程 worker 可能阻塞在网络读上，交给后台回收避免拖住音频控制线程
 fn reap_worker_handle(handle: JoinHandle<()>) {
     use std::sync::OnceLock;
     static REAPER: OnceLock<Option<mpsc::Sender<JoinHandle<()>>>> = OnceLock::new();
@@ -440,6 +442,55 @@ fn reap_worker_handle(handle: JoinHandle<()>) {
     if let Some(sender) = sender {
         // 发送失败（收尸线程已退出）时退化为旧行为：丢弃句柄
         let _ = sender.send(handle);
+    }
+}
+
+fn finish_decode_worker(
+    source: &AudioSource,
+    shared: &PlaybackShared,
+    worker: JoinHandle<()>,
+) {
+    shared.cancelled.store(true, Ordering::Release);
+    shared.wake.notify_all();
+    // 文件操作必须等解码器关闭句柄，远程读仍在后台回收
+    if matches!(source, AudioSource::File(_, _)) || worker.is_finished() {
+        let _ = worker.join();
+    } else {
+        reap_worker_handle(worker);
+    }
+}
+
+fn matches_local_file(source: &AudioSource, target: &Path) -> bool {
+    let AudioSource::File(path, _) = source else { return false };
+    let source = Path::new(path);
+    if let (Ok(source), Ok(target)) = (source.canonicalize(), target.canonicalize()) {
+        return source == target;
+    }
+    #[cfg(windows)]
+    {
+        source.to_string_lossy().eq_ignore_ascii_case(&target.to_string_lossy())
+    }
+    #[cfg(not(windows))]
+    {
+        source == target
+    }
+}
+
+fn invalidate_released_generation(generation: &AtomicU64, released: u64) {
+    // 用户已切歌时不改变新请求，只有被释放的会话仍当前时才作废首播回包
+    let _ = generation.compare_exchange(
+        released, released.saturating_add(1), Ordering::AcqRel, Ordering::Acquire,
+    );
+}
+
+pub struct FileReleaseRequest {
+    receiver: mpsc::Receiver<Option<u64>>,
+}
+
+impl FileReleaseRequest {
+    pub fn wait(self) -> AppResult<Option<u64>> {
+        self.receiver.recv_timeout(COMMAND_TIMEOUT)
+            .map_err(|error| AppError::Audio(format!("File release timeout: {error}")))
     }
 }
 
@@ -465,13 +516,7 @@ impl PlaybackSession {
         self.shared.wake.notify_all();
         let _ = self.stream.pause();
         if let Some(worker) = self.worker.take() {
-            if worker.is_finished() {
-                let _ = worker.join();
-            } else {
-                // worker 尚未退出（可能阻塞在网络读上）：交给全局收尸线程
-                // 后台 join，既不丢句柄也不阻塞 stop 的调用者
-                reap_worker_handle(worker);
-            }
+            finish_decode_worker(&self.source, &self.shared, worker);
         }
     }
 
@@ -880,12 +925,31 @@ impl PlayerEngine {
     pub fn stop(&mut self) {
         self.transition_generation.fetch_add(1, Ordering::AcqRel);
         let _ = self.cmd_tx.send(AudioCmd::Stop);
+        self.clear_playback_state();
+    }
+
+    fn clear_playback_state(&mut self) {
         self.is_playing = false;
         self.current_path = None;
         self.duration_ms = 0;
         self.loaded_generation = None;
         self.clock = None;
         SharedAudioLevel::reset(&self.shared_audio_level);
+    }
+
+    pub fn request_file_release(&mut self, path: String) -> AppResult<FileReleaseRequest> {
+        self.ensure_alive();
+        let (reply, receiver) = mpsc::channel();
+        self.cmd_tx.send(AudioCmd::ReleaseFile { path, reply })
+            .map_err(|error| AppError::Audio(error.to_string()))?;
+        Ok(FileReleaseRequest { receiver })
+    }
+
+    pub fn complete_file_release(&mut self, released_generation: Option<u64>) -> bool {
+        if released_generation.is_some() && self.loaded_generation == released_generation {
+            self.clear_playback_state();
+        }
+        released_generation.is_some()
     }
 
     pub fn set_volume(&mut self, volume: f32) {
@@ -1573,6 +1637,20 @@ fn audio_control_loop(
                     session.stop();
                 }
                 SharedAudioLevel::reset(&shared_level);
+            }
+            AudioCmd::ReleaseFile { path, reply } => {
+                let released = current.as_ref()
+                    .filter(|session| matches_local_file(&session.source, Path::new(&path)))
+                    .map(|session| session.playback_generation);
+                if let Some(released) = released {
+                    invalidate_released_generation(&playback_generation, released);
+                    if let Some(mut session) = current.take() {
+                        session.stop();
+                    }
+                    SharedAudioLevel::reset(&shared_level);
+                }
+                // 本地 worker join 完成后才允许调用方删除或改写文件
+                let _ = reply.send(released);
             }
             AudioCmd::SetVolume(next_volume) => {
                 volume = next_volume.clamp(0.0, 1.0);
@@ -2332,8 +2410,7 @@ fn prepare_session(
     ) {
         Ok(stream) => stream,
         Err(error) => {
-            shared.cancelled.store(true, Ordering::Release);
-            shared.wake.notify_all();
+            finish_decode_worker(&source, &shared, worker);
             return Err(error);
         }
     };
@@ -2349,6 +2426,7 @@ fn prepare_session(
         shared.cancelled.store(true, Ordering::Release);
         shared.wake.notify_all();
         let _ = stream.pause();
+        finish_decode_worker(&source, &shared, worker);
         return Err(error);
     }
     let ready_wait_ms = ready_started.elapsed().as_millis();
@@ -2921,6 +2999,157 @@ mod tests {
     use std::sync::mpsc;
     use std::sync::Arc;
     use std::time::Duration;
+
+    #[test]
+    fn local_file_release_waits_for_decoder_before_file_operations() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("playing.aac");
+        std::fs::write(&path, include_bytes!("fixtures/hls-silence.aac")).unwrap();
+        let source = AudioSource::File(path.to_string_lossy().into_owned(), 192);
+        let mut decoder = make_decoder_for_position(&source, 0, false).unwrap();
+        assert!(decoder.next().is_some());
+        let shared = Arc::new(super::PlaybackShared {
+            ring: Arc::new(crate::audio::buffered::PcmRing::new(8)),
+            channels: 1, sample_rate: 48_000,
+            paused: std::sync::atomic::AtomicBool::new(true),
+            buffering: std::sync::atomic::AtomicBool::new(false),
+            finished: std::sync::atomic::AtomicBool::new(false),
+            cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            volume: super::AtomicF32::new(1.0), fade_gain: super::AtomicF32::new(1.0),
+            speed: super::AtomicF32::new(1.0),
+            buffer_target_frames: std::sync::atomic::AtomicUsize::new(1),
+            clock: Arc::new(PlaybackClock::new(0)),
+            wake_lock: std::sync::Mutex::new(()), wake: std::sync::Condvar::new(),
+            device_lost: std::sync::atomic::AtomicBool::new(false),
+        });
+        let exited = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let worker_shared = Arc::clone(&shared);
+        let worker_exited = Arc::clone(&exited);
+        let worker = std::thread::spawn(move || {
+            while !worker_shared.cancelled.load(Ordering::Acquire) {
+                let guard = worker_shared.wake_lock.lock().unwrap();
+                let _ = worker_shared.wake.wait_timeout(guard, Duration::from_millis(20)).unwrap();
+            }
+            std::thread::sleep(Duration::from_millis(80));
+            drop(decoder);
+            worker_exited.store(true, Ordering::Release);
+        });
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            assert!(std::fs::OpenOptions::new().write(true).share_mode(0).open(&path).is_err());
+        }
+        super::finish_decode_worker(&source, &shared, worker);
+        let released = exited.load(Ordering::Acquire);
+        // 失败时也让临时文件在解码线程退出后清理
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        while !exited.load(Ordering::Acquire) && std::time::Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        assert!(released, "file release must wait until the decoder has dropped its handle");
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            drop(std::fs::OpenOptions::new().write(true).share_mode(0).open(&path).unwrap());
+        }
+        let renamed = path.with_file_name("released.aac");
+        std::fs::rename(&path, &renamed).unwrap();
+        std::fs::remove_file(renamed).unwrap();
+    }
+
+    #[test]
+    fn local_file_release_matches_only_the_requested_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("playing.aac");
+        let other = directory.path().join("other.aac");
+        std::fs::write(&path, b"audio").unwrap();
+        std::fs::write(&other, b"audio").unwrap();
+        let source = AudioSource::File(path.to_string_lossy().into_owned(), 0);
+        assert!(super::matches_local_file(&source, &directory.path().join(".").join("playing.aac")));
+        assert!(!super::matches_local_file(&source, &other));
+        assert!(!super::matches_local_file(&AudioSource::Bytes(Arc::from([]), 0), &path));
+        #[cfg(windows)]
+        assert!(super::matches_local_file(&source, &directory.path().join("PLAYING.AAC")));
+    }
+
+    #[test]
+    fn local_file_release_does_not_wait_for_a_remote_worker() {
+        let buffer = crate::audio::growing::GrowingAudioBuffer::new();
+        let source = AudioSource::growing(buffer.reader(), 0);
+        let shared = Arc::new(super::PlaybackShared {
+            ring: Arc::new(crate::audio::buffered::PcmRing::new(8)),
+            channels: 1, sample_rate: 48_000,
+            paused: std::sync::atomic::AtomicBool::new(false),
+            buffering: std::sync::atomic::AtomicBool::new(true),
+            finished: std::sync::atomic::AtomicBool::new(false),
+            cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            volume: super::AtomicF32::new(1.0), fade_gain: super::AtomicF32::new(1.0),
+            speed: super::AtomicF32::new(1.0),
+            buffer_target_frames: std::sync::atomic::AtomicUsize::new(1),
+            clock: Arc::new(PlaybackClock::new(0)),
+            wake_lock: std::sync::Mutex::new(()), wake: std::sync::Condvar::new(),
+            device_lost: std::sync::atomic::AtomicBool::new(false),
+        });
+        let (resume, blocked) = mpsc::channel();
+        let (exited, done) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let _ = blocked.recv_timeout(Duration::from_secs(1));
+            let _ = exited.send(());
+        });
+        super::finish_decode_worker(&source, &shared, worker);
+        assert!(matches!(done.try_recv(), Err(mpsc::TryRecvError::Empty)));
+        assert!(shared.cancelled.load(Ordering::Acquire));
+        let _ = resume.send(());
+        done.recv_timeout(Duration::from_secs(1)).unwrap();
+    }
+
+    fn player_without_output(generation: u64) -> (super::PlayerEngine, mpsc::Receiver<AudioCmd>) {
+        let (cmd_tx, receiver) = mpsc::channel();
+        (super::PlayerEngine {
+            cmd_tx,
+            thread_alive: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            is_playing: true, volume: 1.0, speed: 1.0,
+            current_path: Some("other.aac".into()), duration_ms: 192,
+            shared_audio_level: crate::audio::analyzer::SharedAudioLevel::new(),
+            effects_params: crate::audio::effects::AudioEffectsParams::new_shared(),
+            playback_generation: Arc::new(AtomicU64::new(generation)),
+            seek_generation: Arc::new(AtomicU64::new(0)),
+            transition_generation: Arc::new(AtomicU64::new(0)),
+            loaded_generation: Some(generation), clock: Some(Arc::new(PlaybackClock::new(42))),
+        }, receiver)
+    }
+
+    #[test]
+    fn local_file_release_reply_does_not_clear_a_newer_playback_session() {
+        let (mut player, commands) = player_without_output(8);
+        let request = player.request_file_release("previous.aac".into()).unwrap();
+        let AudioCmd::ReleaseFile { path, reply } = commands.recv().unwrap() else {
+            panic!("expected a file release command");
+        };
+        assert_eq!(path, "previous.aac");
+        reply.send(Some(7)).unwrap();
+        assert!(player.complete_file_release(request.wait().unwrap()));
+        assert!(player.is_playing);
+        assert_eq!(player.current_path.as_deref(), Some("other.aac"));
+        assert_eq!(player.position_ms(), 42);
+        assert!(!player.complete_file_release(None));
+        assert!(player.complete_file_release(Some(8)));
+        assert!(!player.is_playing);
+        assert!(player.current_path.is_none());
+        assert_eq!(player.position_ms(), 0);
+    }
+
+    #[test]
+    fn local_file_release_invalidates_stale_start_without_superseding_a_new_request() {
+        let (mut player, _) = player_without_output(7);
+        super::invalidate_released_generation(&player.playback_generation, 7);
+        assert_eq!(player.playback_generation.load(Ordering::Acquire), 8);
+        let started = super::PlaybackStarted { duration_ms: 192, clock: Arc::new(PlaybackClock::new(0)) };
+        assert!(player.complete_start(started, 7, "released.aac".into()).is_err());
+        assert_eq!(player.current_path.as_deref(), Some("other.aac"));
+        super::invalidate_released_generation(&player.playback_generation, 7);
+        assert_eq!(player.playback_generation.load(Ordering::Acquire), 8);
+    }
 
     #[test]
     fn android_alignment_growing_seek_retains_buffer_until_last_source_releases() {

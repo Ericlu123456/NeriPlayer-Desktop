@@ -88,9 +88,8 @@ const activeCount = computed(() => downloadStore.runningDownloadCount)
 const finishedTaskCount = computed(() => downloadStore.activeDownloads.length - activeCount.value)
 const totalSize = computed(() => downloadStore.downloads.reduce((sum, item) => sum + (item.fileSize || 0), 0))
 const selectedCount = computed(() => selectedIds.value.size)
-const selectableVisibleDownloads = computed(() => filteredDownloads.value.filter(item => !isTrackInUse(item)))
-const visibleSelectedCount = computed(() => selectableVisibleDownloads.value.filter(item => selectedIds.value.has(item.id)).length)
-const allVisibleSelected = computed(() => selectableVisibleDownloads.value.length > 0 && visibleSelectedCount.value === selectableVisibleDownloads.value.length)
+const visibleSelectedCount = computed(() => filteredDownloads.value.filter(item => selectedIds.value.has(item.id)).length)
+const allVisibleSelected = computed(() => filteredDownloads.value.length > 0 && visibleSelectedCount.value === filteredDownloads.value.length)
 const summaryText = computed(() => t('download.summary', {
   active: activeCount.value,
   downloaded: downloadedCount.value,
@@ -120,7 +119,6 @@ const downloadContextMenuItems = computed<readonly ContextMenuItem[]>(() => {
     })]
   }
 
-  const isInUse = isTrackInUse(target.track)
   return [
     createContextMenuItem(t('common.multi_select'), {
       id: 'select',
@@ -134,14 +132,13 @@ const downloadContextMenuItems = computed<readonly ContextMenuItem[]>(() => {
     createContextMenuItem(t('download.redownload'), {
       id: 'redownload',
       icon: 'refresh',
-      disabled: isInUse,
+      disabled: downloadStore.isDownloading(target.track.id),
     }),
     createContextMenuSeparator('download-actions'),
     createContextMenuItem(t('common.delete'), {
       id: 'delete',
       icon: 'delete',
       danger: true,
-      disabled: isInUse,
     }),
   ]
 })
@@ -242,10 +239,6 @@ function downloadToTrack(track: DownloadedTrack): TrackInfo {
   }
 }
 
-function isTrackInUse(track: DownloadedTrack | null | undefined) {
-  return !!track && player.isPlayingFromDownload && player.currentTrack?.id === track.id
-}
-
 function playDownloadedTrack(track: DownloadedTrack) {
   if (selectionMode.value) {
     toggleSelected(track.id)
@@ -306,10 +299,6 @@ function handleDownloadContextMenuClick(item: ContextMenuActionItem) {
 }
 
 function enterSelectionMode(track?: DownloadedTrack) {
-  if (track && isTrackInUse(track)) {
-    toast.show(t('download.in_use_hint'), 'info')
-    return
-  }
   selectionMode.value = true
   if (track) selectedIds.value = new Set(selectedIds.value).add(track.id)
 }
@@ -320,11 +309,6 @@ function leaveSelectionMode() {
 }
 
 function toggleSelected(id: string) {
-  const track = downloadStore.downloads.find(item => item.id === id)
-  if (isTrackInUse(track)) {
-    toast.show(t('download.in_use_hint'), 'info')
-    return
-  }
   const next = new Set(selectedIds.value)
   if (next.has(id)) next.delete(id)
   else next.add(id)
@@ -342,18 +326,12 @@ function toggleSelectAllVisible() {
   }
 
   const next = new Set(selectedIds.value)
-  for (const item of filteredDownloads.value) {
-    if (!isTrackInUse(item)) next.add(item.id)
-  }
+  for (const item of filteredDownloads.value) next.add(item.id)
   selectedIds.value = next
   if (next.size > 0) selectionMode.value = true
 }
 
 function requestDelete(track: DownloadedTrack) {
-  if (isTrackInUse(track)) {
-    toast.show(t('download.in_use_hint'), 'info')
-    return
-  }
   deleteTarget.value = track
   showDeleteDialog.value = true
 }
@@ -371,20 +349,13 @@ async function confirmDelete() {
   try {
     if (deleteTarget.value) {
       const target = deleteTarget.value
-      if (isTrackInUse(target)) {
-        toast.show(t('download.in_use_hint'), 'info')
-        return
-      }
       await downloadStore.deleteDownload(target.id)
-      player.handleDownloadedFileRemoved(target.id, target.filePath)
     } else {
-      const targets = downloadStore.downloads.filter(track => selectedIds.value.has(track.id) && !isTrackInUse(track))
+      const targets = downloadStore.downloads.filter(track => selectedIds.value.has(track.id))
       let deleted = 0
       for (const target of targets) {
         try {
-          if (isTrackInUse(target)) throw new Error(t('download.in_use_hint'))
           await downloadStore.deleteDownload(target.id, { silent: true })
-          player.handleDownloadedFileRemoved(target.id, target.filePath)
           deleted++
         } catch (error) {
           deletionProgress.value.failed++
@@ -408,11 +379,7 @@ async function confirmDelete() {
 }
 
 async function redownloadTrack(track: DownloadedTrack) {
-  if (isTrackInUse(track)) {
-    toast.show(t('download.in_use_hint'), 'info')
-    return
-  }
-  player.handleDownloadedFileRemoved(track.id, track.filePath)
+  if (downloadStore.isDownloading(track.id)) return
   try {
     await downloadStore.redownloadTrack(downloadToTrack(track))
   } catch (error) {
@@ -567,12 +534,11 @@ function progressWidth(task: ActiveDownloadTask) {
           :class="{
             selected: selectedIds.has(track.id),
             playing: player.currentTrack?.id === track.id,
-            disabled: isTrackInUse(track),
           }"
           @click="playDownloadedTrack(track)"
           @contextmenu.prevent.stop="handleDownloadedRowContextMenu($event, track)"
         >
-          <button v-if="selectionMode" class="select-dot" :disabled="isTrackInUse(track)" @click.stop="toggleSelected(track.id)">
+          <button v-if="selectionMode" class="select-dot" @click.stop="toggleSelected(track.id)">
             <span class="material-symbols-rounded filled">{{ selectedIds.has(track.id) ? 'check_circle' : 'radio_button_unchecked' }}</span>
           </button>
 
@@ -595,10 +561,10 @@ function progressWidth(task: ActiveDownloadTask) {
             <button class="icon-action" :title="t('download.open_folder')" @click="revealDownloadFile(track)">
               <span class="material-symbols-rounded">folder_open</span>
             </button>
-            <button class="icon-action" :title="t('download.redownload')" :disabled="isTrackInUse(track)" @click="redownloadTrack(track)">
+            <button class="icon-action" :title="t('download.redownload')" :disabled="downloadStore.isDownloading(track.id)" @click="redownloadTrack(track)">
               <span class="material-symbols-rounded">refresh</span>
             </button>
-            <button class="icon-action danger" :title="t('common.delete')" :disabled="isTrackInUse(track)" @click="requestDelete(track)">
+            <button class="icon-action danger" :title="t('common.delete')" @click="requestDelete(track)">
               <span class="material-symbols-rounded">delete</span>
             </button>
           </div>
@@ -814,8 +780,7 @@ function progressWidth(task: ActiveDownloadTask) {
   color: var(--md-primary);
   flex-shrink: 0;
 
-  &:hover:not(:disabled) { background: color-mix(in srgb, var(--md-primary) 10%, transparent); }
-  &:disabled { opacity: 0.35; cursor: not-allowed; }
+  &:hover { background: color-mix(in srgb, var(--md-primary) 10%, transparent); }
 }
 
 .cover-box {
@@ -1122,7 +1087,6 @@ function progressWidth(task: ActiveDownloadTask) {
   padding: 8px 10px;
 
   &.selected { background: color-mix(in srgb, var(--md-primary) 10%, transparent); }
-  &.disabled { cursor: default; opacity: 0.68; }
 }
 
 .cover-box {

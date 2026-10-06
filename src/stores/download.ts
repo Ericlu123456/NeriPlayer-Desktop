@@ -3,7 +3,7 @@ import { ref, computed, watch } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { openPath } from '@tauri-apps/plugin-opener'
-import type { TrackInfo } from './player'
+import { usePlayerStore, type TrackInfo } from './player'
 import { useSettingsStore } from './settings'
 import { useToastStore } from './toast'
 import i18n from '@/i18n'
@@ -548,8 +548,15 @@ export const useDownloadStore = defineStore('download', () => {
 
   async function deleteDownload(trackId: string, options: { silent?: boolean } = {}) {
     try {
-      await invoke('delete_download', { trackId })
-      downloads.value = downloads.value.filter(t => t.id !== trackId)
+      const target = getDownloadedTrack(trackId)
+      const player = usePlayerStore()
+      const remove = async () => {
+        await invoke('delete_download', { trackId })
+        downloads.value = downloads.value.filter(t => t.id !== trackId)
+        player.handleDownloadedFileRemoved(trackId, target?.filePath)
+      }
+      if (target?.filePath) await player.withReleasedAudioFile(target.filePath, remove)
+      else await remove()
       if (!options.silent) {
         const toast = useToastStore()
         toast.success((i18n.global as any).t('download.deleted'))

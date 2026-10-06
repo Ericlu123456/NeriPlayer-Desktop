@@ -2,7 +2,7 @@ import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import { convertFileSrc, invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
-import type { TrackInfo } from './player'
+import { usePlayerStore, type TrackInfo } from './player'
 import { useSettingsStore } from './settings'
 import { createLogger } from '@/utils/logger'
 
@@ -146,8 +146,12 @@ export const useLibraryStore = defineStore('library', () => {
     }
     isSavingTags.value = true
     try {
-      await invoke('edit_local_file_tags', { scanRoot: scanDir.value, filePath: track.audioUrl, ...tags })
-      tracks.value = tracks.value.map(item => item.id === track.id ? { ...item, ...tags } : item)
+      const player = usePlayerStore()
+      await player.withReleasedAudioFile(track.audioUrl, async () => {
+        await invoke('edit_local_file_tags', { scanRoot: scanDir.value, filePath: track.audioUrl, ...tags })
+        tracks.value = tracks.value.map(item => item.id === track.id ? { ...item, ...tags } : item)
+        if (player.currentTrack?.audioUrl === track.audioUrl) player.updateCurrentTrackInfo(tags)
+      })
     } finally {
       isSavingTags.value = false
     }

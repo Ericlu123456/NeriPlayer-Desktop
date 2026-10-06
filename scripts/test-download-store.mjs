@@ -77,6 +77,14 @@ async function runtime(options = {}) {
       return () => events.delete(name)
     } },
     './settings': { useSettingsStore: () => settings },
+    './player': { usePlayerStore: () => ({
+      withReleasedAudioFile: async (path, operation) => {
+        invoked.push({ command: 'releaseAudioFile', args: { path } })
+        if (options.release) await options.release.promise
+        return operation()
+      },
+      handleDownloadedFileRemoved: (trackId, path) => invoked.push({ command: 'fileRemoved', args: { trackId, path } }),
+    }) },
     './toast': { useToastStore: () => Object.fromEntries(['show', 'error', 'success'].map(method => [method, (...args) => messages.push({ method, args })])) },
     '@tauri-apps/plugin-opener': { openPath: async path => invoked.push({ command: 'openPath', args: { path } }) },
     '@/i18n': { default: { global: { t: (key, params) => params ? `${key}:${JSON.stringify(params)}` : key } } },
@@ -472,5 +480,18 @@ for (const retained of [false, true]) {
   r.store.downloads = [{ id: saved.id, title: saved.title, artist: saved.artist, album: saved.album, durationMs: saved.duration_ms, source: saved.source, filePath: saved.file_path, fileSize: saved.file_size, downloadedAt: saved.downloaded_at }]
   await assert.rejects(r.store.deleteDownload(saved.id), /fixture delete failed/)
   assert.equal(r.store.downloads.length, retained ? 1 : 0, 'failed deletion refreshes the actual manifest state')
+}
+{
+  const release = deferred()
+  const saved = manifestTrack('playing', 'E:/Music/playing.flac')
+  const r = await runtime({ release, downloads: [saved] })
+  await r.store.loadDownloads()
+  const removing = r.store.deleteDownload(saved.id, { silent: true })
+  await flush()
+  assert.equal(r.invoked.some(call => call.command === 'delete_download'), false, 'delete must wait for file release')
+  assert.equal(r.store.downloads.length, 1)
+  release.resolve(); await removing
+  assert.deepEqual(r.invoked.filter(call => ['releaseAudioFile', 'delete_download', 'fileRemoved'].includes(call.command)).map(call => call.command), ['releaseAudioFile', 'delete_download', 'fileRemoved'])
+  assert.equal(r.store.downloads.length, 0)
 }
 console.log('download store lifecycle tests passed')

@@ -434,6 +434,7 @@ fn main() {
             local_files_cmd::get_local_playlist_tracks,
             local_files_cmd::edit_local_file_tags,
             local_files_cmd::get_local_audio_info,
+            player_cmd::release_audio_file,
             library_cmd::list_playlists,
             library_cmd::get_playlist_usage_stats,
             library_cmd::get_home_local_playlists,

@@ -1143,6 +1143,22 @@ pub async fn stop(state: State<'_, AppState>) -> AppResult<()> {
     Ok(())
 }
 
+pub(crate) async fn release_player_file(
+    player: Arc<Mutex<PlayerEngine>>,
+    path: String,
+) -> AppResult<bool> {
+    tokio::task::spawn_blocking(move || {
+        let request = player.lock().request_file_release(path)?;
+        let released = request.wait()?;
+        Ok(player.lock().complete_file_release(released))
+    }).await.map_err(|error| AppError::Other(error.to_string()))?
+}
+
+#[tauri::command]
+pub async fn release_audio_file(path: String, state: State<'_, AppState>) -> AppResult<bool> {
+    release_player_file(Arc::clone(&state.player), path).await
+}
+
 #[tauri::command]
 pub async fn set_speed(speed: f32, state: State<'_, AppState>) -> AppResult<()> {
     state.player.lock().set_speed(speed);

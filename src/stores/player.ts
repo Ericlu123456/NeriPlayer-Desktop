@@ -313,7 +313,25 @@ let _needsReload = false
 let _remoteSyncGuardUntil = 0
 let _currentLoadedFromDownloadPath: string | null = null
 
+function audioFilePathKey(path: string | undefined | null) {
+  const key = (path || '').replace(/\\/g, '/').trim()
+  return /^[a-z]:\//i.test(key) || key.startsWith('//') ? key.toLowerCase() : key
+}
+
 export const usePlayerStore = defineStore('player', () => {
+  const audioFileMutations = new Map<string, {
+    trackId: string | null
+    requestToken: number | null
+    shouldResume: boolean
+    releasesCurrentPlayback: boolean
+    positionMs: number
+    finished: Promise<void>
+  }>()
+
+  function currentAudioFileMutation() {
+    return [...audioFileMutations.values()].find(mutation =>
+      mutation.trackId === currentTrack.value?.id && mutation.requestToken === playbackRequestToken)
+  }
   const settings = useSettingsStore()
   const isPlaying = ref(false)
   const currentTrack = ref<TrackInfo | null>(null)
@@ -1041,6 +1059,20 @@ export const usePlayerStore = defineStore('player', () => {
     startPositionMs = 0,
     forceResolve = false,
   ) {
+    const fileMutation = !isRemotePlaybackTrack(track) && audioFileMutations.get(audioFilePathKey(track.audioUrl))
+    if (fileMutation) {
+      const waitingToken = ++playbackRequestToken
+      fileMutation.requestToken = waitingToken
+      fileMutation.trackId = currentTrack.value?.id || track.id
+      fileMutation.shouldResume = true
+      fileMutation.positionMs = Math.max(0, Math.round(startPositionMs))
+      playbackStartupWatchdog.cancel()
+      await fileMutation.finished
+      if (waitingToken === playbackRequestToken && fileMutation.shouldResume) {
+        await play(track, commandSource, fileMutation.positionMs, forceResolve)
+      }
+      return
+    }
     initEvents()
     markCommandSource(commandSource)
     const token = ++playbackRequestToken
@@ -1199,7 +1231,7 @@ export const usePlayerStore = defineStore('player', () => {
       isPlayingFromCache.value = false
 
       const downloaded = useDownloadStore().getDownloadedTrack(track.id)
-      if (downloaded?.filePath && isRemotePlaybackTrack(track)) {
+      if (downloaded?.filePath && !audioFileMutations.has(audioFilePathKey(downloaded.filePath)) && isRemotePlaybackTrack(track)) {
         try {
           const startPlan = currentLoadStartPlan()
           dur = await playDownloadedFile(
@@ -1662,6 +1694,18 @@ export const usePlayerStore = defineStore('player', () => {
   }
 
   async function togglePlayPause(commandSource: PlaybackCommandSource = 'local') {
+    const mutation = currentAudioFileMutation()
+    if (mutation) {
+      markCommandSource(commandSource)
+      mutation.shouldResume = !isPlaying.value
+      isPlaying.value = mutation.shouldResume
+      if (!mutation.shouldResume && !mutation.releasesCurrentPlayback) {
+        _interpIsPlaying = false
+        freezeRenderedPosition()
+        await invoke('pause')
+      }
+      return
+    }
     markCommandSource(commandSource)
     log.info('togglePlayPause:', { source: commandSource, wasPlaying: isPlaying.value, trackId: currentTrack.value?.id })
     if (isLoadingAudio.value && shouldDeferPlaybackSeek(
@@ -1719,6 +1763,18 @@ export const usePlayerStore = defineStore('player', () => {
   }
 
   async function pause(commandSource: PlaybackCommandSource = 'local') {
+    const mutation = currentAudioFileMutation()
+    if (mutation) {
+      markCommandSource(commandSource)
+      mutation.shouldResume = false
+      isPlaying.value = false
+      if (!mutation.releasesCurrentPlayback) {
+        _interpIsPlaying = false
+        freezeRenderedPosition()
+        await invoke('pause')
+      }
+      return
+    }
     markCommandSource(commandSource)
     playbackStartupWatchdog.cancel()
     // 乐观更新
@@ -1762,6 +1818,13 @@ export const usePlayerStore = defineStore('player', () => {
   }
 
   async function resume(commandSource: PlaybackCommandSource = 'local') {
+    const mutation = currentAudioFileMutation()
+    if (mutation) {
+      markCommandSource(commandSource)
+      mutation.shouldResume = true
+      isPlaying.value = true
+      return
+    }
     markCommandSource(commandSource)
     if (!currentTrack.value) return
     if (isLoadingAudio.value && shouldDeferPlaybackSeek(
@@ -1806,6 +1869,11 @@ export const usePlayerStore = defineStore('player', () => {
     const maxSeekMs = durationMs.value || currentTrack.value?.durationMs || 0
     const posMs = maxSeekMs > 0 ? Math.min(roundedMs, maxSeekMs) : roundedMs
     const safePosMs = markOptimisticSeek(posMs, commandSource, { durationMs: maxSeekMs })
+    const mutation = currentAudioFileMutation()
+    if (mutation) {
+      mutation.positionMs = safePosMs
+      return
+    }
     const seekSeq = lastSeekCommand.value.seq
     const requestGeneration = playbackRequestToken
 
@@ -2437,7 +2505,83 @@ export const usePlayerStore = defineStore('player', () => {
     return originalTrackInfo !== null
   }
 
+  async function withReleasedAudioFile<T>(filePath: string, operation: () => Promise<T>): Promise<T> {
+    const key = audioFilePathKey(filePath)
+    if (audioFileMutations.has(key)) throw new Error('An operation on this audio file is already in progress')
+    const track = currentTrack.value
+    const usesFile = !!track && (
+      (!isLoadingAudio.value && loadedPlaybackRequestToken === playbackRequestToken && audioFilePathKey(_currentLoadedFromDownloadPath) === key)
+      || audioFilePathKey(track.audioUrl) === key
+      || (isLoadingAudio.value && audioFilePathKey(useDownloadStore().getDownloadedTrack(track.id)?.filePath) === key)
+    )
+    let finishMutation!: () => void
+    const mutation = {
+      trackId: usesFile ? track?.id || null : null,
+      requestToken: null as number | null,
+      shouldResume: usesFile && (isPlaying.value || isLoadingAudio.value),
+      releasesCurrentPlayback: usesFile,
+      positionMs: positionMs.value,
+      finished: new Promise<void>(resolve => { finishMutation = resolve }),
+    }
+    audioFileMutations.set(key, mutation)
+    let requestToken: number | null = null
+    try {
+      if (usesFile && track) {
+        requestToken = ++playbackRequestToken
+        mutation.requestToken = requestToken
+        playbackStartupWatchdog.cancel()
+        replacePlaybackDemand(null)
+        _interpIsPlaying = false
+        freezeRenderedPosition()
+        mutation.positionMs = positionMs.value
+        isPlaying.value = false
+        isLoadingAudio.value = false
+        _needsReload = true
+        deferredPlaybackSeek = null
+        pendingSeek = null
+        seekGuardUntil = 0
+        await invoke('begin_playback_request', {
+          requestGeneration: requestToken, trackId: track.id,
+          source: getPlaybackSourceKind(track) || track.source || 'local',
+        })
+      }
+      await invoke<boolean>('release_audio_file', { path: filePath })
+      if (requestToken !== null && requestToken === playbackRequestToken) {
+        _currentLoadedFromDownloadPath = null
+        isPlayingFromDownload.value = false
+        isPlayingFromCache.value = false
+        audioInfo.value = null
+        loadedPlaybackRequestToken = 0
+      }
+      return await operation()
+    } finally {
+      audioFileMutations.delete(key)
+      finishMutation()
+      const resumeTrack = currentTrack.value
+      if (requestToken !== null && requestToken === playbackRequestToken && resumeTrack && track && resumeTrack.id === track.id) {
+        _needsReload = true
+        savePlayerState()
+        if (mutation.shouldResume && (isRemotePlaybackTrack(resumeTrack) || resumeTrack.audioUrl)) {
+          try {
+            await play(resumeTrack, 'local', mutation.positionMs, true)
+          } catch (error) {
+            log.warn('Resume after audio file operation failed:', error)
+          }
+        } else {
+          isPlaying.value = false
+        }
+      }
+    }
+  }
+
   function handleDownloadedFileRemoved(trackId: string, filePath?: string) {
+    const key = audioFilePathKey(filePath)
+    if (key) {
+      queue.value = queue.value.map(track => audioFilePathKey(track.audioUrl) === key ? { ...track, audioUrl: '' } : track)
+      if (currentTrack.value && audioFilePathKey(currentTrack.value.audioUrl) === key) {
+        currentTrack.value = { ...currentTrack.value, audioUrl: '' }
+      }
+    }
     if (!currentTrack.value || currentTrack.value.id !== trackId) return
     if (filePath && _currentLoadedFromDownloadPath && _currentLoadedFromDownloadPath !== filePath) return
 
@@ -2493,7 +2637,7 @@ export const usePlayerStore = defineStore('player', () => {
     playAll, shufflePlay, addToQueueNext, addToQueueEnd, removeFromQueue, clearQueue,
     prefetchPlaybackTracks,
     updateCurrentTrackInfo, patchCurrentTrackSyncPayload, restoreOriginalTrackInfo, hasOriginalTrackInfo,
-    handleDownloadedFileRemoved, replayWithQuality,
+    handleDownloadedFileRemoved, withReleasedAudioFile, replayWithQuality,
   }
 })
 

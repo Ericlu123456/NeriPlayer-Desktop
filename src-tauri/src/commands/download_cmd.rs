@@ -1741,25 +1741,33 @@ pub async fn validate_downloads(app: AppHandle) -> AppResult<DownloadManifestVal
 /// 删除已下载的曲目（文件 + manifest 记录）
 #[tauri::command]
 pub async fn delete_download(app: AppHandle, track_id: String) -> AppResult<()> {
-    let _manifest_guard = manifest_lock();
-    let mut manifest = read_manifest(&app)?;
-
-    // 查找并移除
-    let idx = manifest.iter().position(|t| t.id == track_id);
-    if let Some(i) = idx {
-        // 文件占用或只读时保留清单，用户可以修复后重试
+    let snapshot_app = app.clone();
+    let snapshot_id = track_id.clone();
+    let target = tokio::task::spawn_blocking(move || {
+        let _guard = manifest_lock();
+        read_manifest(&snapshot_app)?.into_iter().find(|track| track.id == snapshot_id)
+            .ok_or_else(|| AppError::NotFound("Download not found".into()))
+    }).await.map_err(|error| AppError::Other(error.to_string()))??;
+    super::player_cmd::release_player_file(
+        Arc::clone(&app.state::<AppState>().player), target.file_path.clone(),
+    ).await?;
+    tokio::task::spawn_blocking(move || {
+        let _manifest_guard = manifest_lock();
+        let mut manifest = read_manifest(&app)?;
+        let i = manifest.iter().position(|track| track.id == track_id)
+            .ok_or_else(|| AppError::NotFound("Download not found".into()))?;
+        // 等待播放器释放期间清单可能更新，不能误删新下载的同名曲目
+        if manifest[i].file_path != target.file_path || manifest[i].downloaded_at != target.downloaded_at {
+            return Err(AppError::Other("Downloaded track changed during deletion".into()));
+        }
         let deletion = remove_download_artifacts_strict(std::path::Path::new(&manifest[i].file_path))?;
         manifest.remove(i);
         if let Err(error) = write_manifest(&app, &manifest) {
             deletion.rollback().map_err(|restore| AppError::Other(format!("{error}; {restore}")))?;
             return Err(error);
         }
-        deletion.commit()?;
-    } else {
-        return Err(AppError::NotFound("Download not found".into()));
-    }
-
-    Ok(())
+        deletion.commit()
+    }).await.map_err(|error| AppError::Other(error.to_string()))?
 }
 
 /// 取消单个下载任务

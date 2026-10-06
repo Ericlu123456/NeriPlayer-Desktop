@@ -48,6 +48,11 @@ async function runtime(options = {}) {
       return () => events.delete(name)
     } },
     './settings': { useSettingsStore: () => ({ downloadNameTemplate: '{title}' }) },
+    './player': { usePlayerStore: () => ({ withReleasedAudioFile: async (path, operation) => {
+      calls.push({ command: 'releaseAudioFile', args: { path } })
+      if (options.release) await options.release.promise
+      return operation()
+    } }) },
     '@/utils/logger': { createLogger: () => ({ error() {} }) },
   })
   pinia.setActivePinia(pinia.createPinia())
@@ -107,5 +112,14 @@ async function runtime(options = {}) {
   assert.equal(r.store.tracks[0].title, 'New')
   assert.equal(r.calls.find(item => item.command === 'edit_local_file_tags').args.scanRoot, 'C:/Music')
   await assert.rejects(r.store.saveTrackTags({ ...r.store.tracks[0], id: 'stale' }, { title: 'New', artist: 'Artist', album: 'Album' }), /no longer/)
+}
+{
+  const release = deferred(), r = await runtime({ release })
+  await r.store.scanDirectory('C:/Music')
+  const writing = r.store.saveTrackTags(r.store.tracks[0], { title: 'New', artist: 'Artist', album: 'Album' })
+  await flush()
+  assert.equal(r.calls.some(call => call.command === 'edit_local_file_tags'), false, 'tag writing must wait for decoder release')
+  release.resolve(); await writing
+  assert.deepEqual(r.calls.filter(call => ['releaseAudioFile', 'edit_local_file_tags'].includes(call.command)).map(call => call.command), ['releaseAudioFile', 'edit_local_file_tags'])
 }
 console.log('local scan store lifecycle tests passed')

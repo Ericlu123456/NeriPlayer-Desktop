@@ -326,10 +326,7 @@ function trackDownloadLabel(track: TrackInfo) {
 }
 
 function isTrackDownloadDisabled(track: TrackInfo) {
-  if (downloadStore.isDownloading(track.id)) return true
-  return downloadStore.isDownloaded(track.id)
-    && player.currentTrack?.id === track.id
-    && player.isPlayingFromDownload
+  return downloadStore.isDownloading(track.id)
 }
 
 async function handleTrackDownload(track: TrackInfo) {

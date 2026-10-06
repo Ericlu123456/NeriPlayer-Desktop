@@ -4,6 +4,7 @@ import { usePlayerStore } from '@/stores/player'
 import { useI18n } from 'vue-i18n'
 import BilibiliCoverImage from './BilibiliCoverImage.vue'
 import ContextMenu from '@/components/ui/ContextMenu.vue'
+import { useTrackDownloadMenu } from '@/composables/useTrackDownloadMenu'
 import {
   createContextMenuItem,
   createContextMenuSeparator,
@@ -30,6 +31,11 @@ const queueContextMenuOpen = ref(false)
 const queueContextMenuPosition = ref<ContextMenuPosition>({ x: 0, y: 0 })
 const queueContextMenuIndex = ref(-1)
 
+const { downloadMenuItem, downloadFromMenu } = useTrackDownloadMenu(
+  () => player.queue[queueContextMenuIndex.value],
+  closeQueueContextMenu,
+)
+
 const queueContextMenuItems = computed<readonly ContextMenuItem[]>(() => {
   if (queueContextMenuIndex.value < 0 || !player.queue[queueContextMenuIndex.value]) return []
 
@@ -46,6 +52,7 @@ const queueContextMenuItems = computed<readonly ContextMenuItem[]>(() => {
       id: 'queue-end',
       icon: 'add_to_queue',
     }),
+    downloadMenuItem.value,
     createContextMenuSeparator('queue-actions'),
     createContextMenuItem(t('common.delete'), {
       id: 'remove',
@@ -99,6 +106,9 @@ function handleQueueContextMenuClick(item: ContextMenuActionItem) {
       break
     case 'queue-end':
       player.addToQueueEnd(track)
+      break
+    case 'download':
+      void downloadFromMenu()
       break
     case 'remove':
       removeFromQueue(index)
