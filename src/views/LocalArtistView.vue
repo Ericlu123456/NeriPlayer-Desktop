@@ -21,6 +21,15 @@ const { t } = useI18n()
 
 const loading = ref(true)
 const tracks = ref<TrackInfo[]>([])
+const searchQuery = ref('')
+const filteredTracks = computed(() => {
+  const keyword = searchQuery.value.trim().toLocaleLowerCase()
+  if (!keyword) return tracks.value
+  return tracks.value.filter(track =>
+    [track.title, track.artist, track.album].some(value =>
+      (value || '').toLocaleLowerCase().includes(keyword)),
+  )
+})
 
 const artistName = computed(() => String(route.params.name ?? ''))
 const totalDurationMs = computed(() =>
@@ -61,8 +70,8 @@ function shufflePlay() {
   if (tracks.value.length) player.shufflePlay(tracks.value)
 }
 
-function playTrack(index: number) {
-  player.playAll(tracks.value, tracks.value[index]?.id)
+function playTrack(track: TrackInfo) {
+  player.playAll(filteredTracks.value, track.id)
 }
 
 onMounted(load)
@@ -75,6 +84,25 @@ onMounted(load)
         <span class="material-symbols-rounded">arrow_back</span>
       </button>
       <div class="header-title">{{ artistName }}</div>
+      <div v-if="!loading && tracks.length > 0" class="header-search">
+        <span class="material-symbols-rounded search-icon" aria-hidden="true">search</span>
+        <input
+          v-model="searchQuery"
+          class="search-input"
+          :placeholder="t('player.search_tracks')"
+          :aria-label="t('player.search_tracks')"
+          @keydown.esc="searchQuery = ''"
+        />
+        <button
+          v-if="searchQuery"
+          class="search-clear"
+          :aria-label="t('common.clear')"
+          :title="t('common.clear')"
+          @click="searchQuery = ''"
+        >
+          <span class="material-symbols-rounded" aria-hidden="true">close</span>
+        </button>
+      </div>
     </div>
 
     <div v-if="loading" class="empty-state">
@@ -106,13 +134,17 @@ onMounted(load)
         </button>
       </div>
 
-      <div class="track-list">
+      <div v-if="filteredTracks.length === 0" class="empty-state">
+        <span class="material-symbols-rounded" aria-hidden="true">search_off</span>
+        <p>{{ t('player.no_results') }}</p>
+      </div>
+      <div v-else class="track-list">
         <div
-          v-for="(track, index) in tracks"
+          v-for="(track, index) in filteredTracks"
           :key="track.id"
           class="track-item"
           :class="{ active: player.currentTrack?.id === track.id }"
-          @click="playTrack(index)"
+          @click="playTrack(track)"
         >
           <div class="track-index">
             <div
@@ -142,11 +174,41 @@ onMounted(load)
 @use '@/styles/detail-view.scss' as *;
 
 .header-title {
+  flex: 1;
+  min-width: 0;
   font-size: 18px;
   font-weight: 600;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.header-search {
+  flex: 0 1 320px;
+  min-width: 0;
+
+  &:focus-within { outline: 2px solid var(--md-primary); }
+}
+
+.search-input { min-width: 0; }
+
+.search-clear {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radius-full);
+  color: var(--md-on-surface-variant);
+
+  &:hover { background: var(--md-surface-container-high); }
+  .material-symbols-rounded { font-size: 18px; }
+}
+
+@media (max-width: 600px) {
+  .detail-header { flex-wrap: wrap; }
+  .header-search { flex-basis: 100%; max-width: none; }
 }
 
 .artist-summary {
