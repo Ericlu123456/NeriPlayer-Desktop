@@ -21,7 +21,7 @@ export interface YoutubeLibraryPlaylist {
 
 export interface YoutubeHomeFeedShelf {
   title: string
-  items: Array<{ title: string; subtitle: string; coverUrl: string; browseId?: string; videoId?: string }>
+  items: Array<{ title: string; subtitle: string; coverUrl: string; browseId?: string; videoId?: string; pageType?: string; durationMs?: number }>
 }
 
 export function parseYouTubeHomeFeed(data: any): YoutubeHomeFeedShelf[] {
@@ -49,6 +49,9 @@ export function parseYouTubeHomeFeed(data: any): YoutubeHomeFeedShelf[] {
         coverUrl: extractMusicThumbnailUrl(renderer.thumbnailRenderer || renderer.thumbnail),
         browseId: renderer.navigationEndpoint?.browseEndpoint?.browseId,
         videoId: extractTrackVideoId(renderer) || undefined,
+        pageType: renderer.navigationEndpoint?.browseEndpoint
+          ?.browseEndpointContextSupportedConfigs?.browseEndpointContextMusicConfig?.pageType,
+        durationMs: parseDurationTextToMs(extractTrackDurationText(renderer) || extractDurationFromRuns(renderer.subtitle)),
       }]
     })
     if (title && items.length) shelves.push({ title, items })

@@ -27,6 +27,8 @@ export interface HomeFeedItem {
   coverUrl: string
   browseId?: string
   videoId?: string
+  pageType?: string
+  durationMs?: number
 }
 
 export interface HomeRecommendationSong {
@@ -67,6 +69,8 @@ export const useRecommendStore = defineStore('recommend', () => {
 
   // YouTube 首页 shelf
   const homeFeedShelves = ref<HomeFeedShelf[]>([])
+  let homeFeedRequestGeneration = 0
+  const homeFeedLoading = ref(false)
 
   // 用户歌单
   const userPlaylists = ref<Record<string, PlaylistInfo[]>>({})
@@ -93,7 +97,6 @@ export const useRecommendStore = defineStore('recommend', () => {
       if (cache.userPlaylists && Object.keys(cache.userPlaylists).length) userPlaylists.value = cache.userPlaylists
       // 专辑与歌单同样入缓存，重启后无需等网络即可显示
       if (cache.userAlbums?.length) userAlbums.value = cache.userAlbums
-      if (cache.homeFeedShelves?.length) homeFeedShelves.value = cache.homeFeedShelves
       if (cache.homeHotSongs?.items?.length) homeHotSongs.value = { ...emptyHomeSongSection(), ...cache.homeHotSongs }
       if (cache.homeRadarSongs?.items?.length) homeRadarSongs.value = { ...emptyHomeSongSection(), ...cache.homeRadarSongs }
     } catch { /* 缓存损坏则忽略 */ }
@@ -105,7 +108,6 @@ export const useRecommendStore = defineStore('recommend', () => {
         recommendedPlaylists: recommendedPlaylists.value,
         userPlaylists: userPlaylists.value,
         userAlbums: userAlbums.value,
-        homeFeedShelves: homeFeedShelves.value,
         homeHotSongs: homeHotSongs.value,
         homeRadarSongs: homeRadarSongs.value,
         timestamp: Date.now(),
@@ -124,6 +126,13 @@ export const useRecommendStore = defineStore('recommend', () => {
     if (platform === 'netease') {
       userAlbums.value = []
       likedSongIds.value = new Set()
+    } else if (platform === 'youtube') {
+      homeFeedRequestGeneration++
+      homeFeedShelves.value = []
+      if (homeFeedLoading.value) {
+        homeFeedLoading.value = false
+        isLoading.value = false
+      }
     }
     // 内存清了也要落盘，否则重启后 loadCache 又把旧数据恢复回来
     saveCache()
@@ -281,15 +290,21 @@ export const useRecommendStore = defineStore('recommend', () => {
 
   /** 获取 YouTube 首页信息流 */
   async function fetchHomeFeed() {
+    const requestGeneration = ++homeFeedRequestGeneration
+    homeFeedLoading.value = true
     isLoading.value = true
     try {
       const data = await invoke<any>('get_home_feed')
+      if (requestGeneration !== homeFeedRequestGeneration) return
       homeFeedShelves.value = parseYouTubeHomeFeed(data)
       saveCache()
     } catch (e) {
-      log.error('fetchHomeFeed:', e)
+      if (requestGeneration === homeFeedRequestGeneration) log.error('fetchHomeFeed:', e)
     } finally {
-      isLoading.value = false
+      if (requestGeneration === homeFeedRequestGeneration) {
+        homeFeedLoading.value = false
+        isLoading.value = false
+      }
     }
   }
 
@@ -406,7 +421,7 @@ export const useRecommendStore = defineStore('recommend', () => {
 
   return {
     recommendedPlaylists, recommendedSongs, homeHotSongs, homeRadarSongs,
-    homeFeedShelves, userPlaylists,
+    homeFeedShelves, homeFeedLoading, userPlaylists,
     userAlbums, likedSongIds, isLoading, error, isCacheFresh,
     fetchRecommendedPlaylists, fetchRecommendedSongs, fetchUserPlaylists,
     fetchHomeSearchRecommendations, clearHomeSearchRecommendations,
