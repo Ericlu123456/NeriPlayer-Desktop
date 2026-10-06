@@ -1,5 +1,6 @@
 # Dependencies
 node_modules/
+package-lock.json
 
 # Build output
 dist/
@@ -49,3 +50,4 @@ docs-private/
 # 内部审查/对齐文档只留本地，不入库
 .report/
 docs/
+
