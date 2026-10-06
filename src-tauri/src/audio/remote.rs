@@ -1827,6 +1827,20 @@ impl RemoteAudioCache {
         }
         Some(self.cache_dir.join(path))
     }
+
+    /// 只看 .ready 标记与已发布文件长度、不做哈希校验的快速判断：
+    /// 用来决定是否值得先发网络解析。真正播放前仍走 ready_path 的完整校验
+    pub fn has_published_entry(&self) -> bool {
+        let Ok(marker) = std::fs::read_to_string(&self.ready_path) else {
+            return false;
+        };
+        let Some(CacheMarker::Validated { content_length, file_name, .. }) = parse_cache_marker(marker.trim()) else {
+            return false;
+        };
+        self.resolve_marker_file(&file_name)
+            .and_then(|path| std::fs::metadata(path).ok())
+            .is_some_and(|metadata| metadata.is_file() && metadata.len() == content_length)
+    }
 }
 
 fn create_cache_staging(directory: &Path, digest: &str) -> io::Result<PathBuf> {
@@ -6311,6 +6325,39 @@ mod tests {
 
         assert!(hit.ready_path().is_some());
         assert!(hit.staging.lock().expect("staging lock").path.is_none());
+    }
+
+    #[test]
+    fn published_entry_check_needs_no_validation_or_staging() {
+        let root = tempfile::tempdir().expect("temp cache root");
+        let wav = pcm_wav(800);
+        let probe = || RemoteAudioCache::new(root.path().to_path_buf(), "quick-check", 0, None, 0).expect("probe");
+        assert!(!probe().has_published_entry());
+
+        let writer = RemoteAudioCache::new(
+            root.path().to_path_buf(),
+            "quick-check",
+            1024 * 1024,
+            Some(wav.len() as u64),
+            100,
+        )
+        .expect("writer cache");
+        writer.publish_complete_bytes(&wav).expect("publish cached audio");
+        drop(writer);
+
+        let published = probe();
+        assert!(published.has_published_entry());
+        assert!(published.staging.lock().expect("staging lock").path.is_none());
+
+        // 文件被截断后不再视为完整缓存
+        let audio = std::fs::read_dir(root.path().join(&published.digest[..2]))
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.path())
+            .find(|path| path.extension().and_then(|value| value.to_str()) == Some("audio"))
+            .expect("published audio file");
+        std::fs::write(&audio, &wav[..wav.len() / 2]).unwrap();
+        assert!(!probe().has_published_entry());
     }
 
     #[test]

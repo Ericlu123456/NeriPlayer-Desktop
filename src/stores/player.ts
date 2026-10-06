@@ -764,14 +764,16 @@ export const usePlayerStore = defineStore('player', () => {
   function maybePrefetchNext() {
     const tracks = nextPrefetchTracks()
     if (tracks.length === 0) return
-
-    playbackPrefetchManager.prefetchWindow(
-      tracks,
-      playbackSourceSettings(),
-      playbackUrlResolver,
-      undefined,
-      genericUrlPrefetchTtlMs(Math.max(durationMs.value, currentTrack.value?.durationMs ?? 0)),
-    )
+    const settings = playbackSourceSettings()
+    const ttlMs = genericUrlPrefetchTtlMs(Math.max(durationMs.value, currentTrack.value?.durationMs ?? 0))
+    // 已完整缓存的曲目播放时直接离线起播，不必预取地址
+    void Promise.all(tracks.map(async track => (
+      await hasCompleteCachedAudio(playbackCacheReadCandidates(track, settings)) ? null : track
+    ))).then((pending) => {
+      const uncached = pending.filter((track): track is TrackInfo => track !== null)
+      if (uncached.length === 0) return
+      playbackPrefetchManager.prefetchWindow(uncached, settings, playbackUrlResolver, undefined, ttlMs)
+    })
   }
 
   function prefetchPlaybackTracks(tracks: readonly TrackInfo[]) {
@@ -801,6 +803,16 @@ export const usePlayerStore = defineStore('player', () => {
 
   function takePrefetchedPlaybackUrl(track: TrackInfo): ResolvedPlaybackSource | null {
     return playbackPrefetchManager.take(track, playbackSourceSettings())
+  }
+
+  /** 是否已有完整的磁盘缓存（只查标记与长度，不做完整校验） */
+  async function hasCompleteCachedAudio(candidates: readonly PlaybackCacheReadCandidate[]): Promise<boolean> {
+    if (candidates.length === 0) return false
+    try {
+      return await invoke<boolean>('has_cached_audio', { cacheKeys: candidates.map(candidate => candidate.cacheKey) })
+    } catch {
+      return false
+    }
   }
 
   function schedulePlaybackStartupWatchdog(
@@ -1378,10 +1390,16 @@ export const usePlayerStore = defineStore('player', () => {
         isPlayingFromDownload.value = false
         // 进入在线解析前默认非缓存; 命中缓存时会再置 true
         isPlayingFromCache.value = false
-        let prefetchedResolution = takePrefetchedPlaybackUrl(track)
+        // 强制重新解析（切换音质、断流恢复）不读缓存、不用预取结果，否则会重播刚要替换掉的那份
+        let prefetchedResolution = forceResolve ? null : takePrefetchedPlaybackUrl(track)
+        const qualityMemoryKey = playbackCacheReadCandidates(track, playbackSourceSettings())[0]?.cacheKey ?? ''
+        const cacheCandidates = forceResolve ? [] : playbackCacheReadCandidates(track, playbackSourceSettings())
+        const hasCompleteCache = await hasCompleteCachedAudio(cacheCandidates)
+        if (token !== playbackRequestToken) return
         const resolveInParallel = shouldResolvePlaybackSourceInParallel(
           hadPlaybackSessionBeforeRequest,
           !!prefetchedResolution,
+          hasCompleteCache,
         )
         const coldResolution = resolveInParallel
           ? resolvePlaybackUrl(track, forceResolve).catch((error): PlaybackResolution => ({
@@ -1390,9 +1408,6 @@ export const usePlayerStore = defineStore('player', () => {
               retryable: true,
             }))
           : null
-        // 强制重新解析（切换音质、断流恢复）不读缓存，否则会重播刚要替换掉的那份副本
-        const qualityMemoryKey = playbackCacheReadCandidates(track, playbackSourceSettings())[0]?.cacheKey ?? ''
-        const cacheCandidates = forceResolve ? [] : playbackCacheReadCandidates(track, playbackSourceSettings())
         tracePlaybackUi(
           'remote_pipeline_start',
           track,

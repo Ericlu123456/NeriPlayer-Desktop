@@ -417,6 +417,7 @@ fn main() {
             player_cmd::play_file,
             player_cmd::play_cached_audio,
             player_cmd::play_cached_audio_candidates,
+            player_cmd::has_cached_audio,
             player_cmd::play_url,
             player_cmd::play_url_fast,
             player_cmd::play_url_streaming,

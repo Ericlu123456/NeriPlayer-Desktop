@@ -78,6 +78,9 @@ assert.equal(playbackSessionTrackKey(true, '', 'netease:1'), 'netease:1')
 assert.equal(shouldResolvePlaybackSourceInParallel(false, false), true)
 assert.equal(shouldResolvePlaybackSourceInParallel(true, false), true)
 assert.equal(shouldResolvePlaybackSourceInParallel(false, true), false)
+// 已有完整缓存时不再发网络解析（对齐 Android 离线缓存直接播放）
+assert.equal(shouldResolvePlaybackSourceInParallel(true, false, true), false)
+assert.equal(shouldResolvePlaybackSourceInParallel(true, false, false), true)
 
 const prefetchTracks = [{ id: 'first' }, { id: 'second' }, { id: 'third' }, { id: 'fourth' }]
 assert.deepEqual(initialPlaybackPrefetchWindow(prefetchTracks), prefetchTracks.slice(0, 3))

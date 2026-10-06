@@ -1638,6 +1638,22 @@ fn playback_cache_root(app: &AppHandle) -> Option<PathBuf> {
         .map(|dir| dir.join("playback-audio"))
 }
 
+/// 任一缓存键已有完整副本时返回 true（对齐 Android：完整缓存直接离线播放，不发网络解析）
+#[tauri::command]
+pub async fn has_cached_audio(cache_keys: Vec<String>, app: AppHandle) -> AppResult<bool> {
+    let Some(root) = playback_cache_root(&app) else {
+        return Ok(false);
+    };
+    tauri::async_runtime::spawn_blocking(move || {
+        cache_keys.iter().any(|key| {
+            RemoteAudioCache::new(root.clone(), key, 0, None, 0)
+                .is_ok_and(|cache| cache.has_published_entry())
+        })
+    })
+    .await
+    .map_err(|error| AppError::Other(error.to_string()))
+}
+
 /// 按当前上限裁剪音频与封面缓存：启动时与调小缓存上限后执行（对齐 Android 启动即裁剪），
 /// 否则要等下一首下载完成才会裁剪
 pub fn prune_media_caches(app: &AppHandle, max_cache_size_mb: i32) {
