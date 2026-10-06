@@ -83,8 +83,10 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .manage(AppState::new())
-        .setup(|app| {
+        .setup(move |app| {
             let handle = app.handle().clone();
+            // 日志插件初始化时把 max_level 放到了 Trace，这里收回到设置的级别
+            neri_player_desktop::logging::set_runtime_level(log_cfg.level);
 
             // macOS 使用原生红绿灯（Overlay 标题栏）；Windows/Linux 移除原生装饰，
             // 由前端 TitleBar.vue 自绘窗口控制。配置里 decorations 默认为 true 以
@@ -130,6 +132,17 @@ fn main() {
                 let saved_auth = auth::cookies::load_auth(&handle);
                 auth::cookies::inject_all(&state.cookie_jar, &saved_auth);
                 *state.auth.lock() = saved_auth;
+            }
+
+            // 代理模式与 YouTube 地区偏好在首批请求前就按已保存的设置生效，不等前端水合
+            match neri_player_desktop::settings::store::load_settings(&handle) {
+                Ok(loaded) => {
+                    if !loaded.settings.bypass_proxy {
+                        handle.state::<AppState>().rebuild_http(false);
+                    }
+                    settings_cmd::apply_runtime_settings(&loaded.settings);
+                }
+                Err(error) => log::warn!(target: "settings", "启动时读取设置失败: {error}"),
             }
 
             // 启动即主动保鲜一次 YouTube 会话, 让长期空闲的登录在首次使用前完成 cookie 轮换
@@ -469,6 +482,8 @@ fn main() {
             settings_cmd::get_settings,
             settings_cmd::save_settings,
             settings_cmd::get_app_data_dir,
+            settings_cmd::import_background_image,
+            settings_cmd::clear_background_images,
             settings_cmd::get_log_dir,
             settings_cmd::get_netease_song_url,
             settings_cmd::get_qq_song_url,

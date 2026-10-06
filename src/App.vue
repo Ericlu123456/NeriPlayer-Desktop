@@ -24,6 +24,7 @@ import { applyTheme } from '@/utils/theme'
 import { applyThemeColor } from '@/utils/themeColor'
 import { getTrackCoverUrl } from '@/utils/trackCover'
 import { applyDynamicColorFromCover, clearDynamicColor } from '@/utils/colorExtractor'
+import { createLogger } from '@/utils/logger'
 import { hasVisiblePlaybackSession } from '@/modules/playback/playbackRequest'
 
 type CoverSnapshot = {
@@ -39,6 +40,7 @@ const isMacPlatform = /Mac|iPhone|iPad/.test(
 )
 if (isMacPlatform) document.documentElement.classList.add('platform-mac')
 
+const appLog = createLogger('app')
 const player = usePlayerStore()
 const settingsStore = useSettingsStore()
 const likedSongs = useLikedSongsStore()
@@ -173,6 +175,18 @@ const miniCoverFallbackSrc = computed(() => {
 })
 
 // 背景图片
+// 旧版直接引用原图路径，资源作用域外的图片重启后会丢失：启动时复制进应用数据目录
+async function adoptManagedBackgroundImage() {
+  const uri = settingsStore.backgroundImageUri
+  if (!uri || /^https?:/i.test(uri)) return
+  try {
+    const managed = await invoke<string>('import_background_image', { source: uri })
+    if (managed !== uri && settingsStore.backgroundImageUri === uri) settingsStore.backgroundImageUri = managed
+  } catch (error) {
+    appLog.warn('Custom background could not be copied:', error)
+  }
+}
+
 const bgImageStyle = computed(() => {
   const uri = settingsStore.backgroundImageUri
   if (!uri) return null
@@ -382,6 +396,7 @@ onMounted(async () => {
     if (cover) void applyDynamicColorFromCover(cover, resolveDynamicIsDark())
   }
   setLocale(settingsStore.locale, false)
+  void adoptManagedBackgroundImage()
   await player.applyPersistedSettings()
   if (route.name === 'home' && settingsStore.defaultScreen !== 'home') {
     await router.replace({ name: settingsStore.defaultScreen })

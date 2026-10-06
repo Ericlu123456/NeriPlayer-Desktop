@@ -449,7 +449,7 @@ pub fn save_settings(app: &AppHandle, settings: AppSettings) -> AppResult<AppSet
         .map_err(|error| AppError::Other(error.to_string()))?;
     persist_settings(&store, &normalized)?;
     // 日志级别可运行时即时调整；文件开关受插件限制需重启生效
-    log::set_max_level(crate::logging::parse_level(&normalized.log_level));
+    crate::logging::set_runtime_level(crate::logging::parse_level(&normalized.log_level));
     Ok(normalized)
 }
 

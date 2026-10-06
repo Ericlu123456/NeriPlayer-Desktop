@@ -2125,7 +2125,12 @@ const sliderActiveColor = computed(() => {
           </div>
           <!-- 来源徽章（对齐 Android PlaybackSourceBadge） -->
           <transition name="np-badge-swap" mode="out-in">
-            <div v-if="showSourceBadge && settings.coverStyle === 'card'" :key="sourceBadgeKey" class="source-badge">
+            <div
+              v-if="showSourceBadge"
+              :key="sourceBadgeKey"
+              class="source-badge"
+              :class="{ 'source-badge--disc': settings.coverStyle !== 'card' }"
+            >
               <span
                 v-if="playbackSourceIcon === 'netease'"
                 class="source-badge-icon source-badge-icon--netease"
@@ -4304,6 +4309,15 @@ const sliderActiveColor = computed(() => {
   background: rgba(0, 0, 0, 0.55);
   backdrop-filter: blur(12px);
   border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+/* 黑胶是圆形，右下角落在唱片外：改为底部居中（不用 transform，避免与切换动画冲突） */
+.source-badge--disc {
+  left: 0;
+  right: 0;
+  bottom: 2px;
+  width: fit-content;
+  margin: 0 auto;
 }
 
 .source-badge-icon {

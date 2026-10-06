@@ -60,6 +60,78 @@ pub fn apply_runtime_settings(settings: &AppSettings) {
     );
 }
 
+const BACKGROUND_DIR: &str = "background";
+const MAX_BACKGROUND_BYTES: u64 = 64 * 1024 * 1024;
+const BACKGROUND_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "webp", "bmp", "gif"];
+
+fn background_dir(app: &AppHandle) -> AppResult<std::path::PathBuf> {
+    Ok(app
+        .path()
+        .app_data_dir()
+        .map_err(|error| AppError::Other(error.to_string()))?
+        .join(BACKGROUND_DIR))
+}
+
+/// 自定义背景复制进应用数据目录再使用：对话框只给原文件本次运行的访问权，
+/// 资源作用域外（例如其他盘符）或之后被移动的原图，重启后都会显示不出来。
+/// 已在受管目录里的路径原样返回，前端可在启动时对旧设置重复调用。
+#[tauri::command]
+pub async fn import_background_image(app: AppHandle, source: String) -> AppResult<String> {
+    let dir = background_dir(&app)?;
+    let source = std::path::PathBuf::from(source.trim());
+    tauri::async_runtime::spawn_blocking(move || copy_background_into(&dir, &source))
+        .await
+        .map_err(|error| AppError::Other(error.to_string()))?
+}
+
+fn copy_background_into(dir: &std::path::Path, source: &std::path::Path) -> AppResult<String> {
+    if source.parent() == Some(dir) && source.is_file() {
+        return Ok(source.to_string_lossy().into_owned());
+    }
+    let extension = source
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(str::to_ascii_lowercase)
+        .filter(|value| BACKGROUND_EXTENSIONS.contains(&value.as_str()))
+        .ok_or_else(|| AppError::Other("unsupported background image type".into()))?;
+    let metadata = std::fs::metadata(source)?;
+    if !metadata.is_file() || metadata.len() > MAX_BACKGROUND_BYTES {
+        return Err(AppError::Other("background image is missing or too large".into()));
+    }
+    std::fs::create_dir_all(dir)?;
+    let destination = dir.join(format!(
+        "background-{}.{extension}",
+        chrono::Utc::now().timestamp_millis()
+    ));
+    std::fs::copy(source, &destination)?;
+    remove_backgrounds_except(dir, Some(&destination));
+    Ok(destination.to_string_lossy().into_owned())
+}
+
+fn remove_backgrounds_except(dir: &std::path::Path, keep: Option<&std::path::Path>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if Some(path.as_path()) == keep || !path.is_file() {
+            continue;
+        }
+        if let Err(error) = std::fs::remove_file(&path) {
+            log::warn!(target: "settings", "删除旧背景图失败 {}: {error}", path.display());
+        }
+    }
+}
+
+/// 清除自定义背景时一并删除受管目录里的副本
+#[tauri::command]
+pub async fn clear_background_images(app: AppHandle) -> AppResult<()> {
+    let dir = background_dir(&app)?;
+    tauri::async_runtime::spawn_blocking(move || remove_backgrounds_except(&dir, None))
+        .await
+        .map_err(|error| AppError::Other(error.to_string()))
+}
+
 #[tauri::command]
 pub async fn get_app_data_dir(app: tauri::AppHandle) -> AppResult<String> {
     let dir = app
@@ -471,6 +543,36 @@ pub async fn get_build_info() -> AppResult<BuildInfo> {
 mod tests {
     use super::await_current_playback_resolution;
     use crate::error::AppResult;
+
+    #[test]
+    fn background_import_copies_into_managed_dir_and_keeps_one_copy() {
+        let root = tempfile::tempdir().unwrap();
+        let managed = root.path().join("background");
+        let original = root.path().join("Wallpaper.JPG");
+        std::fs::write(&original, b"jpeg").unwrap();
+
+        let first = super::copy_background_into(&managed, &original).unwrap();
+        let first = std::path::PathBuf::from(first);
+        assert_eq!(first.parent(), Some(managed.as_path()));
+        assert_eq!(first.extension().and_then(|value| value.to_str()), Some("jpg"));
+        assert_eq!(std::fs::read(&first).unwrap(), b"jpeg");
+
+        // 已受管的路径原样返回，不再复制
+        let again = super::copy_background_into(&managed, &first).unwrap();
+        assert_eq!(std::path::PathBuf::from(again), first);
+
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let other = root.path().join("next.png");
+        std::fs::write(&other, b"png").unwrap();
+        let second = std::path::PathBuf::from(super::copy_background_into(&managed, &other).unwrap());
+        assert!(!first.exists(), "the previous copy is removed");
+        assert_eq!(std::fs::read_dir(&managed).unwrap().count(), 1);
+        assert!(second.exists());
+
+        let text = root.path().join("notes.txt");
+        std::fs::write(&text, b"x").unwrap();
+        assert!(super::copy_background_into(&managed, &text).is_err());
+    }
 
     #[tokio::test]
     async fn superseded_youtube_resolution_drops_its_pending_resources() {

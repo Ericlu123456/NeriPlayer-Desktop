@@ -38,7 +38,7 @@ import {
   type StorageCacheClearOptions,
   type StorageUsageSummary,
 } from '@/utils/storage'
-import { switchThemeWithRipple, type ThemeMode } from '@/utils/theme'
+import { applyTheme, switchThemeWithRipple, type ThemeMode } from '@/utils/theme'
 import { THEME_COLORS, getSwatchColor, applyThemeColor, getSavedThemeColor, switchThemeColorWithRipple } from '@/utils/themeColor'
 import { shortcutDescriptors } from '@/modules/shortcuts/globalShortcuts'
 import { useEscapeClose } from '@/composables/useEscapeClose'
@@ -614,11 +614,14 @@ onBeforeUnmount(() => {
 
 // 网络：绕过代理
 async function handleBypassProxyChange(val: boolean) {
+  const previous = bypassProxy.value
   bypassProxy.value = val
   try {
     await invoke('set_bypass_proxy', { bypass: val })
   } catch (e) {
     log.error('Failed to set bypass proxy:', e)
+    bypassProxy.value = previous
+    toast.error(t('settings.bypass_proxy_failed'))
   }
 }
 
@@ -638,8 +641,13 @@ async function confirmConfigExport() {
   await syncStore.exportConfig()
 }
 
+// 导入只写回了设置值：主题、强调色和播放引擎（均衡器、响度、倍速等）要按新值重新应用
 async function importConfig() {
-  await syncStore.importConfig()
+  const result = await syncStore.importConfig()
+  if (!result?.success) return
+  applyTheme(darkMode.value, false)
+  if (!dynamicColor.value) applyThemeColor(selectedColor.value, undefined, false)
+  await player.applyPersistedSettings()
 }
 
 // 下载管理
@@ -831,21 +839,19 @@ async function clearStorageCache(options: StorageCacheClearOptions) {
 // YouTube 国际化
 const intlChecking = ref(false)
 
+// 对齐 Android：开关直接生效。开启时只探测传输层连通性并提示，不回退用户的选择
 async function handleIntlToggle(val: boolean) {
-  const prev = internationalizationEnabled.value
+  if (intlChecking.value) return
   internationalizationEnabled.value = val
-  if (val) {
-    intlChecking.value = true
-    try {
-      // 简单连通性检测：尝试调用 YouTube API
-      await invoke('get_youtube_audio_url', { videoId: 'dQw4w9WgXcQ' })
-    } catch {
-      // 失败时回退
-      internationalizationEnabled.value = prev
-      toast.error(t('settings.intl_check_failed'))
-    } finally {
-      intlChecking.value = false
-    }
+  if (!val) return
+  intlChecking.value = true
+  try {
+    const reachable = await invoke<boolean>('probe_platform_connectivity', { platform: 'youtube' })
+    if (!reachable) toast.show(t('settings.intl_check_failed'), 'info')
+  } catch (error) {
+    log.warn('YouTube connectivity probe failed:', error)
+  } finally {
+    intlChecking.value = false
   }
 }
 
@@ -871,15 +877,18 @@ async function selectBackgroundImage() {
       filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp', 'bmp'] }],
     })
     if (result) {
-      backgroundImageUri.value = typeof result === 'string' ? result : (result as any).path || String(result)
+      const picked = typeof result === 'string' ? result : (result as any).path || String(result)
+      backgroundImageUri.value = await invoke<string>('import_background_image', { source: picked })
     }
   } catch (e) {
     log.error('Failed to select image:', e)
+    toast.error(t('settings.background_image_failed'))
   }
 }
 
 function clearBackgroundImage() {
   backgroundImageUri.value = ''
+  invoke('clear_background_images').catch((error) => log.warn('Failed to delete background copies:', error))
 }
 
 // 开发者模式：7-tap 解锁
@@ -1197,7 +1206,7 @@ useEscapeClose(
         </div>
       </div>
       <label class="m3-switch">
-        <input type="checkbox" :checked="internationalizationEnabled" @change="handleIntlToggle(($event.target as HTMLInputElement).checked)" />
+        <input type="checkbox" :checked="internationalizationEnabled" :disabled="intlChecking" @change="handleIntlToggle(($event.target as HTMLInputElement).checked)" />
         <span class="track"><span class="thumb">
           <span v-if="intlChecking" class="material-symbols-rounded spinning" style="font-size: 14px">progress_activity</span>
           <span v-else-if="internationalizationEnabled" class="material-symbols-rounded" style="font-size: 14px">check</span>
