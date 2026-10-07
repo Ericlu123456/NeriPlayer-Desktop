@@ -1838,6 +1838,35 @@ const audioInfoParts = computed(() => {
   return parts.filter(part => !isHiddenAudioInfoToken(part.text))
 })
 
+// 音质行放不下时整项换行；正好落在换行处的分隔点隐藏，不让「·」挂在行首或行尾。
+// 只隐藏不移除，占位不变，避免隐藏后空出位置又把下一项拉回上一行来回跳
+const audioDetailEl = ref<HTMLElement | null>(null)
+const wrappedAudioSeparators = ref<ReadonlySet<number>>(new Set())
+
+function updateWrappedAudioSeparators() {
+  const container = audioDetailEl.value
+  const wrapped = new Set<number>()
+  container?.querySelectorAll<HTMLElement>('.np-audio-separator').forEach((separator, index) => {
+    const before = separator.previousElementSibling as HTMLElement | null
+    const after = separator.nextElementSibling as HTMLElement | null
+    if (before && after && Math.abs(before.offsetTop - after.offsetTop) > 2) wrapped.add(index)
+  })
+  const current = wrappedAudioSeparators.value
+  if (wrapped.size !== current.size || [...wrapped].some(index => !current.has(index))) {
+    wrappedAudioSeparators.value = wrapped
+  }
+}
+
+const audioDetailResize = typeof ResizeObserver === 'undefined'
+  ? null
+  : new ResizeObserver(() => updateWrappedAudioSeparators())
+watch(audioDetailEl, (element, previous) => {
+  if (previous) audioDetailResize?.unobserve(previous)
+  if (element) audioDetailResize?.observe(element)
+})
+watch(audioInfoParts, () => { void nextTick(updateWrappedAudioSeparators) }, { flush: 'post' })
+onUnmounted(() => audioDetailResize?.disconnect())
+
 function currentAudioQualityLabel(info: AudioInfo | null = player.audioInfo, fromDownload = player.isPlayingFromDownload) {
   return resolveAudioQualityLabel({ source: currentSource.value, fromDownload, info },
     (source, key) => qualityLabelFor(source, key || currentQualityKey(source)))
@@ -2185,7 +2214,7 @@ const sliderActiveColor = computed(() => {
               :title="t('player.playing_from_download')" :aria-label="t('player.playing_from_download')">
               <span class="material-symbols-rounded" aria-hidden="true">download_done</span>
             </span>
-            <span v-if="audioInfoParts.length" class="np-audio-detail" :class="{ separated: displayedAudioInfo.fromDownload }">
+            <span v-if="audioInfoParts.length" ref="audioDetailEl" class="np-audio-detail" :class="{ separated: displayedAudioInfo.fromDownload }">
               <template v-for="(part, index) in audioInfoParts" :key="`${part.text}:${index}`">
                 <span
                   class="np-audio-detail-part"
@@ -2198,7 +2227,13 @@ const sliderActiveColor = computed(() => {
                   @click="part.accent && !player.isLoadingAudio && openQualitySwitcher()"
                   @keydown.enter="part.accent && !player.isLoadingAudio && openQualitySwitcher()"
                 >{{ part.text }}</span>
-                <span v-if="index < audioInfoParts.length - 1" class="np-audio-separator">·</span>
+                <template v-if="index < audioInfoParts.length - 1">
+                  <span
+                    class="np-audio-separator"
+                    :class="{ 'np-audio-separator--wrapped': wrappedAudioSeparators.has(index) }"
+                    aria-hidden="true"
+                  >·</span>{{ ' ' }}
+                </template>
               </template>
             </span>
           </div>
@@ -3643,10 +3678,11 @@ const sliderActiveColor = computed(() => {
 .np-slider-area {
   width: 100%;
   max-width: 100%;
-  /* 进度条 + 时间 + 音质/下载 chip，留足高度避免裁切 */
-  height: 80px;
+  /* 进度条 + 时间 + 音质/下载 chip，留足高度避免裁切；窄栏里音质行换成两行时随之长高，不压到控制栏 */
+  min-height: 80px;
   padding-top: 10px;
   flex-shrink: 0;
+  container-type: inline-size;
   display: flex;
   flex-direction: column;
   justify-content: flex-start;
@@ -3693,21 +3729,26 @@ const sliderActiveColor = computed(() => {
   transition: color 0.6s ease;
 }
 
+/* 行内排版：放不下时在分隔点后的空格处整项换行，并让两行长度接近，不在第二行孤零零剩一项 */
 .np-audio-detail {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
+  display: block;
+  min-width: 0;
+  max-width: 100%;
+  text-align: center;
+  text-wrap: balance;
+  line-height: 1.45;
   color: rgba(255,255,255,0.68);
 
   &.separated::before {
     content: '·';
-    margin-right: 0;
+    margin-right: 5px;
     color: rgba(255,255,255,0.42);
   }
 }
 
 .np-audio-detail-part {
+  /* 「1025 kbps」「多声道（E-AC-3）」这类整项不从中间断开，放不下就整项换到下一行 */
+  white-space: nowrap;
   color: rgba(255,255,255,0.70);
   transition: color 0.45s ease;
 }
@@ -3732,8 +3773,26 @@ const sliderActiveColor = computed(() => {
   outline: none;
 }
 
+/* 左边距加上后面的空格，两侧间隔相当 */
 .np-audio-separator {
+  margin: 0 2px 0 5px;
   color: rgba(255,255,255,0.34);
+}
+
+.np-audio-separator--wrapped {
+  visibility: hidden;
+}
+
+/* 左栏较窄时收紧字号，常见的六项参数尽量仍排在一行 */
+@container (max-width: 360px) {
+  .np-audio-info {
+    font-size: 10.5px;
+    letter-spacing: 0;
+  }
+
+  .np-audio-separator {
+    margin-left: 3px;
+  }
 }
 
 .np-download-chip {
