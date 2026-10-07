@@ -61,7 +61,7 @@ const {
   darkMode, themeColor: selectedColor, coverStyle,
   defaultScreen, showCoverBadge, showNowPlayingTitle, showToolbarDock,
   showQualitySwitch, lyricFontScale,
-  normalizeVolume, multichannelDrc, audioOutputDevice,
+  normalizeVolume, multichannelDrc, volumeBalance, audioOutputDevice,
   fadeIn, fadeInDuration, fadeOutDuration,
   crossfadeNext, crossfadeInDuration, crossfadeOutDuration,
   keepProgress, rememberLongFormProgress, keepPlaybackMode,
@@ -971,6 +971,12 @@ const githubNewRepoName = ref('neriplayer-backup')
 const githubExistingRepo = ref('') // owner/repo 格式
 const githubIsSettingRepo = ref(false)
 const GITHUB_TOKEN_URL = 'https://github.com/settings/tokens/new?scopes=repo&description=NeriPlayer%20Backup'
+const volumeBalanceLabel = computed(() => {
+  const percent = Math.round(Math.abs(volumeBalance.value) * 100)
+  if (percent === 0) return t('settings.volume_balance_center')
+  return t(volumeBalance.value < 0 ? 'settings.volume_balance_left' : 'settings.volume_balance_right', { percent })
+})
+
 const PROJECT_REPOSITORY_URL = 'https://github.com/cwuom/NeriPlayer-Desktop'
 const FFMPEG_LEGAL_URL = 'https://ffmpeg.org/legal.html'
 // 随包的 FFmpeg 是否加载成功、加载的是哪个版本；没加载上时说明哪些格式受影响
@@ -1502,6 +1508,24 @@ useEscapeClose(
     </div>
 
     <Transition @enter="onExpandEnter" @after-enter="onExpandAfterEnter" @leave="onExpandLeave" @after-leave="onExpandAfterLeave"><div v-if="isExpanded('playback')">
+      <div class="setting-card">
+        <div class="setting-icon-wrap"><span class="material-symbols-rounded">balance</span></div>
+        <div class="setting-info">
+          <div class="setting-title">{{ t('settings.volume_balance') }}</div>
+          <EditableRangeValue
+            v-model="volumeBalance"
+            class="setting-desc"
+            :min="-1"
+            :max="1"
+            :step="0.01"
+            :input-scale="100"
+            :display-value="volumeBalanceLabel"
+            input-suffix="%"
+            :aria-label="t('settings.volume_balance')"
+          />
+        </div>
+        <input type="range" class="m3-slider" v-model.number="volumeBalance" min="-1" max="1" step="0.05" :aria-label="t('settings.volume_balance')" :aria-valuetext="volumeBalanceLabel" />
+      </div>
       <div class="setting-card">
         <div class="setting-icon-wrap"><span class="material-symbols-rounded">surround_sound</span></div>
         <div class="setting-info">

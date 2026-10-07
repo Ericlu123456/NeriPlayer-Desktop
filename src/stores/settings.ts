@@ -34,6 +34,7 @@ export interface AppSettings {
   normalizeVolume: boolean
   /** 多声道（AC-3/E-AC-3）音轨保留码流自带的动态范围压缩 */
   multichannelDrc: boolean
+  volumeBalance: number
   fadeIn: boolean
   fadeInDuration: number
   fadeOutDuration: number
@@ -148,6 +149,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   crossfade: false,
   normalizeVolume: false,
   multichannelDrc: false,
+  volumeBalance: 0,
   fadeIn: false,
   fadeInDuration: 500,
   fadeOutDuration: 500,
@@ -420,6 +422,7 @@ function normalizeSnapshot(input: unknown): AppSettings {
   result.audioOutputDevice = result.audioOutputDevice.trim()
   result.playbackSpeed = clamp(result.playbackSpeed, 0.25, 3)
   result.loudnessGainMb = clamp(Math.round(result.loudnessGainMb), 0, 1500)
+  result.volumeBalance = normalizeVolumeBalance(result.volumeBalance)
   result.equalizerBands = result.equalizerBands.slice(0, 5).map(value => clamp(Math.round(value), -1500, 1500))
   while (result.equalizerBands.length < 5) result.equalizerBands.push(0)
   return result
@@ -440,6 +443,12 @@ function normalizeChoice(value: string, allowed: string[], fallback: string): st
 
 function canonicalNeteaseQuality(value: string): string {
   return value.trim() === 'high' ? 'higher' : value
+}
+
+/** 声道平衡 -1（只剩左声道）～1（只剩右声道），按 0.01 取整；非数值时居中（对齐 Android） */
+export function normalizeVolumeBalance(value: number): number {
+  if (!Number.isFinite(value)) return 0
+  return Math.round(Math.min(1, Math.max(-1, value)) * 100) / 100 || 0
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -490,6 +499,7 @@ export const useSettingsStore = defineStore('settings', () => {
   const crossfade = ref(initial.crossfade)
   const normalizeVolume = ref(initial.normalizeVolume)
   const multichannelDrc = ref(initial.multichannelDrc)
+  const volumeBalance = ref(initial.volumeBalance)
   const fadeIn = ref(initial.fadeIn)
   const fadeInDuration = ref(initial.fadeInDuration)
   const fadeOutDuration = ref(initial.fadeOutDuration)
@@ -555,7 +565,7 @@ export const useSettingsStore = defineStore('settings', () => {
   const settingRefs: SettingRefs = {
     darkMode, themeColor, locale, defaultScreen, showCoverBadge,
     showNowPlayingTitle, showToolbarDock, showQualitySwitch, showAudioCodec,
-    showAudioSpec, lyricFontScale, crossfade, normalizeVolume, multichannelDrc, fadeIn,
+    showAudioSpec, lyricFontScale, crossfade, normalizeVolume, multichannelDrc, volumeBalance, fadeIn,
     showAudioBitrate, showAudioFormat, showAudioChannels, showAudioSampleRate, showAudioBitDepth,
     fadeInDuration, fadeOutDuration, crossfadeNext, crossfadeInDuration,
     crossfadeOutDuration, keepProgress, rememberLongFormProgress, keepPlaybackMode, showTranslation,
@@ -652,7 +662,7 @@ export const useSettingsStore = defineStore('settings', () => {
     defaultScreen, showCoverBadge, showNowPlayingTitle, showToolbarDock,
     showQualitySwitch, showAudioCodec, showAudioSpec, lyricFontScale,
     showAudioBitrate, showAudioFormat, showAudioChannels, showAudioSampleRate, showAudioBitDepth,
-    crossfade, normalizeVolume, multichannelDrc, fadeIn, fadeInDuration, fadeOutDuration,
+    crossfade, normalizeVolume, multichannelDrc, volumeBalance, fadeIn, fadeInDuration, fadeOutDuration,
     crossfadeNext, crossfadeInDuration, crossfadeOutDuration,
     keepProgress, rememberLongFormProgress, keepPlaybackMode, showTranslation, lyricBlur, lyricBlurAmount,
     cloudMusicOffset, qqMusicOffset, advancedLyrics, dynamicBackground,

@@ -1214,6 +1214,12 @@ impl PlayerEngine {
             .update(|settings| settings.normalize_volume = enabled);
     }
 
+    /// 声道平衡，-100（只剩左声道）～100（只剩右声道）
+    pub fn set_balance(&self, balance_centi: i32) {
+        self.effects
+            .update(|settings| settings.balance_centi = balance_centi);
+    }
+
     pub fn set_equalizer(&self, enabled: bool, bands: &[i32]) {
         self.effects.update(|settings| {
             settings.eq_enabled = enabled;

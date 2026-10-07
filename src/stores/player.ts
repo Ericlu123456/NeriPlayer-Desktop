@@ -2685,6 +2685,12 @@ export const usePlayerStore = defineStore('player', () => {
       .catch(error => log.warn('multichannel dynamic range compression not applied:', error))
   })
 
+  // 声道平衡同样在设置页里改，拖动时实时下发，音频链按 30 ms 平滑过渡
+  watch(() => settings.volumeBalance, (balance) => {
+    void invoke('set_volume_balance', { balance })
+      .catch(error => log.warn('channel balance not applied:', error))
+  })
+
   async function setEqualizer(enabled: boolean, bands: number[]) {
     equalizerEnabled.value = enabled
     equalizerBands.value = bands.map(v => Math.round(Math.max(-1500, Math.min(1500, v))))
@@ -2761,6 +2767,7 @@ export const usePlayerStore = defineStore('player', () => {
       ['loudness gain', invoke('set_loudness_gain', { gainMb: loudnessGainMb.value })],
       ['volume normalization', invoke('set_normalize_volume', { enabled: settings.normalizeVolume })],
       ['multichannel dynamic range compression', invoke('set_multichannel_drc', { enabled: settings.multichannelDrc })],
+      ['channel balance', invoke('set_volume_balance', { balance: settings.volumeBalance })],
       ['equalizer', invoke('set_equalizer', { enabled: equalizerEnabled.value, bandLevelsMb: equalizerBands.value })],
     ]
     const results = await Promise.allSettled(restored.map(([, request]) => request))

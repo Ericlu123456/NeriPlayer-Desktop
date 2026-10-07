@@ -9,7 +9,7 @@
 //! 增益（-18 dBFS，-12～+6 dB，且不把已观测到的峰值推过 -2 dBFS），按块平滑
 //! （下调 0.25 s、上调 4 s），再由 5 ms 起控、100 ms 释放的限幅包络保证输出峰值
 //! 不过线。均衡器沿用 Android 的余量处理：整条曲线下移到最高频段为 0 dB，
-//! 拉高的频段不会削波。
+//! 拉高的频段不会削波。声道平衡同 Android `StereoBalanceGains`：只衰减偏离的那一侧。
 
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -21,6 +21,7 @@ const EQ_FREQUENCIES_HZ: [f64; EQ_BANDS] = [60.0, 230.0, 910.0, 3_600.0, 14_000.
 const EQ_Q: f64 = 1.0;
 const MAX_BAND_LEVEL_MB: i32 = 1_500;
 const MAX_LOUDNESS_GAIN_MB: i32 = 1_500;
+const MAX_BALANCE_CENTI: i32 = 100;
 
 /// 目标 RMS：-18 dBFS，与 ReplayGain 2.0 的目标响度一致
 const TARGET_RMS: f64 = 0.125_892_54;
@@ -61,22 +62,26 @@ pub struct EffectsSettings {
     pub eq_band_levels_mb: [i32; EQ_BANDS],
     /// 音量均衡：把不同曲目的响度拉到统一目标，避免切歌忽大忽小
     pub normalize_volume: bool,
+    /// 声道平衡，-100（只剩左声道）～100（只剩右声道），步进与 Android 一样是 0.01
+    pub balance_centi: i32,
 }
 
 impl EffectsSettings {
     /// 「重置音效」之后的设置：清掉响度增益和均衡器
     ///
-    /// 音量均衡是设置页里的独立开关，前端重置音效时不会重新下发它，这里必须保持原样，
-    /// 否则开关显示开着、实际已经关了。
+    /// 音量均衡和声道平衡是设置页里的独立设置，前端重置音效时不会重新下发它们，
+    /// 这里必须保持原样，否则设置页显示的值和实际听到的对不上。
     pub fn reset_panel(self) -> Self {
         Self {
             normalize_volume: self.normalize_volume,
+            balance_centi: self.balance_centi,
             ..Self::default()
         }
     }
 
     fn clamped(mut self) -> Self {
         self.loudness_gain_mb = self.loudness_gain_mb.clamp(0, MAX_LOUDNESS_GAIN_MB);
+        self.balance_centi = self.balance_centi.clamp(-MAX_BALANCE_CENTI, MAX_BALANCE_CENTI);
         for level in &mut self.eq_band_levels_mb {
             *level = (*level).clamp(-MAX_BAND_LEVEL_MB, MAX_BAND_LEVEL_MB);
         }
@@ -108,6 +113,7 @@ pub struct EffectsControl {
     eq_enabled: AtomicBool,
     eq_band_levels_mb: [AtomicI32; EQ_BANDS],
     normalize_volume: AtomicBool,
+    balance_centi: AtomicI32,
 }
 
 impl EffectsControl {
@@ -119,6 +125,7 @@ impl EffectsControl {
             eq_enabled: AtomicBool::new(false),
             eq_band_levels_mb: std::array::from_fn(|_| AtomicI32::new(0)),
             normalize_volume: AtomicBool::new(false),
+            balance_centi: AtomicI32::new(0),
         })
     }
 
@@ -130,6 +137,7 @@ impl EffectsControl {
                 self.eq_band_levels_mb[band].load(Ordering::Relaxed)
             }),
             normalize_volume: self.normalize_volume.load(Ordering::Relaxed),
+            balance_centi: self.balance_centi.load(Ordering::Relaxed),
         }
     }
 
@@ -149,6 +157,8 @@ impl EffectsControl {
         }
         self.normalize_volume
             .store(settings.normalize_volume, Ordering::Relaxed);
+        self.balance_centi
+            .store(settings.balance_centi, Ordering::Relaxed);
         self.version.fetch_add(1, Ordering::Release);
     }
 
@@ -628,6 +638,8 @@ pub struct EffectsProcessor {
     normalizer_mix: Ramp,
     loudness_gain: Ramp,
     equalizer: Equalizer,
+    balance: Ramp,
+    sides: Vec<Side>,
     limiter_gain: f64,
     attack_step: f64,
     release_step: f64,
@@ -667,6 +679,8 @@ impl EffectsProcessor {
                 ramp_frames,
             ),
             equalizer: Equalizer::new(channels, sample_rate, settings.equalizer_levels_db()),
+            balance: Ramp::settled(balance_value(settings.balance_centi), ramp_frames),
+            sides: (0..channels).map(|channel| channel_side(channel, channels)).collect(),
             limiter_gain: 1.0,
             attack_step: limiter_step(sample_rate, LIMITER_ATTACK_SECONDS),
             release_step: limiter_step(sample_rate, LIMITER_RELEASE_SECONDS),
@@ -711,6 +725,8 @@ impl EffectsProcessor {
             .set_target(if self.settings.normalize_volume { 1.0 } else { 0.0 });
         self.loudness_gain
             .set_target(millibels_to_gain(self.settings.loudness_gain_mb));
+        self.balance
+            .set_target(balance_value(self.settings.balance_centi));
     }
 
     fn process_block(&mut self, block: &mut [f32]) {
@@ -730,16 +746,22 @@ impl EffectsProcessor {
             let normalizer = gain_start + gain_step * (index + 1) as f64;
             let mix = self.normalizer_mix.next();
             let gain = (1.0 + (normalizer - 1.0) * mix) * self.loudness_gain.next();
+            let (left, right) = balance_gains(self.balance.next());
             let fade = self.equalizer.advance_fade();
             let mut peak = 0.0f64;
-            for (channel, sample) in frame.iter_mut().enumerate() {
+            for ((channel, sample), side) in frame.iter_mut().enumerate().zip(&self.sides) {
                 let input = f64::from(*sample);
                 let filtered = if equalize {
                     self.equalizer.process(input, channel, fade)
                 } else {
                     input
                 };
-                let value = filtered * gain;
+                let side_gain = match side {
+                    Side::Left => left,
+                    Side::Right => right,
+                    Side::Center => 1.0,
+                };
+                let value = filtered * gain * side_gain;
                 peak = peak.max(value.abs());
                 *sample = value as f32;
             }
@@ -791,6 +813,7 @@ impl EffectsProcessor {
         self.normalizer_mix.rests_at(0.0)
             && self.loudness_gain.rests_at(1.0)
             && self.equalizer.is_idle()
+            && self.balance.rests_at(0.0)
             && self.limiter_gain >= 1.0
     }
 
@@ -822,6 +845,44 @@ impl EffectsProcessor {
             }
         }
     }
+}
+
+/// 声道平衡时一个输出声道归哪一侧
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Side {
+    Left,
+    Right,
+    /// 中置、低音与单声道：平衡不动它
+    Center,
+}
+
+/// 按 Windows 多声道的标准顺序（FL FR FC LFE BL BR SL SR）分左右
+fn channel_side(channel: usize, channels: usize) -> Side {
+    use Side::{Center as C, Left as L, Right as R};
+    let layout: &[Side] = match channels {
+        1 => &[C],
+        // 第三路是中置（3.0）或低音（2.1）
+        3 => &[L, R, C],
+        4 => &[L, R, L, R],
+        5 => &[L, R, C, L, R],
+        6 => &[L, R, C, C, L, R],
+        // 6.1 的第五路是后中置
+        7 => &[L, R, C, C, C, L, R],
+        8 => &[L, R, C, C, L, R, L, R],
+        _ => &[L, R],
+    };
+    layout.get(channel).copied().unwrap_or(Side::Center)
+}
+
+fn balance_value(balance_centi: i32) -> f64 {
+    f64::from(balance_centi) / 100.0
+}
+
+/// Android `stereoBalanceGains`：偏向一侧时只把另一侧线性压低，偏向的一侧保持原样
+fn balance_gains(balance: f64) -> (f64, f64) {
+    let left = if balance > 0.0 { 1.0 - balance } else { 1.0 };
+    let right = if balance < 0.0 { 1.0 + balance } else { 1.0 };
+    (left, right)
 }
 
 fn smoothing_factor(duration_seconds: f64, time_constant_seconds: f64) -> f64 {
@@ -1254,20 +1315,84 @@ mod tests {
 
     /// 回归：重置音效曾把音量均衡一起关掉，设置页的开关却还显示开着
     #[test]
-    fn resetting_the_effects_panel_keeps_volume_normalization() {
+    fn resetting_the_effects_panel_keeps_the_settings_page_values() {
         let control = control_with(|settings| {
             settings.loudness_gain_mb = 600;
             settings.eq_enabled = true;
             settings.eq_band_levels_mb = [300, 0, 0, 0, -300];
             settings.normalize_volume = true;
+            settings.balance_centi = -35;
         });
 
         control.update(|settings| *settings = settings.reset_panel());
 
         assert_eq!(
             control.snapshot(),
-            EffectsSettings { normalize_volume: true, ..EffectsSettings::default() },
+            EffectsSettings {
+                normalize_volume: true,
+                balance_centi: -35,
+                ..EffectsSettings::default()
+            },
         );
+    }
+
+    /// 与 Android `stereoBalanceGains` 相同：只压低另一侧，偏向的一侧不变
+    #[test]
+    fn balance_gains_match_android() {
+        assert_eq!(balance_gains(0.0), (1.0, 1.0));
+        assert_eq!(balance_gains(0.35), (0.65, 1.0));
+        assert_eq!(balance_gains(-0.35), (1.0, 0.65));
+        assert_eq!(balance_gains(1.0), (0.0, 1.0));
+        assert_eq!(balance_gains(-1.0), (1.0, 0.0));
+        let control = control_with(|settings| settings.balance_centi = 150);
+        assert_eq!(control.snapshot().balance_centi, 100, "越界值夹到满偏");
+    }
+
+    /// 拖动平衡平滑过渡、不爆音；回到居中后逐位直通
+    #[test]
+    fn balance_ramps_one_side_down_and_returns_to_bit_exact() {
+        let control = EffectsControl::new_shared();
+        let track = TrackLoudness::new_shared();
+        let mut effects = processor(2, RATE, &control, &track);
+        let input = vec![0.5f32; 2 * 4_800];
+
+        control.update(|settings| settings.balance_centi = 50);
+        let output = render(&mut effects, &input, 480);
+        let ramp_frames = (f64::from(RATE) * PARAMETER_RAMP_SECONDS) as f32;
+        let largest_step = output
+            .chunks_exact(2)
+            .zip(output.chunks_exact(2).skip(1))
+            .map(|(previous, next)| (next[0] - previous[0]).abs())
+            .fold((0.5 - output[0]).abs(), f32::max);
+        assert!(largest_step <= 0.25 / ramp_frames * 1.5, "平衡跳变: {largest_step}");
+        let last = &output[output.len() - 2..];
+        assert!((last[0] - 0.25).abs() < 1e-6, "左声道应压到一半: {}", last[0]);
+        assert_eq!(last[1], 0.5, "右声道不动");
+
+        control.update(|settings| settings.balance_centi = 0);
+        render(&mut effects, &input, 480);
+        assert_eq!(render(&mut effects, &input[..960], 480), input[..960], "居中后应逐位直通");
+    }
+
+    /// 多声道设备上左侧各声道一起压低，中置与低音不动；单声道不受平衡影响
+    #[test]
+    fn balance_covers_every_speaker_on_the_attenuated_side() {
+        use Side::{Center as C, Left as L, Right as R};
+        let layout = |channels| (0..channels).map(|channel| channel_side(channel, channels)).collect::<Vec<_>>();
+        assert_eq!(layout(1), [C]);
+        assert_eq!(layout(2), [L, R]);
+        assert_eq!(layout(6), [L, R, C, C, L, R]);
+        assert_eq!(layout(8), [L, R, C, C, L, R, L, R]);
+
+        let control = control_with(|settings| settings.balance_centi = 100);
+        let track = TrackLoudness::new_shared();
+        let mut effects = processor(6, RATE, &control, &track);
+        let output = render(&mut effects, &vec![0.5f32; 6 * 480], 480);
+        assert_eq!(&output[output.len() - 6..], [0.0f32, 0.5, 0.5, 0.5, 0.0, 0.5]);
+
+        let mut mono = processor(1, RATE, &control, &track);
+        let input = vec![0.5f32; 480];
+        assert_eq!(render(&mut mono, &input, 480), input);
     }
 
     /// 写端 panic 毒化锁之后，后续设置仍能写入并被回调读到

@@ -140,4 +140,22 @@ await regression('changed source and fallback switches persist together to Rust 
   assert.equal(storage.get('neri:netease_local_source_fallback'), 'true')
 })
 
+await regression('channel balance is clamped and rounded like Android, and centers on bad input', store => {
+  for (const [value, expected] of [
+    [0.354, 0.35],
+    [-0.35, -0.35],
+    [1.7, 1],
+    [-3, -1],
+    [-0.004, 0],
+    [Number.NaN, 0],
+    ['0.5', 0],
+    [null, 0],
+  ]) {
+    store.applySnapshot({ volumeBalance: value })
+    assert.equal(store.volumeBalance, expected, String(value))
+    assert.ok(!Object.is(store.volumeBalance, -0), `${value} must not round to -0`)
+  }
+  assert.equal(exports.normalizeVolumeBalance(Number.POSITIVE_INFINITY), 0)
+})
+
 console.log(`Playback settings regressions: ${cases} passed`)

@@ -452,6 +452,7 @@ fn main() {
             player_cmd::set_speed,
             player_cmd::set_loudness_gain,
             player_cmd::set_normalize_volume,
+            player_cmd::set_volume_balance,
             player_cmd::set_equalizer,
             player_cmd::reset_audio_effects,
             player_cmd::pause_with_fade,

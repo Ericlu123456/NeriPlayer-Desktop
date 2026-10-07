@@ -1199,6 +1199,20 @@ pub async fn set_normalize_volume(enabled: bool, state: State<'_, AppState>) -> 
     Ok(())
 }
 
+/// 声道平衡，-1（只剩左声道）～1（只剩右声道），按 0.01 取整
+#[tauri::command]
+pub async fn set_volume_balance(balance: f32, state: State<'_, AppState>) -> AppResult<()> {
+    state.player.lock().set_balance(balance_centi(balance)?);
+    Ok(())
+}
+
+fn balance_centi(balance: f32) -> AppResult<i32> {
+    if !balance.is_finite() {
+        return Err(AppError::Audio(format!("Invalid channel balance: {balance}")));
+    }
+    Ok((balance.clamp(-1.0, 1.0) * 100.0).round() as i32)
+}
+
 #[tauri::command]
 pub async fn set_equalizer(
     enabled: bool,
@@ -2152,10 +2166,22 @@ pub async fn cycle_repeat(state: State<'_, AppState>) -> AppResult<crate::state:
 #[cfg(test)]
 mod tests {
     use super::{
-        claim_generation, is_generation_current, playback_referer, playback_trace_field,
-        stream_length_matches, CachedAudioPlaybackRequest, PlaybackUiTraceRequest,
+        balance_centi, claim_generation, is_generation_current, playback_referer,
+        playback_trace_field, stream_length_matches, CachedAudioPlaybackRequest,
+        PlaybackUiTraceRequest,
     };
     use std::sync::atomic::AtomicU64;
+
+    #[test]
+    fn balance_is_rounded_to_hundredths_and_rejects_non_finite_values() {
+        assert_eq!(balance_centi(0.0).unwrap(), 0);
+        assert_eq!(balance_centi(0.354).unwrap(), 35);
+        assert_eq!(balance_centi(-0.35).unwrap(), -35);
+        assert_eq!(balance_centi(2.5).unwrap(), 100);
+        assert_eq!(balance_centi(-7.0).unwrap(), -100);
+        assert!(balance_centi(f32::NAN).is_err());
+        assert!(balance_centi(f32::INFINITY).is_err());
+    }
 
     #[test]
     fn bilibili_edge_hosts_get_the_bilibili_referer() {

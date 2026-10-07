@@ -48,6 +48,8 @@ pub struct AppSettings {
     pub normalize_volume: bool,
     /// 多声道（AC-3/E-AC-3）音轨保留码流自带的动态范围压缩；默认关闭，保留完整动态
     pub multichannel_drc: bool,
+    /// 声道平衡，-1（只剩左声道）～1（只剩右声道），按 0.01 取整（对齐 Android）
+    pub volume_balance: f32,
     pub fade_in: bool,
     #[serde(deserialize_with = "lenient_i32")]
     pub fade_in_duration: i32,
@@ -173,6 +175,7 @@ impl Default for AppSettings {
             crossfade: false,
             normalize_volume: false,
             multichannel_drc: false,
+            volume_balance: 0.0,
             fade_in: false,
             fade_in_duration: 500,
             fade_out_duration: 500,
@@ -289,6 +292,7 @@ impl AppSettings {
         self.volume = clamp_f32(self.volume, 0.0, 1.0, 1.0);
         self.playback_speed = clamp_f32(self.playback_speed, 0.25, 3.0, 1.0);
         self.loudness_gain_mb = self.loudness_gain_mb.clamp(0, 1_500);
+        self.volume_balance = (clamp_f32(self.volume_balance, -1.0, 1.0, 0.0) * 100.0).round() / 100.0;
 
         if self.netease_quality.trim() == "high" {
             self.netease_quality = "higher".into();
@@ -770,6 +774,17 @@ mod tests {
         assert_eq!(settings.loudness_gain_mb, 11);
         assert_eq!(settings.equalizer_bands, vec![1, -3, 0, 4, 4]);
         assert!(serde_json::from_value::<AppSettings>(serde_json::json!({ "fadeInDuration": "fast" })).is_err());
+    }
+
+    #[test]
+    fn volume_balance_is_clamped_and_rounded_like_android() {
+        for (value, expected) in [(0.354f32, 0.35f32), (-0.35, -0.35), (1.7, 1.0), (-3.0, -1.0), (f32::NAN, 0.0)] {
+            let mut settings = AppSettings { volume_balance: value, ..AppSettings::default() };
+            settings.normalize();
+            assert_eq!(settings.volume_balance, expected, "{value}");
+        }
+        let missing: AppSettings = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(missing.volume_balance, 0.0, "旧配置没有这个字段时居中");
     }
 
     #[test]

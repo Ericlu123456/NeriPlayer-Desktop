@@ -95,7 +95,7 @@ async function runtime(options = {}) {
   const playbackInfo = await load(metadataText, { '@tauri-apps/api/core': core })
   const settings = vue.reactive({
     volume: 0.7, playbackSpeed: 1, loudnessGainMb: 0, equalizerEnabled: false, equalizerPresetId: 'flat', equalizerBands: [0, 0, 0, 0, 0],
-    maxCacheSize: 1024, fadeIn: false, crossfade: !!options.crossfade, crossfadeNext: !!options.crossfade,
+    volumeBalance: 0, maxCacheSize: 1024, fadeIn: false, crossfade: !!options.crossfade, crossfadeNext: !!options.crossfade,
     crossfadeInDuration: 100, crossfadeOutDuration: 100, fadeInDuration: 100, fadeOutDuration: 100,
     neteaseQuality: 'hires', qqMusicQuality: 'high', biliQuality: 'high', youtubeQuality: 'high',
     neteaseAutoSourceSwitch: false, neteaseLocalSourceFallback: !!options.localFallback,
