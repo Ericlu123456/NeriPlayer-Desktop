@@ -150,7 +150,7 @@ assert.equal(mergedDisplay[0].roman, 'dai ichi')
 assert.deepEqual(mergedCache, mergedDisplay, 'the cache must retain the same translation and roman as the display')
 preserveText.dispose()
 
-const player = { currentTrack: track, lyrics: [lines[0]], interpolatedPositionMs: 1000, isPlaying: true }
+const player = { currentTrack: track, lyrics: [lines[0]], livePositionMs: () => 1000, isPlaying: true }
 const settings = { advancedLyrics: false }
 const watchers = []
 const intervals = new Map()

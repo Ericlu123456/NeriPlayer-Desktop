@@ -92,7 +92,8 @@ export function installDesktopLyricsBridge(): () => void {
     pending = { sessionId, frame: buildDesktopLyricsFrame({
       track,
       lines: lines.value,
-      positionMs: player.interpolatedPositionMs,
+      // 主窗口最小化时 rAF 暂停，interpolatedPositionMs 会停住；桌面歌词按锚点现算
+      positionMs: player.livePositionMs(),
       lyricOffsetMs: offsets.effectiveOffsetMs(track),
       isPlaying: player.isPlaying,
     }) }

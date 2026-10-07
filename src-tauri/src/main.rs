@@ -116,6 +116,11 @@ fn main() {
                 let _ = win.set_decorations(false);
             }
 
+            #[cfg(windows)]
+            if let Some(win) = app.get_webview_window("main") {
+                pause_rendering_while_minimized(win);
+            }
+
             // macOS: 挂载空 NSToolbar 并启用 Unified 工具栏样式（macOS 11+），
             // 由 AppKit 将标题栏加高到约 52pt 并把红绿灯垂直居中，与前端
             // 52px 的 CSS 标题栏对齐；全屏进出时按钮位置由系统自动管理，
@@ -662,6 +667,46 @@ fn main() {
                 auth_cmd::persist_rotated_cookies(app_handle, state.inner());
             }
         });
+}
+
+/// 窗口最小化时告诉 WebView2 页面不可见，恢复时再设回可见
+///
+/// WebView2 不会自己察觉窗口最小化：页面仍报告可见，并按没有 vsync 的 300 多帧每秒驱动 rAF、
+/// 动画与合成，只放着听歌也要吃掉半个核。设为不可见后 Chromium 暂停这些渲染；计时器节流已在
+/// 启动参数里关掉，播放、桌面歌词等后台逻辑照常运行。
+#[cfg(windows)]
+fn pause_rendering_while_minimized(window: tauri::WebviewWindow) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    let visible = Arc::new(AtomicBool::new(true));
+    let handle = window.clone();
+    window.on_window_event(move |event| {
+        if !matches!(event, tauri::WindowEvent::Resized(_)) {
+            return;
+        }
+        let show = !handle.is_minimized().unwrap_or(false);
+        if visible.swap(show, Ordering::AcqRel) == show {
+            return;
+        }
+        let result = handle.with_webview(move |webview| {
+            // SAFETY: with_webview 的回调在 UI 线程上执行，控制器在窗口存活期间有效
+            if let Err(error) = unsafe { webview.controller().SetIsVisible(show) } {
+                log::warn!(target: "window", "WebView2 visibility not set to {show}: {error}");
+            }
+        });
+        match result {
+            Ok(()) => log::info!(
+                target: "window",
+                "webview rendering {}",
+                if show { "resumed" } else { "paused while minimized" },
+            ),
+            Err(error) => log::warn!(
+                target: "window",
+                "could not reach the webview to set visibility {show}: {error}",
+            ),
+        }
+    });
 }
 
 fn window_command_allowed(label: &str, command: &str) -> bool {

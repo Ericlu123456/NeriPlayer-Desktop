@@ -3075,6 +3075,7 @@ dependencies = [
  "urlencoding",
  "uuid",
  "walkdir",
+ "webview2-com",
  "whoami",
  "zstd",
 ]

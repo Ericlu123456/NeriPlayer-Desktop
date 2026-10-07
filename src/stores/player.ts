@@ -1078,6 +1078,18 @@ export const usePlayerStore = defineStore('player', () => {
     return accepted
   }
 
+  /// 此刻的播放位置，按插值锚点现算
+  ///
+  /// interpolatedPositionMs 由 rAF 推进，窗口最小化后页面不可见、rAF 暂停，它会停在最后一帧；
+  /// 桌面歌词这类窗口不可见时仍要跟着走的地方用这个。
+  function livePositionMs(): number {
+    if (pendingSeek) return Math.round(pendingSeek.targetMs)
+    if (!_interpIsPlaying) return Math.round(_interpRenderedMs)
+    const predicted = _interpAnchorMs + (performance.now() - _interpAnchorTime) * _interpSpeed
+    const clamped = Math.max(0, Math.min(predicted, _interpDurationMs))
+    return Math.round(Math.max(_interpRenderedMs, clamped))
+  }
+
   /** 按需启动 rAF 插值循环：暂停且无待确认 seek 时自动停表，状态恢复时重启 */
   function _startInterpolationLoop() {
     if (_interpLoopStarted) return
@@ -3068,7 +3080,7 @@ export const usePlayerStore = defineStore('player', () => {
     lastCommandSource, lastSeekCommand, isRemoteSyncGuardActive,
     playbackSpeed, currentStreamUrl, sleepTimerMode, sleepRemainingSeconds,
     loudnessGainMb, equalizerEnabled, equalizerPresetId, equalizerBands, hasActiveEffects,
-    progress, interpolatedPositionMs, interpolatedProgress,
+    progress, interpolatedPositionMs, interpolatedProgress, livePositionMs,
     currentTimeFormatted, durationFormatted,
     play, togglePlayPause, pause, resume, seekTo, next, previous,
     flushPlayerState,
