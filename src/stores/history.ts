@@ -39,9 +39,37 @@ export type HistorySyncApplyOutcome = 'applied' | 'deferred' | 'skipped'
 
 const STORAGE_KEY = LEGACY_HISTORY_KEY
 const DELETIONS_STORAGE_KEY = LEGACY_HISTORY_DELETIONS_KEY
-const MAX_ENTRIES = 1000
-const MAX_DELETIONS = 2000
 export const HISTORY_CHANGED_EVENT = 'neri:history-changed'
+
+/**
+ * 历史条目的身份：曲目 id；同一个 B 站视频的不同分 P 再按 cid 区分（取流选分 P 的同一规则）。
+ * 必须与 Rust `play_history::identity_key` 一致
+ */
+export function historyEntryKey(track: Pick<TrackInfo, 'id' | 'album' | 'syncPayload'>): string {
+  if (!track.id.startsWith('bilibili:')) return track.id
+  const cid = bilibiliPage(track)
+  return cid ? `${track.id}#${cid}` : track.id
+}
+
+function bilibiliPage(track: Pick<TrackInfo, 'album' | 'syncPayload'>): string | undefined {
+  for (const key of ['subAudioId', 'sub_audio_id']) {
+    const value = track.syncPayload?.[key]
+    if (typeof value === 'string' && value.trim()) return value.trim()
+    if (typeof value === 'number' && Number.isFinite(value)) return String(value)
+  }
+  return track.album?.match(/^Bilibili\|(\d+)/i)?.[1]
+}
+
+/** 按身份去重，保留先出现的一条（调用方先按时间从新到旧排好） */
+function uniqueByIdentity<T extends { track: TrackInfo }>(items: T[]): T[] {
+  const seen = new Set<string>()
+  return items.filter((item) => {
+    const key = historyEntryKey(item.track)
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
+}
 
 function normalizeTrack(raw: any): TrackInfo {
   return {
@@ -176,22 +204,20 @@ export const useHistoryStore = defineStore('history', () => {
   function applyStored(parsedEntries: unknown, parsedDeletions: unknown) {
     try {
       entries.value = Array.isArray(parsedEntries)
-        ? parsedEntries
+        ? uniqueByIdentity(parsedEntries
           .map((entry: any) => ({
             track: normalizeTrack(entry?.track),
             playedAt: Number(entry?.playedAt ?? entry?.played_at ?? 0),
           }))
-          .filter((entry: PlayedEntry) => entry.track.id && entry.playedAt > 0)
-          .slice(0, MAX_ENTRIES)
+          .filter((entry: PlayedEntry) => entry.track.id && entry.playedAt > 0))
         : []
       deletions.value = Array.isArray(parsedDeletions)
-        ? parsedDeletions
+        ? uniqueByIdentity(parsedDeletions
           .map((deletion: any) => ({
             track: normalizeTrack(deletion?.track),
             deletedAt: Number(deletion?.deletedAt ?? deletion?.deleted_at ?? 0),
           }))
-          .filter((deletion: HistoryDeletion) => deletion.track.id && deletion.deletedAt > 0)
-          .slice(0, MAX_DELETIONS)
+          .filter((deletion: HistoryDeletion) => deletion.track.id && deletion.deletedAt > 0))
         : []
     } catch {
       entries.value = []
@@ -207,29 +233,28 @@ export const useHistoryStore = defineStore('history', () => {
   function record(track: TrackInfo) {
     markLocalMutation()
     const playedAt = Date.now()
-    const idx = entries.value.findIndex(entry => entry.track.id === track.id)
+    const key = historyEntryKey(track)
+    const idx = entries.value.findIndex(entry => historyEntryKey(entry.track) === key)
     if (idx >= 0) entries.value.splice(idx, 1)
-    deletions.value = deletions.value.filter(deletion => deletion.track.id !== track.id)
+    deletions.value = deletions.value.filter(deletion => historyEntryKey(deletion.track) !== key)
     entries.value.unshift({ track, playedAt })
-    if (entries.value.length > MAX_ENTRIES) entries.value = entries.value.slice(0, MAX_ENTRIES)
     persist('record_play_history', { track, playedAt })
     emitHistoryChanged('record')
   }
 
-  function remove(trackId: string) {
+  /** 按 historyEntryKey 删除单条 */
+  function remove(identityKey: string) {
+    const removed = entries.value.find(entry => historyEntryKey(entry.track) === identityKey)?.track
+    if (!removed) return
     markLocalMutation()
     const deletedAt = Date.now()
-    const removed = entries.value.find(entry => entry.track.id === trackId)?.track
-    const before = entries.value.length
-    entries.value = entries.value.filter(entry => entry.track.id !== trackId)
-    if (removed) {
-      deletions.value = [
-        { track: removed, deletedAt },
-        ...deletions.value.filter(deletion => deletion.track.id !== trackId),
-      ].slice(0, MAX_DELETIONS)
-    }
-    persist('remove_play_history', { trackId, deletedAt })
-    if (entries.value.length !== before || Boolean(removed)) emitHistoryChanged('remove')
+    entries.value = entries.value.filter(entry => historyEntryKey(entry.track) !== identityKey)
+    deletions.value = [
+      { track: removed, deletedAt },
+      ...deletions.value.filter(deletion => historyEntryKey(deletion.track) !== identityKey),
+    ]
+    persist('remove_play_history', { identityKey, deletedAt })
+    emitHistoryChanged('remove')
   }
 
   function clear() {
@@ -237,9 +262,11 @@ export const useHistoryStore = defineStore('history', () => {
     if (entries.value.length === 0) return
     const deletedAt = Date.now()
     const current = entries.value.map(entry => ({ track: entry.track, deletedAt }))
-    const currentIds = new Set(current.map(deletion => deletion.track.id))
-    deletions.value = [...current, ...deletions.value.filter(deletion => !currentIds.has(deletion.track.id))]
-      .slice(0, MAX_DELETIONS)
+    const currentKeys = new Set(current.map(deletion => historyEntryKey(deletion.track)))
+    deletions.value = [
+      ...current,
+      ...deletions.value.filter(deletion => !currentKeys.has(historyEntryKey(deletion.track))),
+    ]
     entries.value = []
     persist('clear_play_history', { deletedAt })
     emitHistoryChanged('clear')
@@ -309,11 +336,11 @@ export const useHistoryStore = defineStore('history', () => {
     // 提交阶段没有异步等待，先复核账号意图和本地修改再一起保存
     if (!canApply()) return interrupted()
     mutationEpoch++
-    entries.value = nextEntries.slice(0, MAX_ENTRIES)
-    deletions.value = resolvedDeletions
+    // 合并结果按同步身份区分，同一曲目可能因专辑名不同出现多条，本地只留最新的一条
+    entries.value = uniqueByIdentity(nextEntries)
+    deletions.value = uniqueByIdentity(resolvedDeletions
       .filter(deletion => deletion.track.id && deletion.deletedAt > 0)
-      .sort((left, right) => right.deletedAt - left.deletedAt)
-      .slice(0, MAX_DELETIONS)
+      .sort((left, right) => right.deletedAt - left.deletedAt))
     persist('replace_play_history', {
       history: {
         entries: entries.value.map(entry => ({ track: entry.track, playedAt: Math.round(entry.playedAt) })),

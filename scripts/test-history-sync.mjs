@@ -291,8 +291,59 @@ await databaseRegression('database mode restores the preloaded history and persi
   ])
   assert.equal(persisted[0][1].track.id, candidate.id)
   assert.equal(persisted[0][1].playedAt, 1_000)
-  assert.deepEqual(persisted[1][1], { trackId: 'netease:stored', deletedAt: 2_000 })
+  assert.deepEqual(persisted[1][1], { identityKey: 'netease:stored', deletedAt: 2_000 })
   assert.deepEqual(persisted[2][1], { deletedAt: 3_000 })
+})
+
+function page(cid) {
+  return { ...track('bilibili:BV1xx', 'bilibili'), album: `Bilibili|${cid}`, title: `P${cid}` }
+}
+
+await databaseRegression('bilibili pages of one video are separate history entries', async store => {
+  now = 2_000
+  store.record(page(1))
+  now = 3_000
+  store.record(page(2))
+  now = 4_000
+  store.record(page(1))
+  assert.deepEqual(store.entries.map(item => item.track.title), ['P1', 'P2', 'netease:stored'])
+  assert.equal(exports.historyEntryKey(page(2)), 'bilibili:BV1xx#2')
+  assert.equal(exports.historyEntryKey({ ...page(0), album: '', syncPayload: { subAudioId: 9 } }), 'bilibili:BV1xx#9')
+  assert.equal(exports.historyEntryKey({ ...track('netease:1'), album: 'Bilibili|5' }), 'netease:1')
+  persisted.length = 0
+  store.remove(exports.historyEntryKey(page(2)))
+  assert.deepEqual(store.entries.map(item => item.track.title), ['P1', 'netease:stored'])
+  assert.deepEqual(store.deletions.map(item => item.track.title), ['P2'])
+  assert.deepEqual(persisted, [['remove_play_history', { identityKey: 'bilibili:BV1xx#2', deletedAt: 4_000 }]])
+})
+
+await databaseRegression('history is not capped and clearing keeps every tombstone', async store => {
+  for (let index = 0; index < 1_502; index++) {
+    now = 2_000 + index
+    store.record(track(`netease:${index}`))
+  }
+  assert.equal(store.entries.length, 1_503)
+  store.clear()
+  assert.equal(store.entries.length, 0)
+  assert.equal(store.deletions.length, 1_503)
+})
+
+await databaseRegression('a sync result keeps one entry per local identity', async store => {
+  await store.applySyncPayload({
+    entries: [
+      { track: { ...track('netease:dup'), album: 'old album' }, playedAt: 1_000 },
+      { track: track('netease:dup'), playedAt: 2_000 },
+      { track: page(1), playedAt: 1_500 },
+      { track: page(2), playedAt: 1_200 },
+    ],
+    deletions: [],
+  })
+  assert.deepEqual(store.entries.map(item => [item.track.id, item.track.album]), [
+    ['netease:dup', 'netease'], ['bilibili:BV1xx', 'Bilibili|1'], ['bilibili:BV1xx', 'Bilibili|2'],
+  ])
+  const [command, args] = persisted.at(-1)
+  assert.equal(command, 'replace_play_history')
+  assert.equal(args.history.entries.length, 3)
 })
 
 await databaseRegression('database mode replaces history only for the current sync payload', async store => {

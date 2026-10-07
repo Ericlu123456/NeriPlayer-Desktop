@@ -115,9 +115,9 @@ pub async fn record_play_history(track: Value, played_at: i64) -> AppResult<()> 
 }
 
 #[tauri::command]
-pub async fn remove_play_history(track_id: String, deleted_at: i64) -> AppResult<()> {
+pub async fn remove_play_history(identity_key: String, deleted_at: i64) -> AppResult<()> {
     blocking(move |database| {
-        database.write(|transaction| play_history::remove(transaction, &track_id, deleted_at).map(|_| ()))
+        database.write(|transaction| play_history::remove(transaction, &identity_key, deleted_at).map(|_| ()))
     })
     .await
 }

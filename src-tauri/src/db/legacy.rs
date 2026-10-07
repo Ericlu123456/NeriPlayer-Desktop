@@ -37,6 +37,11 @@ const IMPORTERS: &[(&str, LegacyImporter)] = &[
         crate::sync::storage::LEGACY_IMPORT_KEY,
         crate::sync::storage::import_legacy_json,
     ),
+    // 不读文件：把 v1 库里按曲目 id 存的播放历史改用身份键
+    (
+        crate::library::play_history::IDENTITY_KEY_MIGRATION,
+        crate::library::play_history::adopt_identity_keys_once,
+    ),
 ];
 
 pub fn import_all(database: &UserDatabase, directory: &Path) -> AppResult<()> {

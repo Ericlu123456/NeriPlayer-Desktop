@@ -7,9 +7,9 @@ use rusqlite::Connection;
 
 use crate::error::{AppError, AppResult};
 
-pub const SCHEMA_VERSION: i32 = 1;
+pub const SCHEMA_VERSION: i32 = 2;
 
-const MIGRATIONS: &[&str] = &[V1];
+const MIGRATIONS: &[&str] = &[V1, V2];
 
 const V1: &str = r#"
 CREATE TABLE migration_metadata (
@@ -252,6 +252,12 @@ CREATE TABLE cache_entry (
     PRIMARY KEY (bucket, cache_key)
 );
 CREATE INDEX index_cache_entry_saved_at ON cache_entry(bucket, saved_at_ms);
+"#;
+
+// 播放历史改按曲目身份去重（对齐 Android identity_key），旧键由 play_history 的一次性迁移重算
+const V2: &str = r#"
+ALTER TABLE play_history RENAME COLUMN track_id TO identity_key;
+ALTER TABLE play_history_deletion RENAME COLUMN track_id TO identity_key;
 "#;
 
 pub fn migrate(connection: &Connection) -> AppResult<()> {
