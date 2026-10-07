@@ -4,6 +4,7 @@ pub mod effects;
 pub mod growing;
 pub mod hls;
 pub mod media_session;
+pub mod metrics;
 pub mod pcm;
 pub mod player;
 pub mod queue;

@@ -503,6 +503,7 @@ fn main() {
             settings_cmd::get_build_info,
             settings_cmd::probe_platform_connectivity,
             debug_cmd::get_recent_logs,
+            debug_cmd::audio_engine_stats,
             debug_cmd::export_debug_report,
             debug_cmd::reveal_in_file_manager,
             debug_cmd::list_crash_reports,

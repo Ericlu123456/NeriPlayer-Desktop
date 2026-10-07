@@ -13,6 +13,9 @@ use crate::audio::analyzer::{AudioAnalyzer, SharedAudioLevel};
 use crate::audio::buffered::PcmRing;
 use crate::audio::effects::{AudioEffectsParams, EqualizerSource, LoudnessSource};
 use crate::audio::growing::GrowingAudioReader;
+use crate::audio::metrics::{
+    self, CommandStamps, FirstFrameProbe, MetricsReporter, OutputMetrics, StartKind,
+};
 use crate::audio::pcm::PcmSource;
 use crate::audio::remote::{
     RemoteAudioSource, RemoteReadCancellation, SourceAudioInfo, SymphoniaAudioDecoder,
@@ -156,6 +159,8 @@ enum AudioCmd {
         transition_generation: u64,
         /// 外部等待超时后置位，打断 remote make_decoder / prebuffer
         prepare_cancel: Arc<AtomicBool>,
+        /// 命令入队时刻（`metrics::monotonic_ns`），首帧耗时从这里算起
+        issued_ns: u64,
         reply: mpsc::Sender<Result<PlaybackStarted, String>>,
     },
     Pause,
@@ -176,6 +181,7 @@ enum AudioCmd {
         position_ms: u64,
         playback_generation: u64,
         seek_generation: u64,
+        issued_ns: u64,
         reply: mpsc::Sender<Result<(), String>>,
     },
     QueryEmpty { reply: mpsc::Sender<bool> },
@@ -261,6 +267,8 @@ struct PlaybackShared {
     wake: Condvar,
     /// 设备失效只上报一次：cpal 错误回调可能连续触发多次
     device_lost: AtomicBool,
+    /// 首帧交给设备的时刻（`metrics::monotonic_ns`），0 表示还没出过帧
+    first_frame_ns: Arc<AtomicU64>,
 }
 
 impl PlaybackShared {
@@ -676,6 +684,8 @@ impl PlayerEngine {
     }
 
     pub fn with_playback_generation(playback_generation: Arc<AtomicU64>) -> Self {
+        // 先定下单调时钟原点，回调里就不会走到初始化分支
+        metrics::monotonic_ns();
         let shared_audio_level = SharedAudioLevel::new();
         let effects_params = AudioEffectsParams::new_shared();
         let seek_generation = Arc::new(AtomicU64::new(0));
@@ -756,6 +766,7 @@ impl PlayerEngine {
                 playback_generation: expected_generation,
                 transition_generation,
                 prepare_cancel: Arc::clone(&prepare_cancel),
+                issued_ns: metrics::monotonic_ns(),
                 reply: reply_tx,
             })
             .map_err(|_| AppError::Audio("Audio thread disconnected".into()))?;
@@ -1048,6 +1059,7 @@ impl PlayerEngine {
                 position_ms,
                 playback_generation: request_generation,
                 seek_generation,
+                issued_ns: metrics::monotonic_ns(),
                 reply: reply_tx,
             })
             .map_err(|_| AppError::Audio("Audio thread disconnected".into()))?;
@@ -1472,18 +1484,39 @@ fn audio_control_loop(
 
     let mut output_profile = OutputDeviceState { preferred_name: None, profile };
     let mut last_output_poll = Instant::now();
+    let mut reporter = MetricsReporter::new();
     loop {
+        let idle_wait = if reporter.has_pending_probes() {
+            metrics::PROBE_POLL_INTERVAL
+        } else {
+            OUTPUT_DEVICE_POLL_INTERVAL
+        };
         let command = match deferred.pop_front() {
             Some(command) => Some(command),
-            None => match receiver.recv_timeout(OUTPUT_DEVICE_POLL_INTERVAL) {
+            None => match receiver.recv_timeout(idle_wait) {
                 Ok(command) => Some(command),
                 Err(mpsc::RecvTimeoutError::Timeout) => None,
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
             },
         };
+        reporter.poll(
+            current.as_ref().map(|session| session.playback_generation),
+            current
+                .as_ref()
+                .is_some_and(|session| !session.shared.paused.load(Ordering::Acquire)),
+        );
         if last_output_poll.elapsed() >= OUTPUT_DEVICE_POLL_INTERVAL {
             last_output_poll = Instant::now();
-            if let Ok(devices) = list_audio_output_devices() {
+            let enumerate_started = Instant::now();
+            let listed = list_audio_output_devices();
+            let enumerate_ms = enumerate_started.elapsed().as_millis();
+            if enumerate_ms >= 50 {
+                log::info!(
+                    target: "audio-timing",
+                    "output device enumeration held the control thread for {enumerate_ms} ms",
+                );
+            }
+            if let Ok(devices) = listed {
                 let available: Vec<&str> = devices.iter().map(|device| device.name.as_str()).collect();
                 let default = devices.iter().find(|device| device.is_default).map(|device| device.name.as_str());
                 let target = effective_output_name(output_profile.preferred_name.as_deref(), &available, default).map(str::to_string);
@@ -1512,8 +1545,10 @@ fn audio_control_loop(
                 playback_generation: expected,
                 transition_generation: expected_transition,
                 prepare_cancel,
+                issued_ns,
                 reply,
             } => {
+                let received_ns = metrics::monotonic_ns();
                 let source_label = source.label();
                 let transition_label = match transition {
                     PlayTransition::Replace => "replace",
@@ -1601,6 +1636,14 @@ fn audio_control_loop(
                     clock: Arc::clone(&next.shared.clock),
                     audio_info: next.audio_info.clone(),
                 };
+                reporter.track(FirstFrameProbe::new(
+                    StartKind::Play,
+                    source_label,
+                    expected,
+                    start_position_ms,
+                    CommandStamps { issued_ns, received_ns },
+                    Arc::clone(&next.shared.first_frame_ns),
+                ));
                 let mut previous = current.take();
                 current = Some(next);
                 log::info!(
@@ -1733,16 +1776,20 @@ fn audio_control_loop(
                 position_ms,
                 playback_generation: expected,
                 seek_generation: expected_seek,
+                issued_ns,
                 reply,
             } => {
                 let mut latest = position_ms;
                 let mut latest_generation = expected;
                 let mut latest_seek_generation = expected_seek;
+                let mut latest_issued_ns = issued_ns;
+                let mut latest_received_ns = metrics::monotonic_ns();
                 let mut latest_reply = reply;
                 take_latest_seek(
                     &mut latest,
                     &mut latest_generation,
                     &mut latest_seek_generation,
+                    &mut latest_issued_ns,
                     &mut latest_reply,
                     &receiver,
                     &mut deferred,
@@ -1811,6 +1858,8 @@ fn audio_control_loop(
                             latest = adopted.position_ms;
                             latest_generation = adopted.playback_generation;
                             latest_seek_generation = adopted.seek_generation;
+                            latest_issued_ns = adopted.issued_ns;
+                            latest_received_ns = metrics::monotonic_ns();
                             latest_reply = adopted.reply;
                             continue;
                         }
@@ -1906,6 +1955,18 @@ fn audio_control_loop(
                                     let _ = latest_reply.send(Err(error));
                                     break;
                                 }
+                                // 暂停态 seek 要等用户恢复才出声，那段等待不算 seek 耗时
+                                reporter.track(FirstFrameProbe::new(
+                                    StartKind::Seek,
+                                    previous.source.label(),
+                                    latest_generation,
+                                    latest,
+                                    CommandStamps {
+                                        issued_ns: latest_issued_ns,
+                                        received_ns: latest_received_ns,
+                                    },
+                                    Arc::clone(&next.shared.first_frame_ns),
+                                ));
                             }
                             current = Some(next);
                             let _ = latest_reply.send(Ok(()));
@@ -2412,6 +2473,7 @@ fn prepare_session(
         wake_lock: Mutex::new(()),
         wake: Condvar::new(),
         device_lost: AtomicBool::new(false),
+        first_frame_ns: Arc::new(AtomicU64::new(0)),
     });
 
     let processed: Box<dyn PcmSource> = Box::new(LoudnessSource::new(
@@ -2685,50 +2747,12 @@ where
     T: SizedSample + FromSample<f32>,
 {
     let callback_shared = Arc::clone(&shared);
-    let channels = shared.channels;
-    let mut frame = vec![0.0f32; channels];
+    let mut frame = vec![0.0f32; shared.channels];
     device
         .build_output_stream(
             config,
             move |output: &mut [T], _| {
-                let silence = T::from_sample(0.0);
-                if callback_shared.paused.load(Ordering::Acquire)
-                    || callback_shared.buffering.load(Ordering::Acquire)
-                {
-                    output.fill(silence);
-                    return;
-                }
-
-                let mut rendered_frames = 0usize;
-                let mut underflowed = false;
-                let gain = callback_shared.volume.load() * callback_shared.fade_gain.load();
-                for output_frame in output.chunks_mut(channels) {
-                    if underflowed {
-                        output_frame.fill(silence);
-                        continue;
-                    }
-                    if !callback_shared.ring.try_pop_frame(&mut frame) {
-                        output_frame.fill(silence);
-                        callback_shared.begin_rebuffering();
-                        underflowed = true;
-                        continue;
-                    }
-
-                    for (target, sample) in output_frame.iter_mut().zip(frame.iter().copied()) {
-                        *target = T::from_sample((sample * gain).clamp(-1.0, 1.0));
-                    }
-                    rendered_frames += 1;
-                }
-                if rendered_frames > 0 {
-                    let speed = callback_shared.speed.load().clamp(0.25, 3.0);
-                    let elapsed_us = ((rendered_frames as f64 * 1_000_000.0
-                        / f64::from(callback_shared.sample_rate))
-                        * f64::from(speed)) as u64;
-                    callback_shared
-                        .clock
-                        .position_us
-                        .fetch_add(elapsed_us, Ordering::AcqRel);
-                }
+                render_output(&callback_shared, output, &mut frame, &metrics::OUTPUT_METRICS);
             },
             move |error| {
                 log::error!(target: "cpal-output", "stream error: {error}");
@@ -2746,6 +2770,68 @@ where
             None,
         )
         .map_err(|error| format!("Could not build audio output: {error}"))
+}
+
+/// 输出回调主体：从 ring 取帧写入设备缓冲，推进时钟并记录指标
+///
+/// 运行在设备回调线程：只用原子操作和预分配的 `frame`，不加锁、不分配。
+/// 播放中途取空 ring 记一次欠载；解码已结束后自然排空不算。
+fn render_output<T>(
+    shared: &PlaybackShared,
+    output: &mut [T],
+    frame: &mut [f32],
+    counters: &OutputMetrics,
+) where
+    T: SizedSample + FromSample<f32>,
+{
+    let started_ns = metrics::monotonic_ns();
+    let silence = T::from_sample(0.0);
+    if shared.paused.load(Ordering::Acquire) || shared.buffering.load(Ordering::Acquire) {
+        output.fill(silence);
+        counters.record_callback(0, 0, false, metrics::monotonic_ns().saturating_sub(started_ns));
+        return;
+    }
+
+    let mut rendered_frames = 0usize;
+    let mut silent_frames = 0usize;
+    let gain = shared.volume.load() * shared.fade_gain.load();
+    for output_frame in output.chunks_mut(shared.channels.max(1)) {
+        if silent_frames > 0 {
+            output_frame.fill(silence);
+            silent_frames += 1;
+            continue;
+        }
+        if !shared.ring.try_pop_frame(frame) {
+            output_frame.fill(silence);
+            shared.begin_rebuffering();
+            silent_frames = 1;
+            continue;
+        }
+
+        for (target, sample) in output_frame.iter_mut().zip(frame.iter().copied()) {
+            *target = T::from_sample((sample * gain).clamp(-1.0, 1.0));
+        }
+        rendered_frames += 1;
+    }
+    if rendered_frames > 0 {
+        let _ = shared.first_frame_ns.compare_exchange(
+            0,
+            started_ns.max(1),
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+        let speed = shared.speed.load().clamp(0.25, 3.0);
+        let elapsed_us = ((rendered_frames as f64 * 1_000_000.0 / f64::from(shared.sample_rate))
+            * f64::from(speed)) as u64;
+        shared.clock.position_us.fetch_add(elapsed_us, Ordering::AcqRel);
+    }
+    let underrun = silent_frames > 0 && !shared.finished.load(Ordering::Acquire);
+    counters.record_callback(
+        rendered_frames,
+        silent_frames,
+        underrun,
+        metrics::monotonic_ns().saturating_sub(started_ns),
+    );
 }
 
 // 播放/下载编排函数的参数都是相互独立的运行时上下文，聚成结构体只是换个地方堆字段
@@ -2892,6 +2978,7 @@ fn take_latest_seek(
     position_ms: &mut u64,
     playback_generation: &mut u64,
     seek_generation: &mut u64,
+    issued_ns: &mut u64,
     reply: &mut mpsc::Sender<Result<(), String>>,
     receiver: &mpsc::Receiver<AudioCmd>,
     deferred: &mut VecDeque<AudioCmd>,
@@ -2905,12 +2992,14 @@ fn take_latest_seek(
                 position_ms: next,
                 playback_generation: next_generation,
                 seek_generation: next_seek_generation,
+                issued_ns: next_issued_ns,
                 reply: next_reply,
             }) => {
                 let _ = reply.send(Err(SEEK_SUPERSEDED.into()));
                 *position_ms = next;
                 *playback_generation = next_generation;
                 *seek_generation = next_seek_generation;
+                *issued_ns = next_issued_ns;
                 *reply = next_reply;
             }
             Ok(command) => deferred.push_back(command),
@@ -2924,6 +3013,7 @@ struct AdoptedSeek {
     position_ms: u64,
     playback_generation: u64,
     seek_generation: u64,
+    issued_ns: u64,
     reply: mpsc::Sender<Result<(), String>>,
 }
 
@@ -2946,12 +3036,14 @@ fn wait_for_newer_seek(
                 position_ms,
                 playback_generation,
                 seek_generation,
+                issued_ns,
                 reply,
             }) => {
                 return Some(AdoptedSeek {
                     position_ms,
                     playback_generation,
                     seek_generation,
+                    issued_ns,
                     reply,
                 })
             }
@@ -3049,6 +3141,7 @@ mod tests {
             clock: Arc::new(PlaybackClock::new(0)),
             wake_lock: std::sync::Mutex::new(()), wake: std::sync::Condvar::new(),
             device_lost: std::sync::atomic::AtomicBool::new(false),
+            first_frame_ns: Arc::new(AtomicU64::new(0)),
         });
         let exited = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let worker_shared = Arc::clone(&shared);
@@ -3117,6 +3210,7 @@ mod tests {
             clock: Arc::new(PlaybackClock::new(0)),
             wake_lock: std::sync::Mutex::new(()), wake: std::sync::Condvar::new(),
             device_lost: std::sync::atomic::AtomicBool::new(false),
+            first_frame_ns: Arc::new(AtomicU64::new(0)),
         });
         let (resume, blocked) = mpsc::channel();
         let (exited, done) = mpsc::channel();
@@ -3304,6 +3398,7 @@ mod tests {
             clock: Arc::new(PlaybackClock::new(0)),
             wake_lock: std::sync::Mutex::new(()), wake: std::sync::Condvar::new(),
             device_lost: std::sync::atomic::AtomicBool::new(false),
+            first_frame_ns: Arc::new(AtomicU64::new(0)),
         });
         let decoder = crate::audio::remote::SymphoniaAudioDecoder::new(
             Box::new(std::io::Cursor::new(include_bytes!("fixtures/hls-silence.aac").as_slice())), Some("aac"),
@@ -3353,6 +3448,7 @@ mod tests {
                 position_ms: 210_641,
                 playback_generation: 7,
                 seek_generation: 4,
+                issued_ns: 0,
                 reply,
             })
             .expect("queue newer seek");
@@ -3387,6 +3483,7 @@ mod tests {
                 position_ms: 4_606_826,
                 playback_generation: 7,
                 seek_generation: 9,
+                issued_ns: 0,
                 reply,
             })
             .expect("queue newer seek behind noise");
@@ -3433,6 +3530,7 @@ mod tests {
                 position_ms: 1_000,
                 playback_generation: 1,
                 seek_generation: 2,
+                issued_ns: 0,
                 reply,
             })
             .expect("queue seek behind deferred");
@@ -3457,6 +3555,7 @@ mod tests {
                 position_ms: 100,
                 playback_generation: 7,
                 seek_generation: 1,
+                issued_ns: 10,
                 reply: first_reply,
             })
             .is_ok());
@@ -3465,6 +3564,7 @@ mod tests {
                 position_ms: 800,
                 playback_generation: 7,
                 seek_generation: 2,
+                issued_ns: 20,
                 reply: second_reply,
             })
             .is_ok());
@@ -3473,12 +3573,14 @@ mod tests {
                 position_ms: 1_600,
                 playback_generation: 8,
                 seek_generation: 3,
+                issued_ns: 30,
                 reply: third_reply,
             })
             .is_ok());
         let mut latest = 0;
         let mut generation = 7;
         let mut seek_generation = 0;
+        let mut issued_ns = 0;
         let (initial_reply, initial_result) = mpsc::channel();
         let mut reply = initial_reply;
         let mut deferred = VecDeque::new();
@@ -3487,6 +3589,7 @@ mod tests {
             &mut latest,
             &mut generation,
             &mut seek_generation,
+            &mut issued_ns,
             &mut reply,
             &receiver,
             &mut deferred,
@@ -3495,6 +3598,7 @@ mod tests {
         assert_eq!(latest, 1_600);
         assert_eq!(generation, 8);
         assert_eq!(seek_generation, 3);
+        assert_eq!(issued_ns, 30, "seek 耗时要从最后一次拖动算起");
         assert_eq!(
             initial_result.recv().expect("initial result"),
             Err(SEEK_SUPERSEDED.into())
@@ -3557,5 +3661,99 @@ mod tests {
     fn known_duration_clamps_seek() {
         assert_eq!(clamp_position(20_000, 10_000), 10_000);
         assert_eq!(clamp_position(20_000, 0), 20_000);
+    }
+
+    fn render_test_shared(channels: usize, capacity_samples: usize) -> Arc<super::PlaybackShared> {
+        Arc::new(super::PlaybackShared {
+            ring: Arc::new(crate::audio::buffered::PcmRing::new(capacity_samples)),
+            channels, sample_rate: 48_000,
+            paused: std::sync::atomic::AtomicBool::new(false),
+            buffering: std::sync::atomic::AtomicBool::new(false),
+            finished: std::sync::atomic::AtomicBool::new(false),
+            cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            volume: super::AtomicF32::new(1.0), fade_gain: super::AtomicF32::new(1.0),
+            speed: super::AtomicF32::new(1.0),
+            buffer_target_frames: std::sync::atomic::AtomicUsize::new(1),
+            clock: Arc::new(PlaybackClock::new(0)),
+            wake_lock: std::sync::Mutex::new(()), wake: std::sync::Condvar::new(),
+            device_lost: std::sync::atomic::AtomicBool::new(false),
+            first_frame_ns: Arc::new(AtomicU64::new(0)),
+        })
+    }
+
+    #[test]
+    fn render_output_counts_a_mid_buffer_underrun_once() {
+        let shared = render_test_shared(2, 64);
+        for index in 0..3 {
+            let value = 0.1 * (index + 1) as f32;
+            assert!(shared.ring.try_push_frame(&[value, -value]));
+        }
+        let counters = crate::audio::metrics::OutputMetrics::new();
+        let mut frame = [0.0f32; 2];
+        let mut output = [1.0f32; 16];
+
+        super::render_output(&shared, &mut output, &mut frame, &counters);
+
+        assert!((output[4] - 0.3).abs() < 1e-6 && (output[5] + 0.3).abs() < 1e-6);
+        assert!(output[6..].iter().all(|sample| *sample == 0.0), "取空后整块补静音");
+        let snapshot = counters.snapshot();
+        assert_eq!((snapshot.underruns, snapshot.underrun_frames, snapshot.rendered_frames), (1, 5, 3));
+        assert!(shared.buffering.load(Ordering::Acquire), "欠载后进入重缓冲");
+        assert_eq!(shared.clock.position_us.load(Ordering::Acquire), 62);
+
+        super::render_output(&shared, &mut output, &mut frame, &counters);
+        assert_eq!(counters.snapshot().underruns, 1, "重缓冲期间的静音不重复计数");
+    }
+
+    #[test]
+    fn render_output_does_not_count_the_drain_after_the_decoder_finished() {
+        let shared = render_test_shared(2, 64);
+        assert!(shared.ring.try_push_frame(&[0.5, 0.5]));
+        shared.finished.store(true, Ordering::Release);
+        let counters = crate::audio::metrics::OutputMetrics::new();
+        let mut frame = [0.0f32; 2];
+        let mut output = [0.0f32; 8];
+
+        super::render_output(&shared, &mut output, &mut frame, &counters);
+
+        let snapshot = counters.snapshot();
+        assert_eq!((snapshot.underruns, snapshot.underrun_frames, snapshot.rendered_frames), (0, 0, 1));
+    }
+
+    #[test]
+    fn render_output_stays_silent_and_uncounted_while_paused() {
+        let shared = render_test_shared(2, 64);
+        assert!(shared.ring.try_push_frame(&[0.5, 0.5]));
+        shared.paused.store(true, Ordering::Release);
+        let counters = crate::audio::metrics::OutputMetrics::new();
+        let mut frame = [0.0f32; 2];
+        let mut output = [1.0f32; 8];
+
+        super::render_output(&shared, &mut output, &mut frame, &counters);
+
+        assert!(output.iter().all(|sample| *sample == 0.0));
+        assert_eq!(shared.ring.readable_samples(), 2, "暂停时不消费 ring");
+        assert_eq!(counters.snapshot().underruns, 0);
+        assert_eq!(shared.first_frame_ns.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn render_output_records_only_the_first_frame_time() {
+        let shared = render_test_shared(1, 64);
+        for _ in 0..8 {
+            assert!(shared.ring.try_push_frame(&[0.25]));
+        }
+        let counters = crate::audio::metrics::OutputMetrics::new();
+        let mut frame = [0.0f32; 1];
+        let mut output = [0.0f32; 4];
+
+        super::render_output(&shared, &mut output, &mut frame, &counters);
+        let first = shared.first_frame_ns.load(Ordering::Acquire);
+        assert_ne!(first, 0);
+        std::thread::sleep(Duration::from_millis(2));
+        super::render_output(&shared, &mut output, &mut frame, &counters);
+
+        assert_eq!(shared.first_frame_ns.load(Ordering::Acquire), first);
+        assert_eq!(counters.snapshot().rendered_frames, 8);
     }
 }
