@@ -105,6 +105,17 @@ impl std::fmt::Display for FfmpegError {
 impl std::error::Error for FfmpegError {}
 
 static RUNTIME: OnceLock<Result<FfmpegRuntime, String>> = OnceLock::new();
+static BUNDLED_DIRECTORY: OnceLock<PathBuf> = OnceLock::new();
+
+/// 安装包里随附动态库的目录（应用资源目录下的 `ffmpeg/`），要在第一次加载前设置
+///
+/// 各平台、各种包格式的资源目录不同（Linux 的 deb、rpm、AppImage 各不一样），
+/// 由应用按 Tauri 给出的资源目录告诉这里，不在加载器里猜。
+pub fn set_bundled_directory(directory: PathBuf) {
+    if BUNDLED_DIRECTORY.set(directory).is_err() {
+        log::warn!(target: "audio-decoder", "FFmpeg bundled directory was already set");
+    }
+}
 
 /// 加载（仅首次调用时）并返回 FFmpeg 运行时信息
 pub fn runtime() -> Result<&'static FfmpegRuntime, FfmpegError> {
@@ -137,6 +148,9 @@ fn candidate_directories() -> Vec<PathBuf> {
     if let Some(directory) = std::env::var_os(FFMPEG_DIR_ENV) {
         directories.push(PathBuf::from(directory));
     }
+    if let Some(directory) = BUNDLED_DIRECTORY.get() {
+        directories.push(directory.clone());
+    }
     if let Some(executable_dir) = std::env::current_exe()
         .ok()
         .and_then(|path| path.parent().map(Path::to_path_buf))
@@ -144,29 +158,26 @@ fn candidate_directories() -> Vec<PathBuf> {
         directories.push(executable_dir.join("ffmpeg"));
         directories.push(executable_dir.clone());
         if cfg!(target_os = "macos") {
+            // 安装包把动态库放进 Frameworks，签名应用时一并签名
             directories.push(executable_dir.join("../Frameworks"));
-            directories.push(executable_dir.join("../Resources/ffmpeg"));
-        }
-        if cfg!(target_os = "linux") {
-            directories.push(executable_dir.join("../lib/neri-player-desktop"));
         }
     }
     if cfg!(debug_assertions) {
-        directories.push(development_directory());
+        directories.extend(development_directories());
     }
     directories
 }
 
-/// 开发机上 `.cache/ffmpeg/<os>-<arch>/` 里的预编译库（仅调试构建会找这里）
-fn development_directory() -> PathBuf {
+/// 开发机上的动态库（仅调试构建会找这里）：先找 scripts/ffmpeg/build-ffmpeg.sh 的输出
+/// `.cache/ffmpeg-build/<os>-<arch>/`，再找放在 `.cache/ffmpeg/<os>-<arch>/` 的预编译共享库
+fn development_directories() -> [PathBuf; 2] {
     let platform = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
+    let cache = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join(".cache");
     let library_dir = if cfg!(windows) { "bin" } else { "lib" };
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join(".cache")
-        .join("ffmpeg")
-        .join(platform)
-        .join(library_dir)
+    [
+        cache.join("ffmpeg-build").join(&platform),
+        cache.join("ffmpeg").join(&platform).join(library_dir),
+    ]
 }
 
 fn load_first(
@@ -564,6 +575,18 @@ mod tests {
             (sum + f64::from(value) * f64::from(value), count + 1)
         });
         (sum / count.max(1) as f64).sqrt()
+    }
+
+    /// 安装包里的目录排在手动覆盖之后、可执行文件旁边的目录之前
+    #[test]
+    fn the_bundled_directory_is_searched_right_after_the_override() {
+        let bundled = std::env::temp_dir().join("neri-ffmpeg-bundled-test-missing");
+        super::set_bundled_directory(bundled.clone());
+
+        let directories = super::candidate_directories();
+
+        let overrides = usize::from(std::env::var_os(super::FFMPEG_DIR_ENV).is_some());
+        assert_eq!(directories.iter().position(|directory| *directory == bundled), Some(overrides));
     }
 
     #[test]

@@ -114,9 +114,15 @@ cargo clippy         # lint（交付要求零警告）
   `src-tauri/target/release/bundle/`
   （Windows：`msi/` + `nsis/`；macOS：`dmg/`；
   Linux：`deb/` + `rpm/` + `appimage/`）。
+- 安装包随附精简 FFmpeg（Opus、E-AC-3 等格式靠它解码）：
+  先 `bash scripts/ffmpeg/build-ffmpeg.sh <target>`（Windows 版在 Linux / WSL 里交叉编译），
+  再 `node scripts/ffmpeg/bundle-config.mjs <target>`，
+  打包时加 `--config .cache/ffmpeg-build/<target>/tauri.bundle.json`。
+  不加这一步打出的包没有 FFmpeg，那些格式会被前端避开。
+  详见 `src-tauri/native/ffmpeg/README.md`。
 - CI：推送 `v*` 标签触发 `.github/workflows/release.yml`，
   在 Windows x64 / macOS arm64 / macOS x64 / Linux x64
-  四个矩阵上构建并发布 GitHub Release；
+  四个矩阵上构建并发布 GitHub Release（同时附上 FFmpeg 源码包）；
   macOS 产物为 ad-hoc 签名（文件名带 `-adhoc` 后缀）。
 - main 分支推送会触发 `Artifacts` 工作流产出同矩阵的测试包。
 

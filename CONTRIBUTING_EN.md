@@ -118,10 +118,17 @@ number **7 times** to unlock developer mode and the `Debug` page
 - Local: `pnpm tauri build`; bundles land in
   `src-tauri/target/release/bundle/` (Windows: `msi/` + `nsis/`;
   macOS: `dmg/`; Linux: `deb/` + `rpm/` + `appimage/`).
+- Bundles ship a minimal FFmpeg (it decodes Opus, E-AC-3 and similar
+  formats): run `bash scripts/ffmpeg/build-ffmpeg.sh <target>` (the
+  Windows build cross-compiles on Linux / WSL), then
+  `node scripts/ffmpeg/bundle-config.mjs <target>`, and pass
+  `--config .cache/ffmpeg-build/<target>/tauri.bundle.json` when
+  building. Without it the bundle has no FFmpeg and the frontend avoids
+  those formats. See `src-tauri/native/ffmpeg/README.md`.
 - CI: pushing a `v*` tag triggers `.github/workflows/release.yml`,
   building on Windows x64 / macOS arm64 / macOS x64 / Linux x64 and
-  publishing a GitHub Release; macOS bundles are ad-hoc signed (file
-  names carry an `-adhoc` suffix).
+  publishing a GitHub Release with the FFmpeg source attached; macOS
+  bundles are ad-hoc signed (file names carry an `-adhoc` suffix).
 - Pushes to main trigger the `Artifacts` workflow producing the same
   matrix for testing.
 

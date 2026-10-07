@@ -60,7 +60,8 @@
     "macOS": {
       "minimumSystemVersion": "10.15",
       "hardenedRuntime": true,
-      "signingIdentity": "-"
+      "signingIdentity": "-",
+      "entitlements": "Entitlements.plist"
     },
     "category": "Music",
     "linux": {

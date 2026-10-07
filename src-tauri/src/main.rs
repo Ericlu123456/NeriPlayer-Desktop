@@ -88,6 +88,16 @@ fn main() {
             // 日志插件初始化时把 max_level 放到了 Trace，这里收回到设置的级别
             neri_player_desktop::logging::set_runtime_level(log_cfg.level);
 
+            // 安装包把 FFmpeg 放在资源目录的 ffmpeg/ 下，各平台、各包格式的位置由 Tauri 给出
+            match app.path().resource_dir() {
+                Ok(resources) => {
+                    neri_player_desktop::audio::ffmpeg::set_bundled_directory(resources.join("ffmpeg"));
+                }
+                Err(error) => log::warn!(
+                    target: "audio-decoder",
+                    "resource directory unavailable, looking for FFmpeg next to the executable only: {error}",
+                ),
+            }
             // 后台预加载 FFmpeg：第一首杜比或 Opus 曲目起播时就不用再等动态库加载
             let preload = std::thread::Builder::new()
                 .name("ffmpeg-preload".into())
