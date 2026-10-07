@@ -179,6 +179,7 @@
     "removed_tracks": "{count} 曲を削除しました",
     "remove_tracks_failed": "曲を削除できませんでした",
     "track_order_save_failed": "曲の並び順を保存できませんでした",
+    "track_order_changed": "プレイリストが変更されたため再読み込みしました。もう一度ドラッグしてください",
     "batch_remove_title": "曲をまとめて削除",
     "batch_remove_confirm": "選択した {count} 曲をこのプレイリストから削除しますか？",
     "delete_playlist": "プレイリストを削除",

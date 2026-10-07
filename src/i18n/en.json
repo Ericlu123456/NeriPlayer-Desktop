@@ -179,6 +179,7 @@
     "removed_tracks": "Removed {count} track | Removed {count} tracks",
     "remove_tracks_failed": "Couldn't remove the tracks",
     "track_order_save_failed": "Couldn't save the track order",
+    "track_order_changed": "The playlist just changed and was reloaded. Please drag again.",
     "batch_remove_title": "Remove tracks",
     "batch_remove_confirm": "Remove the selected track from this playlist? | Remove the {count} selected tracks from this playlist?",
     "delete_playlist": "Delete Playlist",

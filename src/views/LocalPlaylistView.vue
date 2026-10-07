@@ -744,12 +744,18 @@ async function onTrackDragPointerUp(e: PointerEvent) {
     await invoke('reorder_playlist_tracks', {
       playlistId: String(route.params.id),
       orderedKeys: nextTracks.map(trackOrderKey),
+      expectedKeys: previousTracks.map(trackOrderKey),
     })
     player.prefetchPlaybackTracks(tracks.value)
   } catch (e) {
     tracks.value = previousTracks
-    log.error('Reorder playlist tracks failed:', e)
-    toast.error(t('library.track_order_save_failed'))
+    if (String(e).includes('PLAYLIST_ORDER_CHANGED')) {
+      toast.error(t('library.track_order_changed'))
+      void loadDetail({ silent: true })
+    } else {
+      log.error('Reorder playlist tracks failed:', e)
+      toast.error(t('library.track_order_save_failed'))
+    }
   } finally {
     isPersistingTrackOrder.value = false
   }

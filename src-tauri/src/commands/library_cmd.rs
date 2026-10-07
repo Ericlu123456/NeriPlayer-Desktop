@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 use tauri::{AppHandle, Emitter, State};
 use crate::error::{AppError, AppResult};
@@ -620,16 +621,23 @@ pub async fn remove_tracks_from_playlist(app: AppHandle, playlist_id: PlaylistId
     Ok(removed)
 }
 
+/// 拖动预览之后歌单又变了（同步写入、其它窗口修改），这次重排作废
+pub const PLAYLIST_ORDER_CHANGED: &str = "PLAYLIST_ORDER_CHANGED";
+
 /// 重排本地歌单内歌曲顺序（仅本地歌单支持）
 ///
 /// 前端传入按新顺序排列的 playlist_key 列表；未包含的歌曲保持相对顺序追加到末尾。
 /// 重排后按递减序列重新戳 added_at（对齐 Android stampSongsForDisplayOrder；桌面同步
 /// 按 added_at 排序，这样自定义顺序才能跨端持久化）
+///
+/// 给了 expected_keys（拖动时看到的顺序）时，当前顺序必须与它一致且新顺序只是它的重排，
+/// 否则拒绝并不做任何修改（对齐 Android reorderSongs expectedOrder）
 #[tauri::command]
 pub async fn reorder_playlist_tracks(
     app: AppHandle,
     playlist_id: PlaylistId,
     ordered_keys: Vec<String>,
+    expected_keys: Option<Vec<String>>,
 ) -> AppResult<usize> {
     let playlist_id = playlist_id.into_i64()?;
     let count = PlaylistStore::update(|store| {
@@ -638,40 +646,11 @@ pub async fn reorder_playlist_tracks(
             .iter_mut()
             .find(|p| p.id == playlist_id)
             .ok_or_else(|| AppError::NotFound("Playlist not found".into()))?;
-
-        let order_index: std::collections::HashMap<String, usize> = ordered_keys
-            .iter()
-            .enumerate()
-            .map(|(idx, key)| (key.clone(), idx))
-            .collect();
-
-        // 稳定排序：命中 key 用目标位次，未命中用末位并保留原相对序，保证不丢歌
-        let fallback = ordered_keys.len();
-        let mut indexed: Vec<(usize, usize, TrackInfo)> = std::mem::take(&mut pl.tracks)
-            .into_iter()
-            .enumerate()
-            .map(|(orig_idx, track)| {
-                let rank = playlist_track_order_aliases(&track)
-                    .iter()
-                    .find_map(|key| order_index.get(key).copied())
-                    .unwrap_or(fallback);
-                (rank, orig_idx, track)
-            })
-            .collect();
-        indexed.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
-
         let now = chrono::Utc::now().timestamp_millis();
-        let count = indexed.len();
-        pl.tracks = indexed
-            .into_iter()
-            .enumerate()
-            .map(|(idx, (_, _, mut track))| {
-                track.added_at = (now - idx as i64).max(1);
-                track
-            })
-            .collect();
+        let tracks = std::mem::take(&mut pl.tracks);
+        pl.tracks = reorder_tracks(tracks, &ordered_keys, expected_keys.as_deref(), now)?;
         pl.modified_at = now as u64;
-        Ok((count, true))
+        Ok((pl.tracks.len(), true))
     })?;
 
     let _ = app.emit("playlists-changed", ());
@@ -682,6 +661,54 @@ pub async fn reorder_playlist_tracks(
         count,
     );
     Ok(count)
+}
+
+fn reorder_tracks(
+    tracks: Vec<TrackInfo>,
+    ordered_keys: &[String],
+    expected_keys: Option<&[String]>,
+    now: i64,
+) -> AppResult<Vec<TrackInfo>> {
+    if let Some(expected) = expected_keys {
+        let current_matches = tracks.len() == expected.len()
+            && tracks
+                .iter()
+                .zip(expected)
+                .all(|(track, key)| playlist_track_order_aliases(track).contains(key));
+        let unique: HashSet<&String> = ordered_keys.iter().collect();
+        let mut ordered_sorted: Vec<&String> = ordered_keys.iter().collect();
+        let mut expected_sorted: Vec<&String> = expected.iter().collect();
+        ordered_sorted.sort();
+        expected_sorted.sort();
+        if !current_matches || unique.len() != ordered_keys.len() || ordered_sorted != expected_sorted {
+            return Err(AppError::Other(PLAYLIST_ORDER_CHANGED.into()));
+        }
+    }
+
+    let order_index: HashMap<&String, usize> =
+        ordered_keys.iter().enumerate().map(|(idx, key)| (key, idx)).collect();
+    // 稳定排序：命中 key 用目标位次，未命中用末位并保留原相对序，保证不丢歌
+    let fallback = ordered_keys.len();
+    let mut indexed: Vec<(usize, usize, TrackInfo)> = tracks
+        .into_iter()
+        .enumerate()
+        .map(|(orig_idx, track)| {
+            let rank = playlist_track_order_aliases(&track)
+                .iter()
+                .find_map(|key| order_index.get(key).copied())
+                .unwrap_or(fallback);
+            (rank, orig_idx, track)
+        })
+        .collect();
+    indexed.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+    Ok(indexed
+        .into_iter()
+        .enumerate()
+        .map(|(idx, (_, _, mut track))| {
+            track.added_at = (now - idx as i64).max(1);
+            track
+        })
+        .collect())
 }
 
 fn playlist_track_order_aliases(track: &TrackInfo) -> Vec<String> {
@@ -753,6 +780,32 @@ mod tests {
         assert!(aliases.iter().any(|key| key == "local-file-id"));
         assert!(aliases.iter().any(|key| key == "local-file-id|Album"));
         assert!(aliases.iter().any(|key| key == "local-file-id|Album|"));
+    }
+
+    #[test]
+    fn track_reorder_is_rejected_when_the_previewed_order_is_outdated() {
+        let tracks = || vec![track("a", "", Some("ka")), track("b", "", Some("kb")), track("c", "", Some("kc"))];
+        let keys = |list: &[&str]| list.iter().map(|key| key.to_string()).collect::<Vec<_>>();
+        let ids = |list: &[TrackInfo]| list.iter().map(|track| track.id.clone()).collect::<Vec<_>>();
+
+        let reordered = reorder_tracks(tracks(), &keys(&["kc", "ka", "kb"]), Some(&keys(&["ka", "kb", "kc"])), 100).unwrap();
+        assert_eq!(ids(&reordered), ["c", "a", "b"]);
+        assert_eq!(reordered.iter().map(|track| track.added_at).collect::<Vec<_>>(), [100, 99, 98]);
+
+        let mut synced_in = tracks();
+        synced_in.push(track("d", "", Some("kd")));
+        for (current, ordered, expected, why) in [
+            (synced_in, keys(&["kc", "ka", "kb"]), keys(&["ka", "kb", "kc"]), "a song arrived after the preview"),
+            (tracks(), keys(&["kc", "ka", "kb"]), keys(&["kb", "ka", "kc"]), "the order changed after the preview"),
+            (tracks(), keys(&["kc", "ka", "ka"]), keys(&["ka", "kb", "kc"]), "the new order repeats a song"),
+            (tracks(), keys(&["kc", "ka"]), keys(&["ka", "kb", "kc"]), "the new order drops a song"),
+        ] {
+            let error = reorder_tracks(current, &ordered, Some(&expected), 100).unwrap_err();
+            assert_eq!(error.to_string(), PLAYLIST_ORDER_CHANGED, "{why}");
+        }
+
+        let without_expectation = reorder_tracks(tracks(), &keys(&["kc"]), None, 100).unwrap();
+        assert_eq!(ids(&without_expectation), ["c", "a", "b"], "unlisted songs keep their order at the end");
     }
 }
 
