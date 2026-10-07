@@ -27,6 +27,7 @@ import {
   type ContextMenuItem,
 } from '@/utils/contextMenu'
 import { localPlaylistDisplayName } from '@/modules/library/localPlaylists'
+import { recordPlaylistOpen } from '@/modules/library/playlistUsage'
 import { createLogger } from '@/utils/logger'
 import { formatTrackDuration as formatDuration } from '@/utils/timeFormat'
 
@@ -263,9 +264,18 @@ async function loadDetail(options: { silent?: boolean } = {}) {
       loadingAudio: player.isLoadingAudio,
     })
     tracks.value = trackList.map(normalizeTrack)
-    // 静默刷新不重复预取，减少 IO
+    // 静默刷新不重复预取，减少 IO；也不算一次打开
     if (!silent) {
       player.prefetchPlaybackTracks(tracks.value)
+      if (pl) {
+        recordPlaylistOpen({
+          source: 'local',
+          id,
+          name: pl.name,
+          coverUrl: tracks.value.find(track => track.coverUrl)?.coverUrl,
+          trackCount: tracks.value.length,
+        })
+      }
     }
     log.info('playlist load committed:', {
       playlistId: id,

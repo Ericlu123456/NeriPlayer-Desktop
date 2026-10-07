@@ -96,7 +96,7 @@ const viewCompiled = ts.transpileModule(ts.createPrinter().printFile(withoutImpo
 }).outputText
 
 async function mountArtist(data = artistTracks) {
-  const played = [], shuffled = []
+  const played = [], shuffled = [], opened = []
   const imports = {
     useRoute: () => ({ params: { name: '鹿乃' } }), useRouter: () => ({ back() {} }),
     useI18n: () => ({ t: key => key }),
@@ -104,6 +104,7 @@ async function mountArtist(data = artistTracks) {
     groupLocalArtists, localArtistStableKey, loadArtistSourceTracks: async () => data,
     createLogger: () => ({ error() {} }), formatTrackDuration: () => '1:00',
     BilibiliCoverImage: Vue.defineComponent({ setup: () => () => Vue.h('img') }),
+    recordPlaylistOpen: open => opened.push(open),
   }
   const dependencies = { exports: {} }
   for (const statement of viewScript.statements) {
@@ -126,7 +127,7 @@ async function mountArtist(data = artistTracks) {
   app.mount(root)
   await settle()
   return {
-    root, played, shuffled,
+    root, played, shuffled, opened,
     titles: () => byClass(root, 'track-title').map(textContent),
     async search(value) {
       const input = allNodes(root).find(node => node.type === 'input')
@@ -158,6 +159,17 @@ await test('local artist search matches all loaded titles, artists and albums', 
     assert.deepEqual(page.titles(), ['ピエロ'])
     await page.search('  ')
     assert.equal(page.titles().length, 123)
+  } finally { page.stop() }
+})
+
+await test('opening a local artist records one open for Continue playing', async () => {
+  const page = await mountArtist()
+  try {
+    await page.search('needle')
+    assert.equal(page.opened.length, 1, 'searching is not another open')
+    assert.equal(page.opened[0].source, 'localArtist')
+    assert.equal(page.opened[0].name, '鹿乃')
+    assert.equal(page.opened[0].trackCount, 123)
   } finally { page.stop() }
 })
 await test('filtered rows play the selected song while bulk actions retain the complete artist queue', async () => {

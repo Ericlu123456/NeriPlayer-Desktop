@@ -8,6 +8,7 @@ import { useToastStore } from '@/stores/toast'
 import BilibiliCoverImage from '@/components/BilibiliCoverImage.vue'
 import { useArtistFavorite } from '@/modules/library/favoriteArtistState'
 import { playlistDetailCacheKey, previewCachedDetail, writePlaylistDetailCache, type CachedDetailPreview } from '@/modules/library/playlistDetailCache'
+import { recordPlaylistOpen } from '@/modules/library/playlistUsage'
 import { formatTrackDuration } from '@/utils/timeFormat'
 
 interface ArtistHeader { name: string; coverUrl: string; bannerUrl: string; description: string }
@@ -144,6 +145,17 @@ async function loadCollection(content: ArtistContent, more = false) {
       return true
     })
     collection.value = loaded
+    if (!more) {
+      recordPlaylistOpen({
+        source: 'bili',
+        id: content.id,
+        mid: mid.value,
+        subtype: content.kind === 'collection' ? 'COLLECTION' : 'SERIES',
+        name: content.name,
+        coverUrl: content.coverUrl,
+        trackCount: loaded.total || loaded.tracks.length,
+      })
+    }
   } catch (cause) { if (request === collectionGeneration && artistRequest === generation) collectionError.value = String(cause) }
   finally { if (request === collectionGeneration && artistRequest === generation) loadingCollection.value = false }
 }

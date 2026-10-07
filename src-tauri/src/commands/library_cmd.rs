@@ -450,6 +450,44 @@ fn next_track_added_at(tracks: &[TrackInfo], count: usize) -> i64 {
     now.max(existing_max.saturating_add(count as i64)).max(1)
 }
 
+/// 记一次歌单打开（对齐 Android PlaylistUsageRepository.recordOpen）：首页「继续播放」按它排序，
+/// 计数随同步合并到其它设备。返回是否有记录变化
+#[tauri::command]
+pub async fn record_playlist_open(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    mut open: crate::library::playlist_usage::PlaylistOpen,
+) -> AppResult<bool> {
+    if open.source == "bili" && open.subtype.as_deref().is_none_or(|subtype| subtype.trim().is_empty()) {
+        let own_mid = state.auth.lock().bilibili.as_ref().and_then(|auth| auth.mid);
+        open.subtype = Some(crate::library::playlist_usage::bili_favorite_kind(&open, own_mid).into());
+    }
+    let Some(usage) = open.resolve() else { return Ok(false) };
+    let device_id = manager::get_or_create_device_id_pub(&app);
+    let now = chrono::Utc::now().timestamp_millis();
+    let changed = tokio::task::spawn_blocking(move || -> AppResult<bool> {
+        // 与同步回写共用歌单锁并推进写入版本：进行中的同步会推迟，而不是用旧快照的扩展段覆盖这条记录
+        let _guard = crate::library::playlist::lock_io();
+        let mut changed = false;
+        crate::db::user_db()?.write(|transaction| {
+            crate::sync::storage::update_archive_extensions(transaction, |extensions| {
+                changed = crate::sync::merge::record_playlist_open(extensions, &usage, &device_id, now);
+                Ok(())
+            })
+        })?;
+        if changed {
+            crate::library::playlist::mark_io_changed();
+        }
+        Ok(changed)
+    })
+    .await
+    .map_err(|error| AppError::Other(format!("record_playlist_open task failed: {error}")))??;
+    if changed {
+        let _ = app.emit("playlist-usage-changed", ());
+    }
+    Ok(changed)
+}
+
 /// 用户改过的歌词记成覆盖记录：不在任何歌单里、只在队列或历史里的歌也能同步出去
 /// （对齐 Android SyncLyricOverrideStore）
 #[tauri::command]

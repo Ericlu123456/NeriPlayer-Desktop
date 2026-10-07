@@ -457,6 +457,7 @@ fn main() {
             player_cmd::get_playback_audio_info,
             library_cmd::list_playlists,
             library_cmd::get_playlist_usage_stats,
+            library_cmd::record_playlist_open,
             library_cmd::get_home_local_playlists,
             library_cmd::create_playlist,
             library_cmd::ensure_favorites_playlist,

@@ -23,6 +23,7 @@ import {
   previewCachedDetail,
   writePlaylistDetailCache,
 } from '@/modules/library/playlistDetailCache'
+import { recordPlaylistOpen, youtubePlaylistIdFromBrowseId } from '@/modules/library/playlistUsage'
 import { parseYouTubePlaylistTracks, parseYouTubePlaylistMeta } from '@/modules/youtube/youtubePlaylistParse'
 import { formatTrackDuration as formatDuration } from '@/utils/timeFormat'
 
@@ -138,13 +139,25 @@ async function loadDetail() {
       if (firstCover) coverUrl.value = firstCover
     }
     saveDetailCache(cacheKey)
+    recordOpen(browseId)
   } catch (e: any) {
-    if (!(await cached.shown())) {
-      error.value = e?.toString() || t('player.load_failed')
-    }
+    if (await cached.shown()) recordOpen(browseId)
+    else error.value = e?.toString() || t('player.load_failed')
   } finally {
     isLoading.value = false
   }
+}
+
+function recordOpen(browseId: string) {
+  recordPlaylistOpen({
+    source: 'youtubeMusic',
+    browseId,
+    playlistId: youtubePlaylistIdFromBrowseId(browseId),
+    name: playlistName.value,
+    subtitle: subtitle.value,
+    coverUrl: coverUrl.value,
+    trackCount: tracks.value.length,
+  })
 }
 
 function playAll() {

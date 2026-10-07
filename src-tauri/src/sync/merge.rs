@@ -131,6 +131,120 @@ pub fn record_lyric_override(
     result
 }
 
+/// 记一次歌单打开（对齐 Android PlaylistUsageRepository.recordOpen）
+///
+/// 只增加本机的计数分片（epoch 0），其它设备的分片原样保留，同步时按分片相加；
+/// 歌单已经没有歌曲时移除记录。返回扩展段是否有变化
+pub(crate) fn record_playlist_open(
+    extensions: &mut serde_json::Map<String, serde_json::Value>,
+    open: &crate::library::playlist_usage::PlaylistUsageOpen,
+    device_id: &str,
+    now: i64,
+) -> bool {
+    let mut stats = extensions
+        .get("playlistUsageStats")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let index = stats.iter().position(|entry| entry["playlistKey"].as_str() == Some(open.key.as_str()));
+    if open.track_count <= 0 {
+        let Some(index) = index else { return false };
+        stats.remove(index);
+        extensions.insert("playlistUsageStats".into(), serde_json::Value::Array(stats));
+        return true;
+    }
+
+    // 在其它设备被移除过的歌单要带上已见过的删除令牌，否则合并时会被当成删除前的旧记录丢掉
+    let observed = normalize_sync_causal_tokens(
+        &extensions
+            .get("playlistUsageDeletions")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter(|deletion| deletion["playlistKey"].as_str() == Some(open.key.as_str()))
+            .flat_map(usage_deletion_tokens)
+            .collect::<Vec<_>>(),
+    );
+    let previous = index.map(|index| &stats[index]).filter(|entry| {
+        let tokens = json_tokens(entry, "observedDeletionTokens");
+        observed.iter().all(|token| tokens.contains(token))
+    });
+    let mut entry = match previous {
+        Some(previous) => {
+            let mut entry = previous.clone();
+            if let Some(cover) = &open.cover_url {
+                entry["coverUrl"] = cover.clone().into();
+            }
+            if let Some(subtitle) = &open.subtitle {
+                entry["subtitle"] = subtitle.clone().into();
+            }
+            let tokens = [json_tokens(previous, "observedDeletionTokens"), observed].concat();
+            entry["observedDeletionTokens"] = serde_json::json!(normalize_sync_causal_tokens(&tokens));
+            entry
+        }
+        None => serde_json::json!({
+            "playlistKey": open.key,
+            "source": open.source,
+            "id": open.id,
+            "coverUrl": open.cover_url,
+            "subtitle": open.subtitle,
+            "firstOpenedAt": now,
+            "lastOpenedAt": now,
+            "openCount": 0,
+            "counterBaseOpenCount": 0,
+            "counterShards": [],
+            "observedDeletionTokens": observed,
+        }),
+    };
+    entry["name"] = open.name.clone().into();
+    entry["trackCount"] = open.track_count.min(i64::from(i32::MAX)).into();
+    entry["fid"] = open.fid.into();
+    entry["mid"] = open.mid.into();
+    entry["browseId"] = serde_json::json!(open.browse_id);
+    entry["playlistId"] = serde_json::json!(open.playlist_id);
+    entry["subtype"] = serde_json::json!(open.subtype);
+
+    let shards: Vec<SyncPlaybackCounterShard> =
+        serde_json::from_value(entry["counterShards"].clone()).unwrap_or_default();
+    let mut shards = merge_counter_shards(&shards, &[]);
+    let shard_total = |shards: &[SyncPlaybackCounterShard]| {
+        shards.iter().fold(0_i64, |total, shard| total.saturating_add(i64::from(shard.play_count.max(0))))
+    };
+    let open_count = json_i64(&entry, "openCount").max(0);
+    let base = if shards.is_empty() {
+        open_count
+    } else {
+        json_i64(&entry, "counterBaseOpenCount").max(0).max(open_count.saturating_sub(shard_total(&shards)))
+    };
+    match shards.iter_mut().find(|shard| shard.device_id == device_id && shard.epoch_started_at == 0) {
+        Some(shard) => {
+            shard.play_count = shard.play_count.saturating_add(1);
+            shard.first_played_at = min_positive(shard.first_played_at, now);
+            shard.last_played_at = shard.last_played_at.max(now);
+        }
+        None => shards.push(SyncPlaybackCounterShard {
+            device_id: device_id.to_string(),
+            play_count: 1,
+            first_played_at: now,
+            last_played_at: now,
+            ..Default::default()
+        }),
+    }
+    let shards = merge_counter_shards(&shards, &[]);
+    entry["firstOpenedAt"] = min_positive(json_i64(&entry, "firstOpenedAt"), now).into();
+    entry["lastOpenedAt"] = json_i64(&entry, "lastOpenedAt").max(now).into();
+    entry["openCount"] = open_count.max(base.saturating_add(shard_total(&shards))).min(i64::from(i32::MAX)).into();
+    entry["counterBaseOpenCount"] = base.into();
+    entry["counterShards"] = serde_json::json!(shards);
+
+    match index {
+        Some(index) => stats[index] = entry,
+        None => stats.push(entry),
+    }
+    extensions.insert("playlistUsageStats".into(), serde_json::Value::Array(stats));
+    true
+}
+
 fn normalize_lyric_state(song: &SyncSong) -> SyncSong {
     let mut song=song.clone();
     let has_text=[song.matched_lyric.as_ref(),song.matched_translated_lyric.as_ref(),song.matched_romanized_lyric.as_ref(),song.original_lyric.as_ref(),song.original_translated_lyric.as_ref(),song.original_romanized_lyric.as_ref()].iter().any(|value|value.is_some());
@@ -1984,6 +2098,71 @@ fn min_positive(left: i64, right: i64) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn usage_open(track_count: i64) -> crate::library::playlist_usage::PlaylistUsageOpen {
+        crate::library::playlist_usage::PlaylistUsageOpen {
+            key: "netease:7".into(),
+            source: "netease".into(),
+            id: 7,
+            subtype: None,
+            name: "Mix".into(),
+            cover_url: Some("https://example.test/cover.jpg".into()),
+            track_count,
+            fid: 0,
+            mid: 0,
+            browse_id: None,
+            playlist_id: None,
+            subtitle: None,
+        }
+    }
+
+    #[test]
+    fn playlist_opens_count_this_device_and_add_up_with_other_devices() {
+        let mut extensions = serde_json::Map::new();
+        assert!(record_playlist_open(&mut extensions, &usage_open(10), "desktop", 100));
+        assert!(record_playlist_open(&mut extensions, &usage_open(11), "desktop", 200));
+        let entry = extensions["playlistUsageStats"][0].clone();
+        assert_eq!(
+            [json_i64(&entry, "openCount"), json_i64(&entry, "firstOpenedAt"), json_i64(&entry, "lastOpenedAt"), json_i64(&entry, "trackCount")],
+            [2, 100, 200, 11]
+        );
+        assert_eq!(entry["counterShards"][0]["deviceId"], "desktop");
+        assert_eq!(entry["counterShards"][0]["playCount"], 2);
+        crate::sync::archive::prepare(&SyncData { extensions: extensions.clone(), ..Default::default() }, None)
+            .expect("the record must satisfy the strict archive schema");
+
+        let mut android = entry.clone();
+        android["counterShards"] = serde_json::json!([{"deviceId": "android", "epochStartedAt": 0, "totalListenMs": 0, "playCount": 3, "firstPlayedAt": 50, "lastPlayedAt": 60}]);
+        android["openCount"] = 3.into();
+        android["lastOpenedAt"] = 60.into();
+        let remote = serde_json::Map::from_iter([("playlistUsageStats".to_string(), serde_json::json!([android]))]);
+        let merged = merge_extensions(&extensions, &remote);
+        assert_eq!(json_i64(&merged["playlistUsageStats"][0], "openCount"), 5, "opens on both devices add up");
+
+        assert!(record_playlist_open(&mut extensions, &usage_open(0), "desktop", 300), "an emptied playlist is removed");
+        assert!(extensions["playlistUsageStats"].as_array().unwrap().is_empty());
+        assert!(!record_playlist_open(&mut extensions, &usage_open(0), "desktop", 400));
+    }
+
+    #[test]
+    fn reopening_a_playlist_removed_elsewhere_starts_a_record_that_survives_the_merge() {
+        let mut extensions = serde_json::Map::from_iter([
+            (
+                "playlistUsageDeletions".to_string(),
+                serde_json::json!([{"playlistKey": "netease:7", "deletionTokens": [{"deviceId": "android", "counter": 4}], "deletedAt": 90}]),
+            ),
+            (
+                "playlistUsageStats".to_string(),
+                serde_json::json!([{"playlistKey": "netease:7", "source": "netease", "id": 7, "name": "Old", "trackCount": 5, "firstOpenedAt": 10, "lastOpenedAt": 20, "openCount": 9, "counterBaseOpenCount": 9, "counterShards": [], "fid": 0, "mid": 0, "observedDeletionTokens": []}]),
+            ),
+        ]);
+        assert!(record_playlist_open(&mut extensions, &usage_open(10), "desktop", 100));
+        let entry = &extensions["playlistUsageStats"][0];
+        assert_eq!(json_i64(entry, "openCount"), 1, "counts from before the removal are dropped");
+        assert_eq!(entry["observedDeletionTokens"], serde_json::json!([{"deviceId": "android", "counter": 4}]));
+        let merged = merge_extensions(&extensions, &serde_json::Map::new());
+        assert_eq!(merged["playlistUsageStats"].as_array().unwrap().len(), 1);
+    }
 
     #[test]
     fn lyric_versions_reset_and_utf16_ties_match_android_independent_of_input_order() {

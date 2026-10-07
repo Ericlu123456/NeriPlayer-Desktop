@@ -8,6 +8,7 @@ import {
   loadArtistSourceTracks,
   localArtistStableKey,
 } from '@/modules/library/localArtists'
+import { recordPlaylistOpen } from '@/modules/library/playlistUsage'
 import BilibiliCoverImage from '@/components/BilibiliCoverImage.vue'
 import { createLogger } from '@/utils/logger'
 import { formatTrackDuration as formatDuration } from '@/utils/timeFormat'
@@ -54,6 +55,12 @@ async function load() {
       (entry) => entry.key === wanted,
     )
     tracks.value = artist?.tracks ?? []
+    recordPlaylistOpen({
+      source: 'localArtist',
+      name: artist?.name || artistName.value,
+      coverUrl: tracks.value.find(track => track.coverUrl)?.coverUrl,
+      trackCount: tracks.value.length,
+    })
   } catch (e) {
     log.error('load local artist failed:', e)
     tracks.value = []

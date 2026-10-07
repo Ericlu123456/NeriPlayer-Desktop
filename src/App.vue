@@ -208,6 +208,7 @@ let historyBatchedTimer: ReturnType<typeof setTimeout> | null = null
 let historyProgressTimer: ReturnType<typeof setTimeout> | null = null
 let periodicSyncTimer: ReturnType<typeof setInterval> | null = null
 let unlistenPlaylistChanged: UnlistenFn | null = null
+let unlistenPlaylistUsage: UnlistenFn | null = null
 let unlistenCloseRequested: UnlistenFn | null = null
 
 function handleBeforeUnload() {
@@ -450,6 +451,8 @@ onMounted(async () => {
     if (event.payload === 'sync') return
     scheduleDebouncedSync()
   })
+  // 打开歌单的记录写进了同步扩展段（对齐 Android recordOpen 之后 triggerSync）
+  unlistenPlaylistUsage = await listen('playlist-usage-changed', () => scheduleDebouncedSync())
 
   // 监听前端播放历史变更事件，触发历史自动同步
   window.addEventListener(HISTORY_CHANGED_EVENT, scheduleHistorySync)
@@ -472,6 +475,7 @@ onUnmounted(() => {
   likedSongs.stop()
   window.removeEventListener(HISTORY_CHANGED_EVENT, scheduleHistorySync)
   if (unlistenPlaylistChanged) unlistenPlaylistChanged()
+  if (unlistenPlaylistUsage) unlistenPlaylistUsage()
   if (unlistenCloseRequested) unlistenCloseRequested()
 })
 </script>

@@ -41,7 +41,7 @@ async function mountPage(name, params, cached = null) {
       const read = Promise.resolve(structuredClone(cached)).then(value => !!value && !fresh && show(value) !== false)
       return { markFresh() { fresh = true }, shown: () => read }
     },
-    writePlaylistDetailCache() {}, formatTrackDuration: () => '',
+    writePlaylistDetailCache() {}, formatTrackDuration: () => '', recordPlaylistOpen() {},
     parseYouTubeArtistDetail: raw => raw, parseYouTubeArtistItems: raw => raw,
     youtubeArtistItemTrack: item => item.videoId ? { id: `youtube:${item.videoId}` } : null,
     invoke: (command, input) => { const request = deferred(); calls.push({ command, input }); pending.push(request); return request.promise },

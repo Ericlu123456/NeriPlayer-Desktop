@@ -24,6 +24,7 @@ import {
   previewCachedDetail,
   writePlaylistDetailCache,
 } from '@/modules/library/playlistDetailCache'
+import { recordPlaylistOpen } from '@/modules/library/playlistUsage'
 import { formatTrackDuration as formatDuration } from '@/utils/timeFormat'
 import { resolveNeteaseCover } from '@/utils/neteaseCover'
 
@@ -199,13 +200,23 @@ async function loadDetail() {
       }))
     }
     saveDetailCache(cacheKey)
+    recordOpen()
   } catch (e: any) {
-    if (!(await cached.shown())) {
-      error.value = e?.toString() || t('player.load_failed')
-    }
+    if (await cached.shown()) recordOpen()
+    else error.value = e?.toString() || t('player.load_failed')
   } finally {
     isLoading.value = false
   }
+}
+
+function recordOpen() {
+  recordPlaylistOpen({
+    source: props.isAlbum ? 'neteaseAlbum' : 'netease',
+    id: String(route.params.id),
+    name: playlistName.value,
+    coverUrl: coverUrl.value,
+    trackCount: trackCount.value || tracks.value.length,
+  })
 }
 
 function playAll() {

@@ -23,6 +23,7 @@ import {
   previewCachedDetail,
   writePlaylistDetailCache,
 } from '@/modules/library/playlistDetailCache'
+import { recordPlaylistOpen } from '@/modules/library/playlistUsage'
 import { formatTrackDuration as formatDuration } from '@/utils/timeFormat'
 
 const route = useRoute()
@@ -146,6 +147,16 @@ async function loadDetail() {
         audioUrl: '',
       }))
     saveDetailCache(cacheKey)
+    // 收藏夹归属（决定 CREATED/COLLECTED）只有新鲜的文件夹信息里有，缓存预览不记
+    recordPlaylistOpen({
+      source: 'bili',
+      id: mediaId,
+      mid: info.mid ?? info.upper?.mid,
+      fid: info.fid,
+      name: folderName.value,
+      coverUrl: coverUrl.value,
+      trackCount: mediaCount.value || tracks.value.length,
+    })
   } catch (e: any) {
     if (!(await cached.shown())) {
       error.value = e?.toString() || t('player.load_failed')
