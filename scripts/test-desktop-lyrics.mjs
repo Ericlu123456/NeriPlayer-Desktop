@@ -86,7 +86,7 @@ assert.equal(changes.at(-1)[0].text, '第一行', 'cached baseline must display 
 assert.equal(upgradeCalls, 1)
 loader.dispose()
 const beforeDispose = changes.length
-resolveUpgrade([lines[1]])
+resolveUpgrade({ source: 'amll_ttml', lines: [lines[1]] })
 await Promise.resolve()
 await Promise.resolve()
 assert.equal(changes.length, beforeDispose, 'closing the window must ignore late upgrades')
@@ -101,7 +101,7 @@ const guarded = createDesktopLyricsLoader({
     if (t.id === track.id) resolveFetch = resolve
     else currentResolve = resolve
   }),
-  cache: () => {}, canUpgrade: () => false, upgrade: async () => [],
+  cache: () => {}, canUpgrade: () => false, upgrade: async () => ({ source: null, lines: [] }),
   mergeUpgrade: (_, upgrade) => upgrade,
   onChange: value => changes.push(value),
 })
@@ -130,6 +130,26 @@ await Promise.resolve()
 assert.equal(changes.at(-1)[0].text, '第一行')
 rejected.dispose()
 
+// 升级返回时用户已改了歌词（canUpgrade 变 false）：结果作废，来源也不能被换成 TTML
+const adoptedSources = []
+let allowUpgrade = true
+let resolveRejectedUpgrade
+const discarded = createDesktopLyricsLoader({
+  materialize: async () => null, cached: () => [lines[0]],
+  fetch: async () => [], cache: () => {},
+  canUpgrade: () => allowUpgrade,
+  upgrade: () => new Promise(resolve => { resolveRejectedUpgrade = resolve }),
+  mergeUpgrade: (_, upgrade) => upgrade,
+  adoptSource: (_, source) => adoptedSources.push(['adopt', source]),
+  onChange: () => {},
+})
+await discarded.load(track)
+allowUpgrade = false
+resolveRejectedUpgrade({ source: 'amll_ttml', lines: [lines[1]] })
+await flushMicrotasks()
+assert.deepEqual(adoptedSources, [], 'a discarded upgrade must not change the lyric source')
+discarded.dispose()
+
 let mergedDisplay
 let mergedCache
 const preserveText = createDesktopLyricsLoader({
@@ -138,12 +158,15 @@ const preserveText = createDesktopLyricsLoader({
   fetch: async () => [],
   cache: (_, value) => { mergedCache = value },
   canUpgrade: () => true,
-  upgrade: async () => [{ ...lines[0], startMs: 1200, translation: undefined, words: [{ startMs: 1200, durationMs: 500, text: '第一行' }] }],
+  upgrade: async () => ({ source: 'amll_ttml', lines: [{ ...lines[0], startMs: 1200, translation: undefined, words: [{ startMs: 1200, durationMs: 500, text: '第一行' }] }] }),
   mergeUpgrade: mergeWordTimedLyricsWithBaseline,
-  onChange: value => { mergedDisplay = value },
+  adoptSource: (_, source) => adoptedSources.push(['adopt', source]),
+  onChange: value => { mergedDisplay = value; adoptedSources.push(['display']) },
 })
 await preserveText.load(track)
 await Promise.resolve()
+assert.deepEqual(adoptedSources.slice(-2), [['adopt', 'amll_ttml'], ['display']],
+  'an applied upgrade records its source before display and cache pick defaults from it')
 assert.equal(mergedDisplay[0].startMs, 1200)
 assert.equal(mergedDisplay[0].translation, 'first', 'external word timing must preserve matching baseline translation')
 assert.equal(mergedDisplay[0].roman, 'dai ichi')

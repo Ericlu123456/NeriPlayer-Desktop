@@ -154,10 +154,9 @@ export function installDesktopLyricsBridge(): () => void {
         const fetched = await loadLyricsSingleFlight(track, () => fetchWordTimedLyrics({
           title: track.title, artist: track.artist, durationMs: track.durationMs || 0,
         }), 'word-timed')
-        if (!hasWordTimedLyrics(fetched.lines)) return []
-        rememberLyricSource(track, fetched.source)
-        return fetched.lines
+        return hasWordTimedLyrics(fetched.lines) ? fetched : { source: null, lines: [] }
       },
+      adoptSource: rememberLyricSource,
     })
     stopTrack = watch(
       [() => player.currentTrack, () => player.lyrics, () => settings.advancedLyrics],
