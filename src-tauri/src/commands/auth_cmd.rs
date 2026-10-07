@@ -8,6 +8,7 @@ use tauri::{AppHandle, Manager, State, WebviewUrl, WebviewWindowBuilder, WindowE
 
 // 三平台登录/登出命令
 use crate::api::youtube::client::YouTubeAccountProfile;
+use crate::webview_args::MainBrowserArgs;
 use crate::auth::cookies;
 use crate::auth::state::{
     AuthInfo, AuthStatusResponse, BiliAuth, CookieEntry, NeteaseAuth, YouTubeAuth,
@@ -452,6 +453,7 @@ pub async fn login_netease(app: AppHandle, state: State<'_, AppState>) -> AppRes
     .title("NeriPlayer - 网易云音乐登录")
     .inner_size(420.0, 600.0)
     .center()
+    .main_browser_args(&app)
     .build()
     .map_err(|e| AppError::Other(format!("Failed to create login window: {}", e)))?;
     let close_requested = track_login_window_close(&window);
@@ -519,6 +521,7 @@ pub async fn login_bilibili(app: AppHandle, state: State<'_, AppState>) -> AppRe
     .inner_size(420.0, 600.0)
     .center()
     .user_agent(BILIBILI_LOGIN_USER_AGENT)
+    .main_browser_args(&app)
     .build()
     .map_err(|e| AppError::Other(format!("Failed to create login window: {}", e)))?;
     let close_requested = track_login_window_close(&window);
@@ -602,6 +605,7 @@ pub async fn login_youtube(app: AppHandle, state: State<'_, AppState>) -> AppRes
     .title("NeriPlayer - YouTube Music Login")
     .inner_size(480.0, 680.0)
     .center()
+    .main_browser_args(&app)
     .build()
     .map_err(|e| AppError::Other(format!("Failed to create login window: {}", e)))?;
     let close_requested = track_login_window_close(&window);
@@ -1099,6 +1103,7 @@ async fn clear_and_reinject_webview_cookies(
         WebviewUrl::External("about:blank".parse().unwrap()),
     )
     .visible(false)
+    .main_browser_args(app)
     .build()
     .map_err(|e| AppError::Other(format!("Failed to create cleaner window: {}", e)))?;
 

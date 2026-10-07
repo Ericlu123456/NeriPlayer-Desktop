@@ -14,3 +14,4 @@ pub mod settings;
 pub mod state;
 pub mod stats;
 pub mod sync;
+pub mod webview_args;

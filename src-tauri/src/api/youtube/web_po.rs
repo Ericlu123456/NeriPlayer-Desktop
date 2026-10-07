@@ -9,6 +9,7 @@ use tauri::{
 
 use crate::auth::state::YouTubeAuth;
 use crate::error::{AppError, AppResult};
+use crate::webview_args::MainBrowserArgs;
 
 const TOKEN_TTL: Duration = Duration::from_secs(6 * 60 * 60);
 const BRIDGE_HOST: &str = "neriplayer-youtube-bridge.invalid";
@@ -218,6 +219,7 @@ async fn mint_on_page(
                 let _ = window.eval(&script);
             }
         })
+        .main_browser_args(&builder_app)
         .build()
         .map(WindowGuard);
         // receiver 超时或取消时仍由 guard 关闭刚创建的窗口

@@ -7,6 +7,7 @@ use tauri::{
 };
 
 use crate::error::{AppError, AppResult};
+use crate::webview_args::MainBrowserArgs;
 
 pub const WINDOW_LABEL: &str = "desktop-lyrics";
 const FRAME_EVENT: &str = "desktop-lyrics:frame";
@@ -154,7 +155,7 @@ pub async fn open_desktop_lyrics(
     // macOS 透明 WebView 需要额外私有 API feature，保留普通背景兼容默认构建
     #[cfg(target_os = "windows")]
     let builder = builder.transparent(true);
-    let lyrics_window = builder.build().map_err(|error| {
+    let lyrics_window = builder.main_browser_args(&app).build().map_err(|error| {
         snapshot().lock().retire(&instance);
         AppError::Other(error.to_string())
     })?;
