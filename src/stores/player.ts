@@ -2138,9 +2138,10 @@ export const usePlayerStore = defineStore('player', () => {
     lastTrackEndedTime = Date.now()
 
     // 一起听会话激活时听众不本地推进: 暂停并上报 TRACK_FINISHED, 由房主/服务端决定切歌,
-    // 避免因流时长差异先于房主播完而反向拖动整个房间（LB-02/LT-08）
+    // 避免因流时长差异先于房主播完而反向拖动整个房间（LB-02/LT-08）。
+    // 重连途中也一样：上报会走 HTTP 或在重连后补发（对齐 Android）
     const lt = useListenTogetherStore()
-    if (lt.isConnected && lt.roomId && !lt.isController) {
+    if (lt.roomId && !lt.isController) {
       await pause('remote_sync')
       lt.reportTrackFinished(trackId)
       return

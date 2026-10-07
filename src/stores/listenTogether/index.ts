@@ -1074,6 +1074,7 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
         trackId: playbackIdentity(),
         queueKeys: player.queue.map(track => trackInfoToLtTrack(track).stableKey),
         isPlaying: player.isPlaying,
+        isLoadingAudio: player.isLoadingAudio,
         repeatMode: player.repeatMode,
         shuffleEnabled: player.shuffleEnabled,
       }),
@@ -1104,7 +1105,7 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
                 currentIndex: resolvedIndex,
                 queue: ltQueue,
                 requestTrackStableKey: track.stableKey,
-                shouldPlay: player.isPlaying,
+                shouldPlay: intendsToPlay(),
               })
               trackReported = true
             }
@@ -1117,10 +1118,11 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
           reportQueueEvent()
         }
 
-        // 播放状态变化
-        if (newVal.isPlaying !== _lastReportedIsPlaying) {
-          _lastReportedIsPlaying = newVal.isPlaying
-          if (newVal.isPlaying) {
+        // 播放状态变化；加载中的"暂停"不上报，否则每次换歌都会先提交暂停、加载完再提交播放
+        const playing = newVal.isPlaying || (newVal.isLoadingAudio && _lastReportedIsPlaying === true)
+        if (playing !== _lastReportedIsPlaying) {
+          _lastReportedIsPlaying = playing
+          if (playing) {
             if (isController.value) reportPlayEvent()
             else if (!shouldSkipControlEvent('REQUEST_PLAY')) sendRequestEvent('REQUEST_PLAY')
           } else {
@@ -1423,8 +1425,14 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
       currentIndex: snap.currentIndex,
       queue: snap.queue,
       positionMs: player.positionMs,
-      shouldPlay: player.isPlaying,
+      shouldPlay: intendsToPlay(),
     })
+  }
+
+  /** 换歌加载期间 isPlaying 会短暂为 false，但用户要的是播放；服务端按 shouldPlay 提交 SET_TRACK 的状态 */
+  function intendsToPlay(): boolean {
+    const player = usePlayerStore()
+    return player.isPlaying || player.isLoadingAudio
   }
 
   function queueEventFields(queue: import('./protocol').ListenTogetherTrack[], index: number) {
@@ -1580,6 +1588,8 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
     sendEvent({
       type: 'TRACK_FINISHED',
       finishedTrackStableKey: finishedKey,
+      // 服务端以它作为完成位置；不带时退回服务端推算的位置，可能还差几秒（对齐 Android EventFactory）
+      positionMs: Math.max(finishedLtTrack.durationMs ?? 0, player.positionMs),
     })
   }
 

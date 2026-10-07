@@ -941,6 +941,37 @@ outboxReplay.options = {
 }
 await test('controls that fail on both channels are replayed once after reconnecting', outboxReplay)
 
+const loadingTrackChange = async h => {
+  await hostPlaying(h)
+  const baseline = h.commands.length
+  h.player.queue.push(mapper.ltTrackToTrackInfo(wireTrack(2)))
+  h.player.queueIndex = 1
+  h.player.currentTrack = h.player.queue[1]
+  h.player.isLoadingAudio = true
+  h.player.isPlaying = false
+  await flush()
+  const sent = () => h.commands.slice(baseline).filter(entry => entry.command === 'lt_send_event').map(entry => entry.args.event)
+  assert.equal(sent()[0]?.shouldPlay, true, 'a track that is still loading is committed as playing')
+  h.player.isLoadingAudio = false
+  h.player.isPlaying = true
+  await flush()
+  assert.ok(!sent().some(event => event.type === 'PAUSE' || event.type === 'PLAY'),
+    'loading a new track is not reported as a pause followed by a play')
+}
+loadingTrackChange.options = { role: 'controller' }
+await test('a host track change commits as playing without a loading pause', loadingTrackChange)
+
+await test('TRACK_FINISHED reports where the finished track ended', async h => {
+  await h.join()
+  await h.message({ type: 'welcome', state: room([wireTrack(1), wireTrack(2)]), role: 'listener' })
+  h.player.positionMs = 59_400
+  h.store.reportTrackFinished('netease:1')
+  await flush()
+  const finished = h.commands.find(entry => entry.command === 'lt_send_event' && entry.args.event.type === 'TRACK_FINISHED')
+  assert.equal(finished?.args.event.finishedTrackStableKey, 'netease:1')
+  assert.equal(finished?.args.event.positionMs, 60_000, 'the finish position is at least the track duration')
+})
+
 if (failures.length) {
   console.error(`${passed} store tests passed; ${failures.length} failed: ${failures.join('; ')}`)
   process.exitCode = 1
