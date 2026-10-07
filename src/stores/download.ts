@@ -16,6 +16,8 @@ import {
 } from '@/modules/download/downloadCancellation'
 
 const log = createLogger('download')
+const PENDING_DOWNLOADS_KEY = 'neri:pending-downloads'
+const PENDING_DOWNLOAD_STATUSES = new Set<ActiveDownloadTask['status']>(['queued', 'resolving', 'downloading', 'processing'])
 
 export interface DownloadedTrack {
   id: string
@@ -84,6 +86,9 @@ export const useDownloadStore = defineStore('download', () => {
   let downloadsLoadGeneration = 0
   let latestDownloadsLoad: Promise<void> | null = null
   watch(() => settings.downloadParallelism, () => queue.refresh())
+  // 没下完的任务记在本机，重启后接着下（对齐 Android GlobalDownloadManager 恢复下载任务）
+  let savedPendingIds: string | null = null
+  watch(downloading, savePendingDownloads)
 
   // resolving 阶段的请求 token 集合，后端尚无任务时先在前端取消（DL-7）
   const resolvingCancelled = new Set<string>()
@@ -387,6 +392,48 @@ export const useDownloadStore = defineStore('download', () => {
     } catch (e) {
       log.error('Load downloads failed:', e)
     }
+  }
+
+  /** 进度事件很频繁，只在未完成的任务集合变化时写盘 */
+  function savePendingDownloads() {
+    const pending = activeDownloads.value
+      .filter(task => PENDING_DOWNLOAD_STATUSES.has(task.status))
+      .map(task => requestedTracks.get(task.trackId))
+      .filter((track): track is TrackInfo => !!track)
+    const ids = pending.map(track => track.id).join('\n')
+    if (ids === savedPendingIds) return
+    savedPendingIds = ids
+    try {
+      if (pending.length > 0) localStorage.setItem(PENDING_DOWNLOADS_KEY, JSON.stringify(pending))
+      else localStorage.removeItem(PENDING_DOWNLOADS_KEY)
+    } catch (error) {
+      log.warn('Saving pending downloads failed:', error)
+    }
+  }
+
+  /** 启动时把上次没下完的任务重新排队（地址早已过期，按当前设置重新解析）；返回重新排队的数量 */
+  async function resumePendingDownloads(): Promise<number> {
+    let pending: unknown
+    try {
+      pending = JSON.parse(localStorage.getItem(PENDING_DOWNLOADS_KEY) || '[]')
+    } catch {
+      pending = []
+    }
+    if (!Array.isArray(pending) || pending.length === 0) return 0
+    await initEvents()
+    await loadDownloads()
+    let resumed = 0
+    for (const track of pending as TrackInfo[]) {
+      if (!track || typeof track.id !== 'string' || !track.id) continue
+      if (isDownloaded(track.id) || isDownloading(track.id)) continue
+      void downloadTrack(track)
+      resumed++
+    }
+    savePendingDownloads()
+    if (resumed > 0) {
+      useToastStore().show((i18n.global as any).t('download.resumed_pending', { count: resumed }), 'info')
+    }
+    return resumed
   }
 
   /**
@@ -711,6 +758,7 @@ export const useDownloadStore = defineStore('download', () => {
     clearFinishedTasks,
     loadDownloads,
     downloadTrack,
+    resumePendingDownloads,
     redownloadTrack,
     deleteDownload,
     isDownloaded,

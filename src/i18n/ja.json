@@ -274,6 +274,7 @@
     "cancelled_count": "{count} 件のダウンロードキャンセルを要求しました",
     "already_exists": "この曲はすでにダウンロード済みです",
     "missing_cleaned": "無効なダウンロード記録を {count} 件クリーンアップしました",
+    "resumed_pending": "前回未完了だった {count} 件のダウンロードを再開しました",
     "integrity_mismatch": "ダウンロードファイル {count} 件のサイズが記録と一致しません。再ダウンロードしてください",
     "redownload": "再ダウンロード",
     "redownload_desc": "ローカルファイルを削除して再ダウンロード",

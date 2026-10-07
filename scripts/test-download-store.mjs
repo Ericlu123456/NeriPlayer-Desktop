@@ -29,6 +29,12 @@ async function load(source, dependencies = {}) {
     return await import(`data:text/javascript;base64,${Buffer.from(`const deps = globalThis[${JSON.stringify(key)}];\n${compiled}`).toString('base64')}`)
   } finally { delete globalThis[key] }
 }
+const storage = new Map()
+globalThis.localStorage = {
+  getItem: key => storage.get(key) ?? null,
+  setItem: (key, value) => storage.set(key, String(value)),
+  removeItem: key => storage.delete(key),
+}
 const root = new URL('../src/', import.meta.url)
 const source = await readFile(new URL('stores/download.ts', root), 'utf8')
 const queue = await load(await readFile(new URL('modules/download/downloadQueue.ts', root), 'utf8'))
@@ -88,7 +94,7 @@ async function runtime(options = {}) {
     './toast': { useToastStore: () => Object.fromEntries(['show', 'error', 'success'].map(method => [method, (...args) => messages.push({ method, args })])) },
     '@tauri-apps/plugin-opener': { openPath: async path => invoked.push({ command: 'openPath', args: { path } }) },
     '@/i18n': { default: { global: { t: (key, params) => params ? `${key}:${JSON.stringify(params)}` : key } } },
-    '@/utils/logger': { createLogger: () => ({ error() {} }) },
+    '@/utils/logger': { createLogger: () => ({ error() {}, warn() {} }) },
     '@/modules/playback/playbackSource': { resolveDownloadSource: async (item, quality) => {
       resolved.push({ item, quality })
       return options.resolve ? options.resolve(item) : stream
@@ -493,5 +499,32 @@ for (const retained of [false, true]) {
   release.resolve(); await removing
   assert.deepEqual(r.invoked.filter(call => ['releaseAudioFile', 'delete_download', 'fileRemoved'].includes(call.command)).map(call => call.command), ['releaseAudioFile', 'delete_download', 'fileRemoved'])
   assert.equal(r.store.downloads.length, 0)
+}
+{
+  storage.clear()
+  const r = await runtime()
+  await r.store.downloadTrack(track('pending-a'))
+  await r.store.downloadTrack(track('pending-b'))
+  await r.store.downloadTrack(track('pending-c'))
+  await flush()
+  const pendingIds = () => JSON.parse(storage.get('neri:pending-downloads') ?? '[]').map(item => item.id)
+  assert.deepEqual(pendingIds(), ['netease:pending-a', 'netease:pending-b', 'netease:pending-c'])
+  r.emit({ trackId: 'netease:pending-a', status: 'complete' })
+  await flush()
+  await r.store.cancelDownload('netease:pending-c')
+  await flush()
+  assert.deepEqual(pendingIds(), ['netease:pending-b'], 'finished and cancelled downloads leave the list')
+
+  const restarted = await runtime({ downloads: [manifestTrack('pending-a', 'E:/Music/pending-a.mp3')] })
+  assert.equal(await restarted.store.resumePendingDownloads(), 1)
+  await flush()
+  assert.ok(restarted.store.isDownloading('netease:pending-b'), 'the unfinished download is queued again')
+  assert.equal(restarted.resolved.length, 1, 'its address is resolved again with the current settings')
+  assert.match(restarted.messages.at(-1).args[0], /download\.resumed_pending:\{"count":1\}/)
+
+  storage.clear()
+  const clean = await runtime()
+  assert.equal(await clean.store.resumePendingDownloads(), 0)
+  assert.equal(clean.messages.length, 0)
 }
 console.log('download store lifecycle tests passed')

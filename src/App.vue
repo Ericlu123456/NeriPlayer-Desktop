@@ -10,6 +10,7 @@ import { useAuthStore } from '@/stores/auth'
 import { useSettingsStore } from '@/stores/settings'
 import { HISTORY_CHANGED_EVENT } from '@/stores/history'
 import { useLikedSongsStore } from '@/stores/likedSongs'
+import { useDownloadStore } from '@/stores/download'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { invoke } from '@tauri-apps/api/core'
 import { convertFileSrc } from '@tauri-apps/api/core'
@@ -445,6 +446,9 @@ onMounted(async () => {
 
   // 自动同步（配置开启且已配置），静默模式
   void syncStore.syncAuto(true)
+
+  // 账号状态就绪后再接着下上次没下完的任务（解析地址需要登录态）
+  void useDownloadStore().resumePendingDownloads().catch(error => appLog.warn('Resume pending downloads failed:', error))
 
   // 监听后端 playlists-changed 事件，防抖触发自动同步；同步自己写回的歌单带 "sync" 标记，不再触发
   unlistenPlaylistChanged = await listen<string | null>('playlists-changed', (event) => {

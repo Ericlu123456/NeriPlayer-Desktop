@@ -274,6 +274,7 @@
     "cancelled_count": "已请求取消 {count} 个下载任务",
     "already_exists": "该歌曲已下载",
     "missing_cleaned": "已清理 {count} 条失效下载记录",
+    "resumed_pending": "已继续 {count} 个上次未完成的下载",
     "integrity_mismatch": "检测到 {count} 个下载文件大小与清单不一致，请重新下载",
     "redownload": "重新下载",
     "redownload_desc": "删除本地文件并重新下载",
