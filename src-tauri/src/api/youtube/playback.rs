@@ -693,7 +693,12 @@ fn build_playback_client(no_proxy: bool) -> AppResult<Client> {
         .cookie_store(false)
         // API 与 CDN 地址均已规范化，禁止带 token 的 Location 跨来源跟随
         .redirect(reqwest::redirect::Policy::none())
-        .timeout(Duration::from_secs(20));
+        .timeout(Duration::from_secs(20))
+        // 经代理时一次 TLS 握手就要 2-3 秒，连接留在池里跨曲目复用，并用心跳保活
+        .pool_idle_timeout(Duration::from_secs(10 * 60))
+        .tcp_keepalive(Duration::from_secs(30))
+        .http2_keep_alive_interval(Duration::from_secs(30))
+        .http2_keep_alive_while_idle(true);
     if no_proxy {
         builder = builder.no_proxy();
     }
@@ -706,12 +711,26 @@ fn proxy_order(bypass_proxy: bool) -> [bool; 2] {
     [bypass_proxy, !bypass_proxy]
 }
 
+// 直连与走代理各一个进程级客户端；每次解析都新建会丢掉连接池，次次重新握手
+static PLAYBACK_CLIENTS: std::sync::OnceLock<[Client; 2]> = std::sync::OnceLock::new();
+
+fn shared_playback_client(no_proxy: bool) -> AppResult<Client> {
+    if PLAYBACK_CLIENTS.get().is_none() {
+        let built = [build_playback_client(false)?, build_playback_client(true)?];
+        let _ = PLAYBACK_CLIENTS.set(built);
+    }
+    let clients = PLAYBACK_CLIENTS
+        .get()
+        .ok_or_else(|| AppError::Other("youtube playback client unavailable".into()))?;
+    Ok(clients[usize::from(no_proxy)].clone())
+}
+
 // 与主应用保持相同代理优先级，独立客户端避免自动携带账号 Cookie
 fn playback_http_client(bypass_proxy: bool) -> AppResult<FallbackHttp> {
     let [primary, fallback] = proxy_order(bypass_proxy);
     Ok(FallbackHttp::with_fallback(
-        &build_playback_client(primary)?,
-        &build_playback_client(fallback)?,
+        &shared_playback_client(primary)?,
+        &shared_playback_client(fallback)?,
         "youtube-playback",
     ))
 }
