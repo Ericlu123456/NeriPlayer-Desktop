@@ -5,6 +5,7 @@
 //! 并在错误里说明缺的是哪个组件。
 
 use std::io;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use crate::audio::ffmpeg::{self, ByteInput, FfmpegDecoder, FfmpegError, FfmpegRuntime, OpenOptions};
@@ -14,6 +15,22 @@ use crate::audio::remote::{SourceAudioInfo, SymphoniaAudioDecoder};
 /// 嗅探文件头时读取的字节数：MP4 的 moov、Matroska 的 Tracks 都在开头这一段里
 pub const SNIFF_BYTES: usize = 64 * 1024;
 const FFMPEG_BLOCK_FRAMES: usize = 4096;
+
+/// AC-3/E-AC-3 是否保留码流自带的动态范围压缩（响处压低、轻处抬高，适合小音量收听）。
+/// 默认关闭，保留完整动态；改动对之后打开的音轨生效
+static KEEP_DYNAMIC_RANGE_COMPRESSION: AtomicBool = AtomicBool::new(false);
+
+pub fn set_keep_dynamic_range_compression(keep: bool) {
+    KEEP_DYNAMIC_RANGE_COMPRESSION.store(keep, Ordering::Relaxed);
+}
+
+fn ffmpeg_open_options(format_hint: Option<&str>, keep_dynamic_range_compression: bool) -> OpenOptions {
+    OpenOptions {
+        format_hint: format_hint.map(str::to_string),
+        max_output_channels: 2,
+        keep_dynamic_range_compression,
+    }
+}
 
 pub trait AudioDecoder: PcmSource {
     fn source_audio_info(&self) -> SourceAudioInfo;
@@ -43,18 +60,16 @@ pub struct FfmpegPcmSource {
     filled: usize,
     position: usize,
     finished: bool,
+    keeps_dynamic_range_compression: bool,
 }
 
 impl FfmpegPcmSource {
     pub fn open(input: Box<dyn ByteInput>, format_hint: Option<&str>) -> Result<Self, FfmpegError> {
-        let decoder = FfmpegDecoder::open(
-            input,
-            &OpenOptions {
-                format_hint: format_hint.map(str::to_string),
-                max_output_channels: 2,
-                keep_dynamic_range_compression: false,
-            },
-        )?;
+        let options = ffmpeg_open_options(
+            format_hint,
+            KEEP_DYNAMIC_RANGE_COMPRESSION.load(Ordering::Relaxed),
+        );
+        let decoder = FfmpegDecoder::open(input, &options)?;
         let channels = usize::from(decoder.info().output_channels.max(1));
         Ok(Self {
             decoder,
@@ -62,6 +77,7 @@ impl FfmpegPcmSource {
             filled: 0,
             position: 0,
             finished: false,
+            keeps_dynamic_range_compression: options.keep_dynamic_range_compression,
         })
     }
 
@@ -271,15 +287,21 @@ fn log_opened(decoder: &FfmpegPcmSource) {
     } else {
         "none"
     };
+    let drc = match (info.codec.as_str(), decoder.keeps_dynamic_range_compression) {
+        ("ac3" | "eac3", true) => " drc=kept",
+        ("ac3" | "eac3", false) => " drc=off",
+        _ => "",
+    };
     log::info!(
         target: "audio-decoder",
-        "FFmpeg opened codec={} container={} rate={} channels={}->{} downmix={}",
+        "FFmpeg opened codec={} container={} rate={} channels={}->{} downmix={}{}",
         info.codec,
         info.container,
         info.sample_rate,
         info.source_channels,
         info.output_channels,
         downmix,
+        drc,
     );
 }
 
@@ -398,6 +420,20 @@ mod tests {
         let decoder = open_bytes(fixture("opus-stereo-1s.webm"), None).expect("fallback should open Opus");
         assert_eq!(decoder.backend(), DecoderBackend::Ffmpeg);
         assert_eq!(decoder.source_audio_info().codec.as_deref(), Some("opus"));
+    }
+
+    /// 多声道 DRC 设置交给 FFmpeg；同时固定下混到最多 2 声道
+    #[test]
+    fn open_options_carry_the_dynamic_range_compression_setting() {
+        let kept = super::ffmpeg_open_options(Some("mov"), true);
+        assert!(kept.keep_dynamic_range_compression);
+        assert_eq!(kept.format_hint.as_deref(), Some("mov"));
+        assert_eq!(kept.max_output_channels, 2);
+        assert!(!super::ffmpeg_open_options(None, false).keep_dynamic_range_compression);
+        assert!(
+            !super::KEEP_DYNAMIC_RANGE_COMPRESSION.load(std::sync::atomic::Ordering::Relaxed),
+            "默认保留完整动态",
+        );
     }
 
     #[test]

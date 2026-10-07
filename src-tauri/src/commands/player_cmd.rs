@@ -1169,6 +1169,18 @@ pub async fn get_decoder_capabilities() -> AppResult<crate::audio::decoder::Deco
         .map_err(|error| AppError::Audio(format!("Could not query decoder capabilities: {error}")))
 }
 
+/// 多声道（AC-3/E-AC-3）音轨是否保留码流自带的动态范围压缩；对之后打开的音轨生效
+#[tauri::command]
+pub async fn set_multichannel_drc(enabled: bool) -> AppResult<()> {
+    crate::audio::decoder::set_keep_dynamic_range_compression(enabled);
+    log::info!(
+        target: "audio-decoder",
+        "multichannel dynamic range compression {}",
+        if enabled { "kept" } else { "off" },
+    );
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn set_speed(speed: f32, state: State<'_, AppState>) -> AppResult<()> {
     state.player.lock().set_speed(speed);

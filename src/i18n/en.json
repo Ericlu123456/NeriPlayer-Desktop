@@ -592,6 +592,8 @@
     "nav_playback_desc": "Expand to configure playback behavior",
     "normalize": "Volume Normalization",
     "normalize_desc": "Auto-adjust volume across tracks",
+    "multichannel_drc": "Multichannel dynamic range compression",
+    "multichannel_drc_desc": "Keep the dynamic range compression carried in multichannel (E-AC-3/AC-3) tracks: loud passages get quieter and quiet ones louder, for listening at low volume. Applies after switching tracks or seeking",
     "fade_in": "Playback Fade",
     "fade_in_desc": "Fade volume when playback starts, pauses and resumes",
     "fade_in_duration": "Fade In Duration",

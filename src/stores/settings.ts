@@ -32,6 +32,8 @@ export interface AppSettings {
   lyricFontScale: number
   crossfade: boolean
   normalizeVolume: boolean
+  /** 多声道（AC-3/E-AC-3）音轨保留码流自带的动态范围压缩 */
+  multichannelDrc: boolean
   fadeIn: boolean
   fadeInDuration: number
   fadeOutDuration: number
@@ -145,6 +147,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   lyricFontScale: 1,
   crossfade: false,
   normalizeVolume: false,
+  multichannelDrc: false,
   fadeIn: false,
   fadeInDuration: 500,
   fadeOutDuration: 500,
@@ -486,6 +489,7 @@ export const useSettingsStore = defineStore('settings', () => {
   const lyricFontScale = ref(initial.lyricFontScale)
   const crossfade = ref(initial.crossfade)
   const normalizeVolume = ref(initial.normalizeVolume)
+  const multichannelDrc = ref(initial.multichannelDrc)
   const fadeIn = ref(initial.fadeIn)
   const fadeInDuration = ref(initial.fadeInDuration)
   const fadeOutDuration = ref(initial.fadeOutDuration)
@@ -551,7 +555,7 @@ export const useSettingsStore = defineStore('settings', () => {
   const settingRefs: SettingRefs = {
     darkMode, themeColor, locale, defaultScreen, showCoverBadge,
     showNowPlayingTitle, showToolbarDock, showQualitySwitch, showAudioCodec,
-    showAudioSpec, lyricFontScale, crossfade, normalizeVolume, fadeIn,
+    showAudioSpec, lyricFontScale, crossfade, normalizeVolume, multichannelDrc, fadeIn,
     showAudioBitrate, showAudioFormat, showAudioChannels, showAudioSampleRate, showAudioBitDepth,
     fadeInDuration, fadeOutDuration, crossfadeNext, crossfadeInDuration,
     crossfadeOutDuration, keepProgress, rememberLongFormProgress, keepPlaybackMode, showTranslation,
@@ -648,7 +652,7 @@ export const useSettingsStore = defineStore('settings', () => {
     defaultScreen, showCoverBadge, showNowPlayingTitle, showToolbarDock,
     showQualitySwitch, showAudioCodec, showAudioSpec, lyricFontScale,
     showAudioBitrate, showAudioFormat, showAudioChannels, showAudioSampleRate, showAudioBitDepth,
-    crossfade, normalizeVolume, fadeIn, fadeInDuration, fadeOutDuration,
+    crossfade, normalizeVolume, multichannelDrc, fadeIn, fadeInDuration, fadeOutDuration,
     crossfadeNext, crossfadeInDuration, crossfadeOutDuration,
     keepProgress, rememberLongFormProgress, keepPlaybackMode, showTranslation, lyricBlur, lyricBlurAmount,
     cloudMusicOffset, qqMusicOffset, advancedLyrics, dynamicBackground,

@@ -592,6 +592,8 @@
     "nav_playback_desc": "展开以配置播放行为",
     "normalize": "音量均衡",
     "normalize_desc": "自动调整不同曲目音量",
+    "multichannel_drc": "多声道动态范围压缩",
+    "multichannel_drc_desc": "保留多声道（E-AC-3/AC-3）音轨自带的动态范围压缩：响的地方压低、轻的地方抬高，适合小音量收听。切歌或拖动进度后生效",
     "fade_in": "播放淡入淡出",
     "fade_in_desc": "开始播放、暂停与继续时音量渐变",
     "fade_in_duration": "淡入时长",

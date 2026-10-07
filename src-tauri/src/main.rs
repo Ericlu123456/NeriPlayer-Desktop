@@ -466,6 +466,7 @@ fn main() {
             player_cmd::release_audio_file,
             player_cmd::get_playback_audio_info,
             player_cmd::get_decoder_capabilities,
+            player_cmd::set_multichannel_drc,
             library_cmd::list_playlists,
             library_cmd::get_playlist_usage_stats,
             library_cmd::record_playlist_open,

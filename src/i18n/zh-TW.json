@@ -592,6 +592,8 @@
     "nav_playback_desc": "展開以設定播放行為",
     "normalize": "音量均衡",
     "normalize_desc": "自動調整不同曲目音量",
+    "multichannel_drc": "多聲道動態範圍壓縮",
+    "multichannel_drc_desc": "保留多聲道（E-AC-3/AC-3）音軌內建的動態範圍壓縮：大聲處壓低、小聲處拉高，適合小音量聆聽。切歌或拖動進度後生效",
     "fade_in": "播放淡入淡出",
     "fade_in_desc": "開始播放、暫停與繼續時音量漸變",
     "fade_in_duration": "淡入時長",

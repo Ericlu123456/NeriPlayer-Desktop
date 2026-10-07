@@ -46,6 +46,8 @@ pub struct AppSettings {
     /// 旧版「无缝切换」，已并入 crossfade_next；保留字段兼容旧配置，规整后恒为 false
     pub crossfade: bool,
     pub normalize_volume: bool,
+    /// 多声道（AC-3/E-AC-3）音轨保留码流自带的动态范围压缩；默认关闭，保留完整动态
+    pub multichannel_drc: bool,
     pub fade_in: bool,
     #[serde(deserialize_with = "lenient_i32")]
     pub fade_in_duration: i32,
@@ -170,6 +172,7 @@ impl Default for AppSettings {
             lyric_font_scale: 1.0,
             crossfade: false,
             normalize_volume: false,
+            multichannel_drc: false,
             fade_in: false,
             fade_in_duration: 500,
             fade_out_duration: 500,

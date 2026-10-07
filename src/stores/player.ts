@@ -2672,6 +2672,12 @@ export const usePlayerStore = defineStore('player', () => {
       .catch(error => log.warn('volume normalization not applied:', error))
   })
 
+  // 多声道音轨的动态范围压缩：对之后打开的音轨生效
+  watch(() => settings.multichannelDrc, (enabled) => {
+    void invoke('set_multichannel_drc', { enabled })
+      .catch(error => log.warn('multichannel dynamic range compression not applied:', error))
+  })
+
   async function setEqualizer(enabled: boolean, bands: number[]) {
     equalizerEnabled.value = enabled
     equalizerBands.value = bands.map(v => Math.round(Math.max(-1500, Math.min(1500, v))))
@@ -2745,6 +2751,7 @@ export const usePlayerStore = defineStore('player', () => {
       ['speed', invoke('set_speed', { speed: effectivePlaybackSpeed() })],
       ['loudness gain', invoke('set_loudness_gain', { gainMb: loudnessGainMb.value })],
       ['volume normalization', invoke('set_normalize_volume', { enabled: settings.normalizeVolume })],
+      ['multichannel dynamic range compression', invoke('set_multichannel_drc', { enabled: settings.multichannelDrc })],
       ['equalizer', invoke('set_equalizer', { enabled: equalizerEnabled.value, bandLevelsMb: equalizerBands.value })],
     ]
     const results = await Promise.allSettled(restored.map(([, request]) => request))

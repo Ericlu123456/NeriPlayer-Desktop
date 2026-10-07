@@ -61,7 +61,7 @@ const {
   darkMode, themeColor: selectedColor, coverStyle,
   defaultScreen, showCoverBadge, showNowPlayingTitle, showToolbarDock,
   showQualitySwitch, lyricFontScale,
-  normalizeVolume, audioOutputDevice,
+  normalizeVolume, multichannelDrc, audioOutputDevice,
   fadeIn, fadeInDuration, fadeOutDuration,
   crossfadeNext, crossfadeInDuration, crossfadeOutDuration,
   keepProgress, rememberLongFormProgress, keepPlaybackMode,
@@ -1495,6 +1495,14 @@ useEscapeClose(
     </div>
 
     <Transition @enter="onExpandEnter" @after-enter="onExpandAfterEnter" @leave="onExpandLeave" @after-leave="onExpandAfterLeave"><div v-if="isExpanded('playback')">
+      <div class="setting-card">
+        <div class="setting-icon-wrap"><span class="material-symbols-rounded">surround_sound</span></div>
+        <div class="setting-info">
+          <div class="setting-title">{{ t('settings.multichannel_drc') }}</div>
+          <div class="setting-desc">{{ t('settings.multichannel_drc_desc') }}</div>
+        </div>
+        <label class="m3-switch"><input type="checkbox" v-model="multichannelDrc" /><span class="track"><span class="thumb"><span v-if="multichannelDrc" class="material-symbols-rounded" style="font-size: 14px">check</span></span></span></label>
+      </div>
       <div class="setting-card">
         <div class="setting-icon-wrap"><span class="material-symbols-rounded">volume_up</span></div>
         <div class="setting-info">
