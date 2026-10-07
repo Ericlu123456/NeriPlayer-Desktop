@@ -377,7 +377,7 @@
     "cover_save_failed": "保存封面失败",
     "more_options": "更多选项",
     "lyric_offset": "歌词偏移",
-    "lyric_offset_source": "当前歌词：{source}",
+    "lyric_offset_default_of": "{source} 默认 {value}",
     "lyric_offset_default": "默认 {value}",
     "lyric_offset_hint": "数值越大，歌词越提前",
     "lyric_offset_reset": "恢复默认（{value}）",

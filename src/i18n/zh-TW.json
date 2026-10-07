@@ -377,7 +377,7 @@
     "cover_save_failed": "儲存封面失敗",
     "more_options": "更多選項",
     "lyric_offset": "歌詞偏移",
-    "lyric_offset_source": "目前歌詞：{source}",
+    "lyric_offset_default_of": "{source} 預設 {value}",
     "lyric_offset_default": "預設 {value}",
     "lyric_offset_hint": "數值越大，歌詞越提前",
     "lyric_offset_reset": "恢復預設（{value}）",

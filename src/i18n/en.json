@@ -377,7 +377,7 @@
     "cover_save_failed": "Failed to save cover",
     "more_options": "More Options",
     "lyric_offset": "Lyrics Offset",
-    "lyric_offset_source": "Lyrics from {source}",
+    "lyric_offset_default_of": "{source} default {value}",
     "lyric_offset_default": "Default {value}",
     "lyric_offset_hint": "Higher values show lyrics earlier",
     "lyric_offset_reset": "Reset to default ({value})",

@@ -30,8 +30,9 @@ import {
 import { createLogger } from '@/utils/logger'
 
 const STORAGE_KEY = LEGACY_LYRIC_OFFSETS_KEY
-// 调整逐曲偏移时当时用的是哪个来源的默认；改默认时据此只 rebase 用这个来源的歌。只存本机
-const SOURCES_STORAGE_KEY = 'neri:lyric-offset-sources'
+// 每首调过偏移的歌的本机记录（见 SongOffsetMeta），只存本机
+const META_STORAGE_KEY = 'neri:lyric-offset-meta'
+const LEGACY_SOURCES_STORAGE_KEY = 'neri:lyric-offset-sources'
 const log = createLogger('lyric-offset')
 
 type OffsetTrack =
@@ -42,6 +43,16 @@ type OffsetTrack =
   | undefined
 
 type SongSource = LyricOffsetSource | 'none'
+
+interface SongOffsetMeta {
+  /// 调整时用的是哪个来源的默认。调过的歌固定按它算有效偏移，歌词来源后来变了（换成
+  /// AMLL 逐字歌词、缓存过期改用别的源）也不跳；改这个来源的默认时据此 rebase
+  source: SongSource
+  /** 本机最后写进同步载荷的 delta；rebase 只改本地表，载荷里留的还是它 */
+  payload?: number
+  /** rebase 把 delta 归零、本地记录被删时，载荷里那份旧 delta；读到它时按 0 算 */
+  zeroedPayload?: number
+}
 
 const SETTING_KEYS = {
   netease: 'cloudMusicOffset',
@@ -86,14 +97,22 @@ function readStored(): Record<string, number> {
   }
 }
 
-function readSongSources(): Record<string, SongSource> {
+function readSongMeta(): Record<string, SongOffsetMeta> {
+  const isSource = (value: unknown): value is SongSource =>
+    value === 'none' || (LYRIC_OFFSET_SOURCES as readonly unknown[]).includes(value)
+  const finite = (value: unknown) => (typeof value === 'number' && Number.isFinite(value) ? value : undefined)
   try {
-    const parsed = JSON.parse(localStorage.getItem(SOURCES_STORAGE_KEY) || '{}')
-    const result: Record<string, SongSource> = {}
-    for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
-      if (value === 'none' || (LYRIC_OFFSET_SOURCES as readonly unknown[]).includes(value)) {
-        result[key] = value as SongSource
-      }
+    const result: Record<string, SongOffsetMeta> = {}
+    // 早期版本只记了来源
+    const legacy = JSON.parse(localStorage.getItem(LEGACY_SOURCES_STORAGE_KEY) || '{}') as Record<string, unknown>
+    for (const [key, value] of Object.entries(legacy)) {
+      if (isSource(value)) result[key] = { source: value }
+    }
+    const parsed = JSON.parse(localStorage.getItem(META_STORAGE_KEY) || '{}') as Record<string, unknown>
+    for (const [key, value] of Object.entries(parsed)) {
+      const meta = value as Partial<SongOffsetMeta> | null
+      if (!meta || !isSource(meta.source)) continue
+      result[key] = { source: meta.source, payload: finite(meta.payload), zeroedPayload: finite(meta.zeroedPayload) }
     }
     return result
   } catch {
@@ -101,11 +120,11 @@ function readSongSources(): Record<string, SongSource> {
   }
 }
 
-function writeSongSources(map: Record<string, SongSource>) {
+function writeSongMeta(map: Record<string, SongOffsetMeta>) {
   try {
-    localStorage.setItem(SOURCES_STORAGE_KEY, JSON.stringify(map))
+    localStorage.setItem(META_STORAGE_KEY, JSON.stringify(map))
   } catch (error) {
-    log.warn('lyric offset sources not saved:', error)
+    log.warn('lyric offset metadata not saved:', error)
   }
 }
 
@@ -139,7 +158,7 @@ function writeStored(map: Record<string, number>) {
 export const useLyricOffsetStore = defineStore('lyricOffset', () => {
   const settings = useSettingsStore()
   const offsets = ref<Record<string, number>>(readStored())
-  const songSources = ref<Record<string, SongSource>>(readSongSources())
+  const songMeta = ref<Record<string, SongOffsetMeta>>(readSongMeta())
 
   function defaults(): Record<LyricOffsetSource, number> {
     return Object.fromEntries(
@@ -147,9 +166,27 @@ export const useLyricOffsetStore = defineStore('lyricOffset', () => {
     ) as Record<LyricOffsetSource, number>
   }
 
-  /** 这首歌当前该用哪个来源的默认偏移：看正在显示的歌词来自哪里，不知道时按播放来源 */
-  function offsetSourceFor(track: OffsetTrack): LyricOffsetSource | null {
+  function updateMeta(change: (next: Record<string, SongOffsetMeta>) => void) {
+    const next = { ...songMeta.value }
+    change(next)
+    songMeta.value = next
+    writeSongMeta(next)
+  }
+
+  /** 正在显示的歌词来自哪个来源；不知道时按播放来源 */
+  function lyricOffsetSourceFor(track: OffsetTrack): LyricOffsetSource | null {
     return resolveLyricOffsetSource(lyricSourceOf(track), playbackSourceOf(track))
+  }
+
+  /// 有效偏移用哪个来源的默认：调过的歌固定用调整时的来源（改版前调的、Android 同步来的
+  /// 按曲目键推断，与当时的口径一致），没调过的跟着正在显示的歌词走
+  function offsetSourceFor(track: OffsetTrack): LyricOffsetSource | null {
+    const key = lyricUserOffsetStorageKey(track)
+    if (key && getUserOffsetMs(track) !== 0) {
+      const source = songMeta.value[key]?.source ?? inferredSongSource(key)
+      return source === 'none' ? null : source
+    }
+    return lyricOffsetSourceFor(track)
   }
 
   function defaultOffsetMs(source: LyricOffsetSource | null): number {
@@ -162,30 +199,24 @@ export const useLyricOffsetStore = defineStore('lyricOffset', () => {
     if (key && Object.prototype.hasOwnProperty.call(offsets.value, key)) {
       return offsets.value[key]
     }
-    return clampLyricOffsetMs(readSyncedUserOffsetMs(track))
+    const synced = clampLyricOffsetMs(readSyncedUserOffsetMs(track))
+    // rebase 归零后载荷里还是旧 delta；载荷被同步换成别的值时再采信
+    return key && synced === songMeta.value[key]?.zeroedPayload ? 0 : synced
   }
 
   function setUserOffsetMs(
     track: OffsetTrack,
     value: number,
-    source: LyricOffsetSource | null = offsetSourceFor(track),
+    source: LyricOffsetSource | null = lyricOffsetSourceFor(track),
   ) {
     const key = lyricUserOffsetStorageKey(track)
     if (!key) return
     const delta = clampLyricOffsetMs(value)
     const next = { ...offsets.value }
-    const nextSources = { ...songSources.value }
     // delta 归零即视为"未调整", 删除键避免本地表膨胀, 也让 rebase 跳过
-    if (delta === 0) {
-      delete next[key]
-      delete nextSources[key]
-    } else {
-      next[key] = delta
-      nextSources[key] = source ?? 'none'
-    }
+    if (delta === 0) delete next[key]
+    else next[key] = delta
     offsets.value = next
-    songSources.value = nextSources
-    writeSongSources(nextSources)
     persistOffsets('set_lyric_offset', { trackKey: key, offsetMs: Math.round(delta) }, next)
 
     // 写回 syncPayload.userLyricOffsetMs, 对齐 Android SongItem 字段, 供同步上传
@@ -197,16 +228,26 @@ export const useLyricOffsetStore = defineStore('lyricOffset', () => {
       player.patchCurrentTrackSyncPayload(withUpdatedUserOffsetPayload(current.syncPayload, delta))
       void persistTrackSyncPayload(player.currentTrack)
     }
+    updateMeta((meta) => {
+      if (delta !== 0) {
+        meta[key] = { source: source ?? 'none', payload: sameTrack ? delta : meta[key]?.payload }
+      } else if (sameTrack) {
+        delete meta[key]
+      } else {
+        // 只有当前曲目的载荷会被改写，别的歌载荷里还留着旧 delta
+        meta[key] = { source: source ?? 'none', zeroedPayload: clampLyricOffsetMs(readSyncedUserOffsetMs(track)) }
+      }
+    })
   }
 
-  /** 有效偏移 = 当前歌词来源的默认 + 逐曲 delta, 供歌词渲染与界面显示 */
+  /** 有效偏移 = 默认（见 offsetSourceFor）+ 逐曲 delta, 供歌词渲染与界面显示 */
   function effectiveOffsetMs(track: OffsetTrack): number {
     return defaultOffsetMs(offsetSourceFor(track)) + getUserOffsetMs(track)
   }
 
-  /** 按绝对值设置这首歌的偏移：存成相对当前来源默认的 delta，等于默认时即恢复跟随默认 */
+  /** 按绝对值设置这首歌的偏移：改按正在显示的歌词来源计 delta，等于它的默认时即恢复跟随默认 */
   function setEffectiveOffsetMs(track: OffsetTrack, absoluteMs: number) {
-    const source = offsetSourceFor(track)
+    const source = lyricOffsetSourceFor(track)
     setUserOffsetMs(track, Math.round(absoluteMs) - defaultOffsetMs(source), source)
   }
 
@@ -219,19 +260,32 @@ export const useLyricOffsetStore = defineStore('lyricOffset', () => {
   function rebaseSource(source: LyricOffsetSource, prevDefault: number, newDefault: number) {
     if (prevDefault === newDefault) return
     const next = { ...offsets.value }
+    const zeroed: Array<[string, number]> = []
     let changed = false
     for (const key of Object.keys(next)) {
-      const songSource = songSources.value[key] ?? inferredSongSource(key)
+      const songSource = songMeta.value[key]?.source ?? inferredSongSource(key)
       const delta = next[key]
       if (!shouldRebaseLyricOffset(songSource === 'none' ? null : songSource, source, delta)) continue
       const rebased = clampLyricOffsetMs(rebaseLyricUserOffsetMs(delta, prevDefault, newDefault))
-      if (rebased === 0) delete next[key]
-      else next[key] = rebased
+      if (rebased === 0) {
+        delete next[key]
+        // 不知道本机写过什么时，载荷里的值就是同步/上次调整留下的那个 delta
+        zeroed.push([key, songMeta.value[key]?.payload ?? delta])
+      } else {
+        next[key] = rebased
+      }
       changed = true
     }
     if (changed) {
       offsets.value = next
       persistOffsets('replace_lyric_offsets', { offsets: roundedOffsets(next) }, next)
+    }
+    if (zeroed.length) {
+      updateMeta((meta) => {
+        for (const [key, payload] of zeroed) {
+          meta[key] = { ...(meta[key] ?? { source: inferredSongSource(key) }), zeroedPayload: payload }
+        }
+      })
     }
   }
 

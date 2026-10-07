@@ -410,13 +410,15 @@ async function applyLyricFill(result: any) {
     })
     const nextLyrics = fetched.lines
     fetchedLyrics.value = nextLyrics
-    rememberLyricSource(player.currentTrack, fetched.source ?? source)
+    // 兜底可能落到 LRCLIB / AMLL 等别的源，按实际来源记，重启后偏移量才对得上
+    const actualSource = fetched.source ? lyricSourceForPlatform(fetched.source) : source
+    rememberLyricSource(player.currentTrack, actualSource)
     cacheLyricsForTrack(player.currentTrack, nextLyrics)
     if (nextLyrics.length > 0) {
       await commitLyricsToTrack(
         toEditableLyricsText(nextLyrics),
         toEditableTranslationText(nextLyrics) || null,
-        source,
+        actualSource,
       )
     }
     toast.success(t('player.lyrics_fill_applied'))
@@ -1379,13 +1381,14 @@ async function confirmApplySearchResult() {
         if (fetched.lines.length) {
           const nextLyrics = fetched.lines
           fetchedLyrics.value = nextLyrics
-          rememberLyricSource(player.currentTrack, fetched.source ?? source)
+          const actualSource = fetched.source ? lyricSourceForPlatform(fetched.source) : source
+          rememberLyricSource(player.currentTrack, actualSource)
           cacheLyricsForTrack(player.currentTrack, nextLyrics)
           // 兜底在线歌词同样写回 syncPayload, 否则不同步且重启即丢
           await commitLyricsToTrack(
             toEditableLyricsText(nextLyrics),
             toEditableTranslationText(nextLyrics) || null,
-            source,
+            actualSource,
           )
         }
       }
@@ -2646,8 +2649,9 @@ const sliderActiveColor = computed(() => {
             </div>
             <div class="np-more-item">
               <div class="np-more-hint">
-                <template v-if="currentLyricSourceLabel">{{ t('player.lyric_offset_source', { source: currentLyricSourceLabel }) }} · </template>
-                {{ t('player.lyric_offset_default', { value: formatLyricOffsetMs(currentLyricDefaultOffsetMs) }) }}
+                {{ currentLyricSourceLabel
+                  ? t('player.lyric_offset_default_of', { source: currentLyricSourceLabel, value: formatLyricOffsetMs(currentLyricDefaultOffsetMs) })
+                  : t('player.lyric_offset_default', { value: formatLyricOffsetMs(currentLyricDefaultOffsetMs) }) }}
               </div>
               <div class="np-more-row">
                 <button class="np-more-step-btn" :title="t('player.lyric_offset_later')" :aria-label="t('player.lyric_offset_later')" @click="nudgeLyricOffset(-1)">

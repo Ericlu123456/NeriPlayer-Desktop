@@ -377,7 +377,7 @@
     "cover_save_failed": "カバーの保存に失敗",
     "more_options": "その他のオプション",
     "lyric_offset": "歌詞オフセット",
-    "lyric_offset_source": "現在の歌詞：{source}",
+    "lyric_offset_default_of": "{source} の既定 {value}",
     "lyric_offset_default": "既定 {value}",
     "lyric_offset_hint": "値が大きいほど歌詞が早く表示されます",
     "lyric_offset_reset": "既定に戻す（{value}）",

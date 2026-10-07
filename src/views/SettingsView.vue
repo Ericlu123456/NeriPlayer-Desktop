@@ -15,6 +15,7 @@ import {
   LYRIC_FONT_SCALE_MAX,
   LYRIC_FONT_SCALE_MIN,
   LYRIC_FONT_SCALE_STEP,
+  normalizeLyricDefaultOffset,
   MAX_COVER_BLUR_AMOUNT,
   MAX_MEDIA_CACHE_SIZE_MB,
   MIN_MEDIA_CACHE_SIZE_MB,
@@ -1908,7 +1909,7 @@ useEscapeClose(
             :display-value="formatLyricOffsetMs(settings[item.key])"
             input-suffix="ms"
             :aria-label="t(item.label)"
-            @update:model-value="settings[item.key] = $event"
+            @update:model-value="settings[item.key] = normalizeLyricDefaultOffset($event, item.defaultMs)"
           />
         </div>
         <button
@@ -1922,7 +1923,7 @@ useEscapeClose(
           :value="settings[item.key]"
           :min="-LYRIC_DEFAULT_OFFSET_RANGE_MS" :max="LYRIC_DEFAULT_OFFSET_RANGE_MS" :step="LYRIC_DEFAULT_OFFSET_STEP_MS"
           :aria-label="t(item.label)"
-          @input="settings[item.key] = Number(($event.target as HTMLInputElement).value)"
+          @input="settings[item.key] = normalizeLyricDefaultOffset(Number(($event.target as HTMLInputElement).value), item.defaultMs)"
         />
       </div>
       <div v-if="lyricOffsetsChanged" class="setting-card sub-card">

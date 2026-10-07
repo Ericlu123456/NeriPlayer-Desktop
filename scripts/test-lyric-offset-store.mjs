@@ -147,4 +147,49 @@ await regression('loading settings at startup only sets the baseline', async () 
   assert.equal(store.getUserOffsetMs(song), 0, '之后用户改默认才 rebase（700+200 = 900+0）')
 })
 
+await regression('an adjusted song keeps its absolute offset when the lyric source changes', async () => {
+  const { store, player } = await runtime()
+  const song = track('netease:7')
+  sourceModule.rememberLyricSource(song, 'netease')
+  player.currentTrack = song
+  store.setEffectiveOffsetMs(song, 1200)
+  sourceModule.rememberLyricSource(song, 'amll_ttml')
+  assert.equal(store.offsetSourceFor(song), 'netease', '调过的歌固定按调整时的来源')
+  assert.equal(store.effectiveOffsetMs(song), 1200, '逐字歌词升级后偏移不能跳到 300+200')
+  store.setEffectiveOffsetMs(song, 400)
+  assert.equal(store.offsetSourceFor(song), 'amll_ttml', '再次调整改按正在显示的来源')
+  assert.equal(store.getUserOffsetMs(song), 100)
+  assert.equal(store.effectiveOffsetMs(song), 400)
+  store.setEffectiveOffsetMs(song, 300)
+  sourceModule.rememberLyricSource(song, 'netease')
+  assert.equal(store.effectiveOffsetMs(song), 1000, '恢复默认后重新跟随歌词来源')
+})
+
+await regression('a rebase to zero ignores the stale delta left in the sync payload', async () => {
+  const { store, settings, player } = await runtime()
+  const song = track('netease:8')
+  sourceModule.rememberLyricSource(song, 'netease')
+  player.currentTrack = song
+  store.setEffectiveOffsetMs(song, 1200)
+  const withPayload = player.currentTrack
+  assert.equal(withPayload.syncPayload.userLyricOffsetMs, 200)
+  player.currentTrack = track('netease:other')
+  settings.cloudMusicOffset = 1200
+  await vue.nextTick()
+  assert.equal(store.getUserOffsetMs(withPayload), 0, 'rebase 只改本地表，载荷里的旧 200 不能复活')
+  assert.equal(store.effectiveOffsetMs(withPayload), 1200)
+  const resynced = { ...withPayload, syncPayload: { ...withPayload.syncPayload, userLyricOffsetMs: 300 } }
+  assert.equal(store.getUserOffsetMs(resynced), 300, '同步换来别的值时照常采信')
+})
+
+await regression('resetting a song that is not playing ignores its synced delta', async () => {
+  const { store, player } = await runtime()
+  const song = track('qq:10', { syncPayload: { userLyricOffsetMs: 150 } })
+  player.currentTrack = track('qq:playing')
+  assert.equal(store.getUserOffsetMs(song), 150, 'Android 同步来的 delta')
+  store.setUserOffsetMs(song, 0)
+  assert.equal(store.getUserOffsetMs(song), 0, '不在播放的歌载荷没改写，也要按已重置算')
+  assert.equal(player.patched.length, 0, '不能改写正在播放那首的载荷')
+})
+
 console.log(`Lyric offset store regressions: ${cases} passed`)
