@@ -19,9 +19,18 @@ export const SEEK_SATISFIED_DRIFT_MS = 1_500
 /** 只跟踪走普通事件的请求；换歌和改队列有队列事件自己的确认与补发 */
 export const TRACKED_MEMBER_REQUESTS = new Set(['REQUEST_PLAY', 'REQUEST_PAUSE', 'REQUEST_SEEK', 'REQUEST_PLAYBACK_MODE'])
 
-/** 太久没收到任何消息时拉一次房态兜底，两次之间至少隔 30 秒 */
-export function shouldRefreshListenerState(now: number, lastSocketMessageAt: number, lastRefreshAt: number): boolean {
+/**
+ * 太久没收到任何消息，或者已知漏掉了一条（repairPending，例如收到解析不了的消息）时拉一次房态兜底，
+ * 两次之间至少隔 30 秒（对齐 Android shouldRepairListenTogetherListenerState）
+ */
+export function shouldRefreshListenerState(
+  now: number,
+  lastSocketMessageAt: number,
+  lastRefreshAt: number,
+  repairPending = false,
+): boolean {
   if (lastRefreshAt > 0 && now - lastRefreshAt < REPAIR_MIN_INTERVAL_MS) return false
+  if (repairPending) return true
   if (lastSocketMessageAt <= 0) return true
   return now - lastSocketMessageAt >= SOCKET_SILENCE_TIMEOUT_MS
 }

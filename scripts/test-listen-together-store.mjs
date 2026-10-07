@@ -1160,6 +1160,17 @@ await test('a room that has gone silent is refreshed over HTTP', async h => {
   assert.ok(h.commands.some(entry => entry.command === 'lt_get_room_state'), 'more than 45 seconds of silence triggers a refresh')
 })
 
+await test('an unreadable message is reported and repaired at the next watchdog tick', async h => {
+  await h.join()
+  await h.message({ type: 'welcome', state: room(), role: 'listener' })
+  h.emit('lt:protocol_error', { connectionId: 'connection-current', message: 'Protocol: invalid type: string "x"' })
+  await flush()
+  assert.equal(h.store.sessionError.value, 'Protocol: invalid type: string "x"')
+  await h.timers.advance(8_000)
+  assert.ok(h.commands.some(entry => entry.command === 'lt_get_room_state'),
+    'the possibly missed room update is fetched without waiting for 45 seconds of silence')
+})
+
 await test('a pending member request is retried and not undone by the watchdog', async h => {
   await h.join()
   await h.message({ type: 'welcome', state: playingRoom(), role: 'listener' })

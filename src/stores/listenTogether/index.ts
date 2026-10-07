@@ -139,6 +139,8 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
   // 听众端自检：定时对齐、卡住恢复、静默时拉房态；以及还没被房主处理的成员请求
   let _watchdogTimer: ReturnType<typeof setInterval> | null = null
   let _lastWatchdogRefreshAt = 0
+  // 收到过解析不了的消息：漏掉的很可能是房态更新，下一次自检时补拉
+  let _stateRepairPending = false
   let _pendingMemberRequest: PendingMemberRequest | null = null
   const _stallDetector = new StallDetector()
   // 会话代际：leaveRoom 后递增，让在途的延迟回调失效，不再操作播放器
@@ -156,6 +158,7 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
   let _unlistenMessage: UnlistenFn | null = null
   let _unlistenConnected: UnlistenFn | null = null
   let _unlistenDisconnected: UnlistenFn | null = null
+  let _unlistenProtocolError: UnlistenFn | null = null
   let _suppressPlayerWatch = false
   let _lastAppliedRoomVersion = 0
   // 回环抑制：避免自己发出的事件触发回环
@@ -453,6 +456,7 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
     _pingSentAt = 0
     stopWatchdog()
     _pendingMemberRequest = null
+    _stateRepairPending = false
     _lastRequestedLinkStableKey = null
     _lastRequestedLinkAt = 0
   }
@@ -530,6 +534,16 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
     })
     if (generation !== _sessionGeneration) { unlistenDisconnected(); return false }
     _unlistenDisconnected = unlistenDisconnected
+
+    // 解析不了的消息：记下原因，漏掉的多半是房态更新，交给自检尽快补拉
+    const unlistenProtocolError = await listen<{ connectionId?: string; message?: string }>('lt:protocol_error', (event) => {
+      if (generation !== _sessionGeneration) return
+      if (event.payload.connectionId && event.payload.connectionId !== _activeWsConnectionId) return
+      sessionError.value = event.payload.message || 'Protocol error'
+      _stateRepairPending = true
+    })
+    if (generation !== _sessionGeneration) { unlistenProtocolError(); return false }
+    _unlistenProtocolError = unlistenProtocolError
     return true
   }
 
@@ -537,9 +551,11 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
     _unlistenMessage?.()
     _unlistenConnected?.()
     _unlistenDisconnected?.()
+    _unlistenProtocolError?.()
     _unlistenMessage = null
     _unlistenConnected = null
     _unlistenDisconnected = null
+    _unlistenProtocolError = null
   }
 
   // 消息处理
@@ -1785,8 +1801,9 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
     // 自己的请求还在等房主处理时不按房态回放，否则会把用户刚做的操作撤回去
     if (state && !requestPending && state.roomStatus === 'active') syncListenerToRoom(state, now, serverNow)
 
-    if (!shouldRefreshListenerState(now, _lastSocketMessageAt, _lastWatchdogRefreshAt)) return
+    if (!shouldRefreshListenerState(now, _lastSocketMessageAt, _lastWatchdogRefreshAt, _stateRepairPending)) return
     _lastWatchdogRefreshAt = now
+    _stateRepairPending = false
     const targetRoomId = roomId.value
     try {
       const resp = await invoke<ListenTogetherStateResponse>('lt_get_room_state', { baseUrl: activeBaseUrl(), roomId: targetRoomId })
