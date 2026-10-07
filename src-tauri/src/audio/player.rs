@@ -3011,8 +3011,11 @@ fn run_loudness_scan(
             return;
         };
         match estimate {
+            Ok(Some(stats)) if !track.estimate(stats) => log::info!(
+                target: "audio-loudness",
+                "loudness estimate not used generation={generation}: no audible samples or the full scan already finished",
+            ),
             Ok(Some(stats)) => {
-                track.estimate(stats);
                 log::info!(
                     target: "audio-loudness",
                     "loudness estimate ready source={} generation={} windows={} target_db={:.2} elapsed_ms={}",

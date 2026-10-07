@@ -177,7 +177,12 @@ struct Block {
 
 impl Block {
     /// 累加一个样本；攒满一块时返回 true
+    ///
+    /// 非有限值不计入：统计是整首共享的，一个 NaN 会让这首歌之后的目标增益全变成 NaN
     fn push(&mut self, sample: f32) -> bool {
+        if !sample.is_finite() {
+            return false;
+        }
         let value = f64::from(sample);
         self.sum_squares += value * value;
         self.peak = self.peak.max(value.abs());
@@ -319,14 +324,21 @@ impl TrackLoudness {
     }
 
     /// 换成整首的抽样估计；完整扫描的结果已经到了就不再覆盖
-    pub fn estimate(&self, stats: LoudnessStats) {
+    ///
+    /// 抽样全落在静音里时估计是空的：换上它会停掉播放时的统计，整首都没有目标增益，
+    /// 这时保留播放时的统计等完整扫描。返回是否采用了估计。
+    pub fn estimate(&self, stats: LoudnessStats) -> bool {
+        if stats.samples == 0 {
+            return false;
+        }
         let mut integrated = self.lock_integrated();
         if self.is_complete() {
-            return;
+            return false;
         }
         *integrated = stats;
         self.source.store(SOURCE_ESTIMATE, Ordering::Release);
         self.publish(&integrated);
+        true
     }
 
     /// 换成整首扫描的统计；之后目标增益固定
@@ -750,7 +762,8 @@ impl EffectsProcessor {
             let fade = self.equalizer.advance_fade();
             let mut peak = 0.0f64;
             for ((channel, sample), side) in frame.iter_mut().enumerate().zip(&self.sides) {
-                let input = f64::from(*sample);
+                // 解码出的坏样本按静音处理：进了滤波器的延迟线，之后整段输出都会是 NaN
+                let input = if sample.is_finite() { f64::from(*sample) } else { 0.0 };
                 let filtered = if equalize {
                     self.equalizer.process(input, channel, fade)
                 } else {
@@ -1274,6 +1287,38 @@ mod tests {
         track.estimate(stats_for_gain(1.2));
         assert!(track.is_complete());
         assert!((track.target_gain().unwrap() - 0.6).abs() < 1e-9, "完整扫描之后不再被估计覆盖");
+    }
+
+    /// 抽样估计全落在静音里：不能换上空统计停掉播放时的统计，否则整首都没有目标增益
+    #[test]
+    fn an_empty_estimate_keeps_the_live_stats_running() {
+        let track = TrackLoudness::new_shared();
+        fold_stats(&track, 0.02, 0.05, 48_000);
+        let quiet_start = track.target_gain().unwrap();
+        assert!(!track.estimate(LoudnessScanner::default().finish()), "空估计不采用");
+        assert!(!track.covers_whole_track());
+        fold_stats(&track, 0.2, 0.5, 48_000);
+        assert!(track.target_gain().unwrap() < quiet_start, "播放时的统计照常并入");
+    }
+
+    /// 解码出一个 NaN / inf：不能毒化整首共享的响度统计，也不能卡死均衡器的延迟线
+    #[test]
+    fn a_bad_sample_cannot_poison_the_track_stats_or_the_equalizer() {
+        let control = control_with(|settings| {
+            settings.eq_enabled = true;
+            settings.eq_band_levels_mb = [600, 0, 0, 0, 0];
+            settings.normalize_volume = true;
+        });
+        let mut input = sine(440.0, 0.3, 9_600, 2);
+        input[1_000] = f32::NAN;
+        input[1_001] = f32::INFINITY;
+        let track = analyzed_track(&input);
+        assert!(track.target_gain().is_some_and(f64::is_finite), "目标增益: {:?}", track.target_gain());
+
+        let mut effects = processor(2, RATE, &control, &track);
+        let output = render(&mut effects, &input, 480);
+        assert!(output.iter().all(|sample| sample.is_finite()), "坏样本之后的输出必须都是有限值");
+        assert!(peak(&output[output.len() / 2..]) > 0.1, "坏样本之后仍在出声");
     }
 
     /// 目标固定后升降都在约 2 秒内到位；还按 4 s 慢升的话 2 秒只走到四成
