@@ -158,7 +158,8 @@ export interface LyricLine {
 }
 
 export type RepeatMode = 'off' | 'all' | 'one'
-export type PlaybackCommandSource = 'local' | 'remote_sync'
+/** local_safety：睡眠定时、失败跳过、自动推进等内部操作，不受一起听的成员控制限制（对齐 Android LOCAL_SAFETY） */
+export type PlaybackCommandSource = 'local' | 'local_safety' | 'remote_sync'
 
 export interface SeekCommandSnapshot {
   seq: number
@@ -430,7 +431,7 @@ export const usePlayerStore = defineStore('player', () => {
       const now = Date.now()
       sleepTimerNowMs.value = now
       if (now >= sleepTimerEndMs.value) {
-        pause()
+        void pause('local_safety')
         cancelSleepTimer()
       }
     }, 1000)
@@ -500,6 +501,35 @@ export const usePlayerStore = defineStore('player', () => {
     if (source === 'remote_sync') {
       _remoteSyncGuardUntil = Date.now() + 3000
     }
+  }
+
+  /**
+   * 一起听里听众没有控制权（房主离线或关闭了成员控制）时，用户操作在执行前就拦下并提示，
+   * 不再先改本地、再被服务端拒绝而和房间分叉（对齐 Android shouldBlockLocalRoomControl）
+   */
+  function blockedByListenTogether(commandSource: PlaybackCommandSource): boolean {
+    if (commandSource !== 'local') return false
+    const restriction = useListenTogetherStore().localControlRestriction
+    if (!restriction) return false
+    useToastStore().error((i18n.global as any).t(restriction === 'controller_offline'
+      ? 'listen_together.control_blocked_controller_offline'
+      : 'listen_together.control_blocked_member_control'))
+    return true
+  }
+
+  /** 播放器替用户做的后续动作（恢复、失败跳过）：跟随房间的同步仍按同步处理，其余都不算用户操作 */
+  function internalFollowUpSource(commandSource: PlaybackCommandSource): PlaybackCommandSource {
+    return commandSource === 'remote_sync' ? 'remote_sync' : 'local_safety'
+  }
+
+  /** 一起听期间不能切到本地文件：其它成员没法播放它（对齐 Android shouldBlockLocalSongSwitch） */
+  function blocksLocalSongInRoom(track: TrackInfo, commandSource: PlaybackCommandSource): boolean {
+    if (commandSource !== 'local' || !useListenTogetherStore().roomId) return false
+    if (track.source !== 'local' && !track.id.startsWith('local:')) return false
+    // 重新加载当前这首（例如继续播放时需要重载）不是切歌
+    if (track.id === currentTrack.value?.id) return false
+    useToastStore().error((i18n.global as any).t('listen_together.local_playback_blocked'))
+    return true
   }
 
   function isRemoteSyncGuardActive() {
@@ -836,18 +866,19 @@ export const usePlayerStore = defineStore('player', () => {
         && !isLoadingAudio.value,
       onStall: () => {
         if (token !== playbackRequestToken) return
+        const recoverySource = internalFollowUpSource(commandSource)
         if (startupRecoveryAttempts >= MAX_STARTUP_RECOVERY_ATTEMPTS) {
           playbackStartupWatchdog.cancel()
           consecutivePlayFailures += 1
           _isAutoSkipping = true
-          void next(true, commandSource).finally(() => {
+          void next(true, recoverySource).finally(() => {
             _isAutoSkipping = false
           })
           return
         }
         startupRecoveryAttempts += 1
         const resumePositionMs = currentRenderedPosition()
-        void play(track, commandSource, resumePositionMs, true)
+        void play(track, recoverySource, resumePositionMs, true)
       },
     })
   }
@@ -1096,22 +1127,22 @@ export const usePlayerStore = defineStore('player', () => {
         consecutivePlayFailures++
         useToastStore().error((i18n.global as any).t('player.playback_network_error'))
         if (consecutivePlayFailures >= MAX_CONSECUTIVE_FAILURES) {
-          void pause()
+          void pause('local_safety')
           useToastStore().error((i18n.global as any).t('player.too_many_failures'))
         } else if (!_isAutoSkipping) {
           _isAutoSkipping = true
-          void next(true, 'local').finally(() => { _isAutoSkipping = false })
+          void next(true, 'local_safety').finally(() => { _isAutoSkipping = false })
         }
         return
       }
       _lastStallRecovery = { key: track.id, at: now }
       _stallRecovering = true
       const resumeAt = Math.max(0, Math.round(e.payload.positionMs))
-      void play(track, 'local', resumeAt, true)
+      void play(track, 'local_safety', resumeAt, true)
         .catch(() => {
           if (!_isAutoSkipping) {
             _isAutoSkipping = true
-            void next(true, 'local').finally(() => { _isAutoSkipping = false })
+            void next(true, 'local_safety').finally(() => { _isAutoSkipping = false })
           }
         })
         .finally(() => { _stallRecovering = false })
@@ -1183,6 +1214,7 @@ export const usePlayerStore = defineStore('player', () => {
     startPositionMs = 0,
     forceResolve = false,
   ) {
+    if (blockedByListenTogether(commandSource) || blocksLocalSongInRoom(track, commandSource)) return
     const fileMutation = !isRemotePlaybackTrack(track) && audioFileMutations.get(audioFilePathKey(track.audioUrl))
     if (fileMutation) {
       const waitingToken = ++playbackRequestToken
@@ -1766,7 +1798,8 @@ export const usePlayerStore = defineStore('player', () => {
       readPlaybackAudioInfo(token)
 
       // 记录播放历史
-      if (commandSource === 'local') {
+      // 跟随房间的远端同步不记历史；用户操作和自动推进都记
+      if (commandSource !== 'remote_sync') {
         const history = useHistoryStore()
         history.record(track)
       }
@@ -1846,7 +1879,7 @@ export const usePlayerStore = defineStore('player', () => {
       ) {
         _isAutoSkipping = true
         try {
-          await next(failureAction === 'wrap', commandSource)
+          await next(failureAction === 'wrap', internalFollowUpSource(commandSource))
         } finally {
           _isAutoSkipping = false
         }
@@ -1926,6 +1959,7 @@ export const usePlayerStore = defineStore('player', () => {
   }
 
   async function pause(commandSource: PlaybackCommandSource = 'local') {
+    if (blockedByListenTogether(commandSource)) return
     const mutation = currentAudioFileMutation()
     if (mutation) {
       markCommandSource(commandSource)
@@ -1981,6 +2015,7 @@ export const usePlayerStore = defineStore('player', () => {
   }
 
   async function resume(commandSource: PlaybackCommandSource = 'local') {
+    if (blockedByListenTogether(commandSource)) return
     const mutation = currentAudioFileMutation()
     if (mutation) {
       markCommandSource(commandSource)
@@ -2032,6 +2067,7 @@ export const usePlayerStore = defineStore('player', () => {
   }
 
   async function seekTo(ms: number, commandSource: PlaybackCommandSource = 'local') {
+    if (blockedByListenTogether(commandSource)) return
     markCommandSource(commandSource)
     const roundedMs = Math.max(0, Math.round(ms))
     const maxSeekMs = durationMs.value || currentTrack.value?.durationMs || 0
@@ -2147,16 +2183,16 @@ export const usePlayerStore = defineStore('player', () => {
       return
     }
 
-    // 睡眠定时器
+    // 睡眠定时器；以下都是播放器自己的推进，不是用户操作
     const isLast = !shuffleEnabled.value && queueIndex.value >= queue.value.length - 1
     if (sleepTimerMode.value === 'end_of_track') {
-      await pause()
+      await pause('local_safety')
       cancelSleepTimer()
       return
     }
     if (sleepTimerMode.value === 'end_of_queue') {
       if (isLast && repeatMode.value !== 'all') {
-        await pause()
+        await pause('local_safety')
         cancelSleepTimer()
         return
       }
@@ -2165,18 +2201,18 @@ export const usePlayerStore = defineStore('player', () => {
     if (repeatMode.value === 'one') {
       // 单曲循环：重新播放当前曲目
       if (currentTrack.value) {
-        await play(currentTrack.value)
+        await play(currentTrack.value, 'local_safety')
       }
     } else if (repeatMode.value === 'all') {
       // 列表循环：强制推进到下一首（到末尾回到开头）
-      await next(true)
+      await next(true, 'local_safety')
     } else {
       // 顺序播放：还有下一首则推进，否则停止
       if (shuffleEnabled.value || queueIndex.value < queue.value.length - 1) {
-        await next(false)
+        await next(false, 'local_safety')
       } else {
         // 停止播放但保留队列（对齐 Android stopPlaybackPreservingQueue）
-        await pause()
+        await pause('local_safety')
         positionMs.value = 0
       }
     }
@@ -2189,6 +2225,7 @@ export const usePlayerStore = defineStore('player', () => {
    * - Shuffle 模式使用三栈模型
    */
   async function next(force: boolean = false, commandSource: PlaybackCommandSource = 'local') {
+    if (blockedByListenTogether(commandSource)) return
     markCommandSource(commandSource)
     log.info('next:', { source: commandSource, force, shuffle: shuffleEnabled.value, repeat: repeatMode.value, index: queueIndex.value, queueLen: queue.value.length })
     if (queue.value.length === 0) return
@@ -2249,6 +2286,7 @@ export const usePlayerStore = defineStore('player', () => {
    * - 非 shuffle：只有 repeat_all 才回绕到末尾
    */
   async function previous(commandSource: PlaybackCommandSource = 'local') {
+    if (blockedByListenTogether(commandSource)) return
     markCommandSource(commandSource)
     log.info('previous:', { source: commandSource, shuffle: shuffleEnabled.value, positionMs: Math.round(positionMs.value) })
     consecutivePlayFailures = 0
@@ -2643,7 +2681,7 @@ export const usePlayerStore = defineStore('player', () => {
       shuffleBag = []
       shuffleHistory = []
       shuffleFuture = []
-      pause()
+      void pause('local_safety')
       savePlayerState()
       return
     }
@@ -2762,7 +2800,7 @@ export const usePlayerStore = defineStore('player', () => {
         savePlayerState()
         if (mutation.shouldResume && (isRemotePlaybackTrack(resumeTrack) || resumeTrack.audioUrl)) {
           try {
-            await play(resumeTrack, 'local', mutation.positionMs, true)
+            await play(resumeTrack, 'local_safety', mutation.positionMs, true)
           } catch (error) {
             log.warn('Resume after audio file operation failed:', error)
           }
@@ -2803,7 +2841,8 @@ export const usePlayerStore = defineStore('player', () => {
     playbackUrlResolver.invalidate(track, sourceSettings)
     lastUrlResolveTime = 0
     playError.value = null
-    await play(track, 'local', pos, true)
+    // 换音质只影响本机，一起听里没有控制权时也允许
+    await play(track, 'local_safety', pos, true)
     if (playError.value) {
       throw new Error(playError.value)
     }

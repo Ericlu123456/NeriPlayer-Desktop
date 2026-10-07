@@ -7,9 +7,16 @@ const source = await readFile(new URL('../src/stores/listenTogether/protocol.ts'
 const compiled = ts.transpileModule(source, {
   compilerOptions: { module: ts.ModuleKind.ES2022, target: ts.ScriptTarget.ES2022 },
 }).outputText
-const { desktopRepeatToWire, wireRepeatToDesktop, isValidLtNickname, parseLtInvite } = await import(
+const { desktopRepeatToWire, wireRepeatToDesktop, isValidLtNickname, parseLtInvite, resolveLocalRoomControlRestriction } = await import(
   `data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}`,
 )
+
+// 对齐 Android LocalRoomControlRestrictionTest
+assert.equal(resolveLocalRoomControlRestriction('controller_offline', false, true), null, 'the host is never restricted')
+assert.equal(resolveLocalRoomControlRestriction('controller_offline', false, false), 'controller_offline')
+assert.equal(resolveLocalRoomControlRestriction('active', false, false), 'member_control_disabled')
+assert.equal(resolveLocalRoomControlRestriction('active', true, false), null)
+assert.equal(resolveLocalRoomControlRestriction(null, null, false), null)
 
 // 昵称与服务端同一规则：汉字（含 〇、々、扩展区）、ASCII 字母数字，按码点最多 24 个
 for (const valid of ['Tester', '听歌的人', '〇々', '𠀀𠀁', 'a'.repeat(24), '𠀀'.repeat(24)]) {

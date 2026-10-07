@@ -31,6 +31,7 @@ import {
   normalizeLtJoinSecret,
   normalizeLtRoomId,
   parseLtInvite,
+  resolveLocalRoomControlRestriction,
   resolveLtJoinSecret,
   isValidLtRoomId,
 } from './protocol'
@@ -202,6 +203,10 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
   // 计算属性
   const isConnected = computed(() => connectionState.value === 'connected')
   const isController = computed(() => role.value === 'controller')
+  // 播放器据此在本地操作执行前就拦下，而不是先改本地、再被服务端拒绝
+  const localControlRestriction = computed(() => roomId.value
+    ? resolveLocalRoomControlRestriction(roomState.value?.roomStatus, roomSettings.value.allowMemberControl, isController.value)
+    : null)
   const members = computed(() => roomState.value?.members ?? [])
 
   // 房间操作
@@ -2101,7 +2106,7 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
     roomState, sessionError, baseUrl, roomSettings,
     lastSyncEventType, lastSyncAt, lastReconnectAt,
     // 计算属性
-    isConnected, isController, isInSession, members,
+    isConnected, isController, isInSession, members, localControlRestriction,
     // 方法
     createRoom, joinRoom, leaveRoom,
     updateRoomSettings, resetIdentity, reloadIdentity, copyInviteLink, getInviteLink,

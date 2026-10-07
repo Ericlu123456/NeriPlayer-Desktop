@@ -228,7 +228,22 @@ export type ConnectionState = 'disconnected' | 'connecting' | 'connected'
 export type LtRole = 'controller' | 'listener'
 
 /** 播放命令来源 */
-export type PlaybackCommandSource = 'local' | 'remote_sync'
+/** local_safety：睡眠定时、失败跳过、自动推进等内部操作，不受一起听的成员控制限制（对齐 Android LOCAL_SAFETY） */
+export type PlaybackCommandSource = 'local' | 'local_safety' | 'remote_sync'
+
+export type LocalRoomControlRestriction = 'controller_offline' | 'member_control_disabled'
+
+/** 听众在房主离线或关闭了成员控制时不能控制播放（对齐 Android resolveLocalRoomControlRestriction） */
+export function resolveLocalRoomControlRestriction(
+  roomStatus: string | null | undefined,
+  allowMemberControl: boolean | null | undefined,
+  isController: boolean,
+): LocalRoomControlRestriction | null {
+  if (isController) return null
+  if (roomStatus === 'controller_offline') return 'controller_offline'
+  if (allowMemberControl === false) return 'member_control_disabled'
+  return null
+}
 
 /** Desktop string mode <-> wire int (ExoPlayer) */
 export function desktopRepeatToWire(mode: string | undefined | null): number {

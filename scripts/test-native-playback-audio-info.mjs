@@ -101,10 +101,10 @@ async function runtime(options = {}) {
     vue, pinia, '@tauri-apps/api/core': core,
     '@tauri-apps/api/event': { listen: async (name, callback) => { events.set(name, callback); return () => events.delete(name) } },
     './history': { useHistoryStore: () => ({ record: () => {} }) },
-    './toast': { useToastStore: () => ({ error: () => {} }) },
+    './toast': { useToastStore: () => ({ error: message => options.toasts?.push(message) }) },
     './settings': { useSettingsStore: () => settings, MIN_MEDIA_CACHE_SIZE_MB: 128, MAX_MEDIA_CACHE_SIZE_MB: 16384 },
     './download': { useDownloadStore: () => ({ getDownloadedTrack: () => options.downloaded ? { filePath: 'C:/Music/download.flac', durationMs: 180000 } : null }) },
-    './listenTogether': { useListenTogetherStore: () => ({ isConnected: false }) },
+    './listenTogether': { useListenTogetherStore: () => options.listenTogether ?? { isConnected: false } },
     '@/i18n': { default: { global: { t: key => key } } },
     '@/modules/playback/playbackSource': playback,
     '@/modules/playback/playbackFailure': failure,
@@ -192,6 +192,36 @@ for (const sameTrack of [false, true]) {
     assert.equal(r.store.audioInfo.bitDepth, 16)
   })
 }
+
+await run('a listener without control is stopped before the player changes, but safety pauses still work', async () => {
+  const toasts = []
+  const listenTogether = { isConnected: true, roomId: null, isController: false, localControlRestriction: null }
+  const r = await runtime({ toasts, listenTogether })
+  await r.store.play(track('601')); await flush()
+  assert.equal(r.store.isPlaying, true)
+  listenTogether.roomId = 'ABC234'
+  listenTogether.localControlRestriction = 'member_control_disabled'
+  const commands = r.calls.length
+  await r.store.pause()
+  await r.store.next()
+  await r.store.seekTo(30000)
+  assert.equal(r.store.isPlaying, true, 'the blocked pause leaves the player in step with the room')
+  assert.ok(!r.calls.slice(commands).some(call => ['pause', 'seek'].includes(call.command)))
+  assert.deepEqual(toasts, Array(3).fill('listen_together.control_blocked_member_control'))
+  await r.store.pause('local_safety')
+  assert.equal(r.store.isPlaying, false, 'a sleep-timer pause is not a room control')
+})
+
+await run('local files cannot be started while in a Listen Together room', async () => {
+  const toasts = []
+  const listenTogether = { isConnected: true, roomId: 'ABC234', isController: true, localControlRestriction: null }
+  const r = await runtime({ toasts, listenTogether })
+  await r.store.play({ ...track('602'), id: 'local:602', source: 'local', audioUrl: 'C:/Music/local.flac' })
+  assert.equal(r.store.currentTrack, null)
+  assert.deepEqual(toasts, ['listen_together.local_playback_blocked'])
+  await r.store.play(track('603'))
+  assert.equal(r.store.currentTrack?.id, 'netease:603', 'online tracks are still allowed')
+})
 
 await run('seeking the same decoded source does not discard its pending properties', async () => {
   const pending = deferred(), r = await runtime({ metadata: () => pending.promise })

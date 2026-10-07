@@ -27,7 +27,8 @@ const compiled = ts.transpileModule([
     }
     visit(parsed)
     assert.ok(play)
-    return `async function blockedPlay(track, commandSource = 'local', startPositionMs = 0, forceResolve = false) { ${play.body.statements.slice(0, 2).map(node => node.getText(parsed)).join('\n')} }`
+    // 一起听拦截判断 + 等待文件操作的两条语句
+    return `async function blockedPlay(track, commandSource = 'local', startPositionMs = 0, forceResolve = false) { ${play.body.statements.slice(0, 3).map(node => node.getText(parsed)).join('\n')} }`
   })(),
 ].join('\n'), { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } }).outputText
 const deferred = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no }); return { promise, resolve, reject } }
@@ -44,6 +45,7 @@ function runtime({ playing = true, releaseError = false, switching = false } = {
     getPlaybackSourceKind: () => 'netease', isRemotePlaybackTrack: track => !track.id.startsWith('local:'),
     playbackStartupWatchdog: { cancel: () => {} }, replacePlaybackDemand: () => {}, freezeRenderedPosition: () => {},
     savePlayerState: () => {}, log: { warn: () => {} }, markCommandSource: () => {},
+    blockedByListenTogether: () => false, blocksLocalSongInRoom: () => false,
     shouldDeferPlaybackSeek: () => false,
     durationMs: ref(240000), lastSeekCommand: ref({ seq: 0 }),
     markOptimisticSeek: pos => { positionMs.value = pos; return pos },
