@@ -1060,6 +1060,29 @@ const leanControls = async h => {
 leanControls.options = { role: 'controller' }
 await test('transport events on schema 2 carry only the track binding', leanControls)
 
+const connectCount = h => h.commands.filter(entry => entry.command === 'lt_connect_ws').length
+
+await test('a socket that stops answering pings is reconnected', async h => {
+  await h.join()
+  await h.message({ type: 'welcome', state: room(), role: 'listener' })
+  const before = connectCount(h)
+  await h.timers.advance(40_000)
+  assert.equal(connectCount(h), before, 'an unanswered ping is given 35 seconds')
+  assert.equal(h.commands.filter(entry => entry.command === 'lt_send_ping').length, 1, 'no new ping is sent until the last one is answered')
+  await h.timers.advance(22_000)
+  assert.equal(connectCount(h), before + 1, 'a half-open socket is replaced instead of waiting for TCP to give up')
+})
+
+await test('a socket that answers pings stays connected', async h => {
+  await h.join()
+  await h.message({ type: 'welcome', state: room(), role: 'listener' })
+  const before = connectCount(h)
+  await h.timers.advance(30_000)
+  await h.message({ type: 'pong' })
+  await h.timers.advance(32_000)
+  assert.equal(connectCount(h), before)
+})
+
 if (failures.length) {
   console.error(`${passed} store tests passed; ${failures.length} failed: ${failures.join('; ')}`)
   process.exitCode = 1

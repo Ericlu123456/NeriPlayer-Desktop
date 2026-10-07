@@ -55,6 +55,8 @@ const HEARTBEAT_INTERVAL_MS = 22_000
 const PAUSED_HEARTBEAT_INTERVAL_MS = 25_000
 // listener 侧存活探测间隔（房主走 HEARTBEAT，听众用 ping 保活半开连接检测）
 const LISTENER_PING_INTERVAL_MS = 20_000
+// ping 发出后这么久仍没收到任何消息就认为连接已断（对齐 Android LISTEN_TOGETHER_SOCKET_RESPONSE_TIMEOUT_MS）
+const SOCKET_RESPONSE_TIMEOUT_MS = 35_000
 // 已处理转发请求 eventId 上限（对齐 Android ForwardedRequestDeduper 语义）
 const HANDLED_FORWARDED_EVENT_LIMIT = 256
 const HANDLED_FORWARDED_REQUESTER_LIMIT = 64
@@ -119,6 +121,9 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
   let _hostControlledOffline = false
   // 正在应答链接请求的曲目，同一首歌的重复请求只应答一次
   const _linkAnswers = new Set<string>()
+  // 半开连接检测（对齐 Android SocketHealthOwner）：最后一次收到任何消息、最后一次发 ping 的时间
+  let _lastSocketMessageAt = 0
+  let _pingSentAt = 0
   // 会话代际：leaveRoom 后递增，让在途的延迟回调失效，不再操作播放器
   let _sessionGeneration = 0
   // 出站事件排序字段：实例标识会话内生成一次，序号单调递增（对齐 Android EventFactory）
@@ -413,6 +418,8 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
     _serverClockOffsetMs = 0
     _pingSentElapsed.clear()
     _sessionBaseUrl = null
+    _lastSocketMessageAt = 0
+    _pingSentAt = 0
     _lastRequestedLinkStableKey = null
     _lastRequestedLinkAt = 0
   }
@@ -504,6 +511,7 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
 
   // 消息处理
   function handleSocketMessage(envelope: ListenTogetherSocketEnvelope) {
+    _lastSocketMessageAt = Date.now()
     if (envelope.state && envelope.state.roomId !== roomId.value) return
     // 用服务端时间戳更新时钟偏移（每条带 nowMs 的消息都更新并平滑，对齐 Android SocketHealthOwner）
     if (envelope.type !== 'np_pong') sampleServerClock(envelope.nowMs)
@@ -1729,9 +1737,16 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
   // 定期 ping 也用于估计时钟偏移，房主和听众都需要保持探测
   function startListenerPing() {
     stopListenerPing()
+    _pingSentAt = 0
     _listenerPingTimer = setInterval(() => {
       if (connectionState.value !== 'connected') return
+      // 上一个 ping 发出后还没收到任何消息：35s 内先等着，不加发；超过就当连接已经半开，主动重连
+      if (_pingSentAt > 0 && _lastSocketMessageAt <= _pingSentAt) {
+        if (Date.now() - _pingSentAt >= SOCKET_RESPONSE_TIMEOUT_MS) handleUnresponsiveSocket()
+        return
+      }
       const sentAt = Date.now()
+      _pingSentAt = sentAt
       _pingSentElapsed.set(sentAt, performance.now())
       while (_pingSentElapsed.size > 8) _pingSentElapsed.delete(_pingSentElapsed.keys().next().value!)
       void invoke('lt_send_ping', { t: sentAt, legacy: _legacyPing }).catch(() => {})
@@ -1743,6 +1758,17 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
       clearInterval(_listenerPingTimer)
       _listenerPingTimer = null
     }
+  }
+
+  /** TCP 要很久才会发现半开连接，这期间界面会一直显示已连接却收不到任何同步 */
+  function handleUnresponsiveSocket() {
+    log.warn('listen together socket stopped responding, reconnecting')
+    connectionState.value = 'disconnected'
+    _activeWsConnectionId = null
+    stopListenerPing()
+    stopHeartbeat()
+    setSyncRate(null)
+    if (roomId.value) scheduleReconnect()
   }
 
   // 断线重连
