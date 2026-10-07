@@ -1,7 +1,7 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, FromSample, SampleFormat, SizedSample, Stream, StreamConfig};
 use std::collections::VecDeque;
-use std::io::Cursor;
+use std::io::{Cursor, Read};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc;
@@ -11,7 +11,9 @@ use std::time::{Duration, Instant};
 
 use crate::audio::analyzer::{AudioAnalyzer, SharedAudioLevel};
 use crate::audio::buffered::PcmRing;
+use crate::audio::decoder::{self, AudioDecoder};
 use crate::audio::effects::{AudioEffectsParams, EqualizerSource, LoudnessSource};
+use crate::audio::ffmpeg::ByteInput;
 use crate::audio::growing::GrowingAudioReader;
 use crate::audio::metrics::{
     self, CommandStamps, FirstFrameProbe, MetricsReporter, OutputMetrics, StartKind,
@@ -139,9 +141,28 @@ impl AudioSource {
         }
     }
 
+    /// 虚拟 body 只能交给 symphonia 解；需要 FFmpeg 的流（如 B 站 E-AC-3）改用 FFmpeg 按 sidx 定位
     fn prefers_remote_virtual_body_seek(&self) -> bool {
         matches!(self, Self::Remote(reader, _) if reader.prefers_virtual_body_seek())
+            && !self.decodes_with_ffmpeg()
     }
+
+    fn decodes_with_ffmpeg(&self) -> bool {
+        let Self::Remote(reader, _) = self else { return false };
+        reader.header_bytes().and_then(|header| decoder::sniff(&header)).is_some()
+            && crate::audio::ffmpeg::runtime().is_ok()
+    }
+}
+
+/// 读本地文件开头一段用于嗅探编码；读不了时交给后续的打开流程报告错误
+fn sniff_file(path: &Path) -> Option<decoder::SniffedCodec> {
+    let mut header = Vec::with_capacity(decoder::SNIFF_BYTES);
+    std::fs::File::open(path)
+        .ok()?
+        .take(decoder::SNIFF_BYTES as u64)
+        .read_to_end(&mut header)
+        .ok()?;
+    decoder::sniff(&header)
 }
 
 #[derive(Clone, Copy)]
@@ -622,6 +643,65 @@ struct FrameResampler {
     initialized: bool,
     source_ended: bool,
     finished: bool,
+    downmix: Option<Downmix>,
+    /// 下混系数是按几路输出算的；0 表示还没算过
+    downmix_output: usize,
+}
+
+/// 源声道多于输出时的下混系数（按 WAVE 标准声道顺序推断布局）
+///
+/// 旧做法只取前两个声道：5.1 的中置（对白）、环绕和低频全部丢失。
+/// 这里按 ITU-R BS.775 取系数（低频不计入），再整体缩放到每路输出系数和不超过 1。
+struct Downmix {
+    /// 按输出声道排列，每路一组源声道系数
+    weights: Vec<f32>,
+}
+
+impl Downmix {
+    fn new(source_channels: usize, output_channels: usize) -> Option<Self> {
+        if source_channels <= output_channels.max(2) || !(1..=2).contains(&output_channels) {
+            return None;
+        }
+        const SIDE: f32 = std::f32::consts::FRAC_1_SQRT_2;
+        // (左, 右) 系数；顺序与 WAVE/FLAC 的默认声道布局一致
+        let roles: &[(f32, f32)] = match source_channels {
+            3 => &[(1.0, 0.0), (0.0, 1.0), (SIDE, SIDE)],
+            4 => &[(1.0, 0.0), (0.0, 1.0), (SIDE, 0.0), (0.0, SIDE)],
+            5 => &[(1.0, 0.0), (0.0, 1.0), (SIDE, SIDE), (SIDE, 0.0), (0.0, SIDE)],
+            6 => &[(1.0, 0.0), (0.0, 1.0), (SIDE, SIDE), (0.0, 0.0), (SIDE, 0.0), (0.0, SIDE)],
+            7 => &[(1.0, 0.0), (0.0, 1.0), (SIDE, SIDE), (0.0, 0.0), (0.5, 0.5), (SIDE, 0.0), (0.0, SIDE)],
+            _ => &[(1.0, 0.0), (0.0, 1.0), (SIDE, SIDE), (0.0, 0.0), (SIDE, 0.0), (0.0, SIDE), (SIDE, 0.0), (0.0, SIDE)],
+        };
+        let role = |channel: usize| roles.get(channel).copied().unwrap_or((0.5, 0.5));
+        let mut weights = Vec::with_capacity(source_channels * output_channels);
+        for output in 0..output_channels {
+            for channel in 0..source_channels {
+                let (left, right) = role(channel);
+                // 单声道取立体声下混的平均，与立体声转单声道的处理一致
+                weights.push(match (output_channels, output) {
+                    (1, _) => (left + right) * 0.5,
+                    (_, 0) => left,
+                    _ => right,
+                });
+            }
+        }
+        let largest = weights
+            .chunks(source_channels)
+            .map(|row| row.iter().map(|weight| weight.abs()).sum::<f32>())
+            .fold(0.0f32, f32::max);
+        if largest > 1.0 {
+            weights.iter_mut().for_each(|weight| *weight /= largest);
+        }
+        Some(Self { weights })
+    }
+
+    fn sample(&self, frame: &[f32], output_channel: usize) -> f32 {
+        let source_channels = frame.len();
+        self.weights
+            .chunks(source_channels)
+            .nth(output_channel)
+            .map_or(0.0, |row| row.iter().zip(frame).map(|(weight, sample)| weight * sample).sum())
+    }
 }
 
 impl FrameResampler {
@@ -637,6 +717,15 @@ impl FrameResampler {
             initialized: false,
             source_ended: false,
             finished: false,
+            downmix: None,
+            downmix_output: 0,
+        }
+    }
+
+    fn mixed_sample(&self, frame: &[f32], channel: usize, output_channels: usize) -> f32 {
+        match &self.downmix {
+            Some(downmix) => downmix.sample(frame, channel),
+            None => channel_sample(frame, channel, output_channels),
         }
     }
 
@@ -673,9 +762,13 @@ impl FrameResampler {
 
         let phase = self.phase as f32;
         let output_channels = output.len();
+        if self.downmix_output != output_channels {
+            self.downmix_output = output_channels;
+            self.downmix = Downmix::new(self.current.len(), output_channels);
+        }
         for (channel, sample) in output.iter_mut().enumerate() {
-            let current = channel_sample(&self.current, channel, output_channels);
-            let next = channel_sample(&self.next, channel, output_channels);
+            let current = self.mixed_sample(&self.current, channel, output_channels);
+            let next = self.mixed_sample(&self.next, channel, output_channels);
             *sample = current + (next - current) * phase;
         }
 
@@ -2603,18 +2696,27 @@ fn make_decoder_for_position(
     source: &AudioSource,
     start_position_ms: u64,
     use_byte_seek: bool,
-) -> Result<Box<SymphoniaAudioDecoder>, String> {
+) -> Result<Box<dyn AudioDecoder>, String> {
     match source {
-        AudioSource::Bytes(data, _) => SymphoniaAudioDecoder::new(
-            Box::new(Cursor::new(Arc::clone(data))),
-            None,
-        )
-        .map(Box::new),
-        AudioSource::File(path, _) => SymphoniaAudioDecoder::new_file(Path::new(path))
-            .map(Box::new),
+        AudioSource::Bytes(data, _) => decoder::open_decoder(
+            decoder::sniff(&data[..data.len().min(decoder::SNIFF_BYTES)]),
+            || SymphoniaAudioDecoder::new(Box::new(Cursor::new(Arc::clone(data))), None),
+            || Ok(Box::new(Cursor::new(Arc::clone(data))) as Box<dyn ByteInput>),
+        ),
+        AudioSource::File(path, _) => decoder::open_decoder(
+            sniff_file(Path::new(path)),
+            || SymphoniaAudioDecoder::new_file(Path::new(path)),
+            || std::fs::File::open(path).map(|file| Box::new(file) as Box<dyn ByteInput>),
+        ),
         AudioSource::Growing(reader, _, _) => {
-            SymphoniaAudioDecoder::new(Box::new(reader.clone()), None)
-                .map(Box::new)
+            // 边下边播只嗅探已经到手的部分：开头一次读不会等待后续下载
+            let mut header = vec![0u8; decoder::SNIFF_BYTES];
+            let available = reader.clone().read(&mut header).unwrap_or(0);
+            decoder::open_decoder(
+                decoder::sniff(&header[..available]),
+                || SymphoniaAudioDecoder::new(Box::new(reader.clone()), None),
+                || Ok(Box::new(reader.clone()) as Box<dyn ByteInput>),
+            )
         }
         AudioSource::Remote(reader, _) => {
             if use_byte_seek && start_position_ms > 0 {
@@ -2626,8 +2728,16 @@ fn make_decoder_for_position(
             } else {
                 // 普通远程：demuxer open 可隐藏 seekable；无虚拟 body
                 reader.clear_virtual_body();
-                let decoder = SymphoniaAudioDecoder::new_remote(reader.clone())?;
-                Ok(Box::new(decoder))
+                decoder::open_decoder(
+                    reader.header_bytes().and_then(|header| decoder::sniff(&header)),
+                    || SymphoniaAudioDecoder::new_remote(reader.clone()),
+                    || {
+                        // 分片 MP4 打开期间暂停了预取（防 symphonia 顺着 moof 链读完整个文件），
+                        // FFmpeg 按 sidx 定位不需要这个限制，交出去之前恢复
+                        reader.finish_demuxer_open();
+                        Ok(Box::new(reader.clone()) as Box<dyn ByteInput>)
+                    },
+                )
             }
         }
     }
@@ -3495,6 +3605,30 @@ mod tests {
     fn duration_to_frames_matches_android_buffer_thresholds() {
         assert_eq!(duration_to_frames(Duration::from_millis(800), 48_000), 38_400);
         assert_eq!(duration_to_frames(Duration::from_millis(1_500), 48_000), 72_000);
+    }
+
+    #[test]
+    fn surround_downmix_keeps_center_dialogue_and_never_clips() {
+        // 5.1 只有中置有信号：旧做法只取前两个声道，对白会整段消失
+        let center_only = [0.0, 0.0, 0.5, 0.0, 0.0, 0.0];
+        let stereo = super::Downmix::new(6, 2).expect("5.1 to stereo needs a downmix");
+        let (left, right) = (stereo.sample(&center_only, 0), stereo.sample(&center_only, 1));
+        assert!(left > 0.1 && (left - right).abs() < 1e-6, "L={left} R={right}");
+
+        let lfe_only = [0.0, 0.0, 0.0, 0.9, 0.0, 0.0];
+        assert_eq!(stereo.sample(&lfe_only, 0), 0.0, "ITU 默认下混不计入低频声道");
+
+        let full_scale = [1.0f32; 6];
+        for output in 0..2 {
+            assert!(stereo.sample(&full_scale, output) <= 1.0 + 1e-6, "满幅输入下混后不得削波");
+        }
+        let mono = super::Downmix::new(6, 1).expect("5.1 to mono needs a downmix");
+        assert!(mono.sample(&center_only, 0) > 0.1);
+        assert!(mono.sample(&full_scale, 0) <= 1.0 + 1e-6);
+
+        assert!(super::Downmix::new(2, 2).is_none(), "立体声不需要下混");
+        assert!(super::Downmix::new(2, 1).is_none(), "立体声转单声道仍按平均处理");
+        assert!(super::Downmix::new(6, 6).is_none(), "输出声道够多时直接映射");
     }
 
     #[test]

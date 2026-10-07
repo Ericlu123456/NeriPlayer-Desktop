@@ -1160,6 +1160,15 @@ pub async fn get_playback_audio_info(
     }).await
 }
 
+/// 当前能解码的编码：前端据此决定能否选择 Opus、杜比等音轨
+#[tauri::command]
+pub async fn get_decoder_capabilities() -> AppResult<crate::audio::decoder::DecoderCapabilities> {
+    // 首次调用可能要加载 FFmpeg 动态库，不能占用异步运行时的线程
+    tokio::task::spawn_blocking(crate::audio::decoder::decoder_capabilities)
+        .await
+        .map_err(|error| AppError::Audio(format!("Could not query decoder capabilities: {error}")))
+}
+
 #[tauri::command]
 pub async fn set_speed(speed: f32, state: State<'_, AppState>) -> AppResult<()> {
     state.player.lock().set_speed(speed);

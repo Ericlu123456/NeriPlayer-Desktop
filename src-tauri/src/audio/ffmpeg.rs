@@ -286,7 +286,8 @@ unsafe extern "C" fn io_read(opaque: *mut c_void, buffer: *mut u8, size: i32) ->
         let target = std::slice::from_raw_parts_mut(buffer, length);
         match state.input.read(target) {
             Ok(read) => i32::try_from(read).unwrap_or(IO_ERROR),
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => {
+            // 远程读取器取消时报 Interrupted，边下边播的读取器报普通错误，两者都要按取消处理
+            Err(error) if error.kind() == io::ErrorKind::Interrupted || state.input.interrupted() => {
                 state.interrupted = true;
                 IO_INTERRUPTED
             }

@@ -88,6 +88,16 @@ fn main() {
             // 日志插件初始化时把 max_level 放到了 Trace，这里收回到设置的级别
             neri_player_desktop::logging::set_runtime_level(log_cfg.level);
 
+            // 后台预加载 FFmpeg：第一首杜比或 Opus 曲目起播时就不用再等动态库加载
+            let preload = std::thread::Builder::new()
+                .name("ffmpeg-preload".into())
+                .spawn(|| {
+                    let _ = neri_player_desktop::audio::ffmpeg::runtime();
+                });
+            if let Err(error) = preload {
+                log::warn!(target: "audio-decoder", "could not start FFmpeg preloading: {error}");
+            }
+
             // macOS 使用原生红绿灯（Overlay 标题栏）；Windows/Linux 移除原生装饰，
             // 由前端 TitleBar.vue 自绘窗口控制。配置里 decorations 默认为 true 以
             // 启用 macOS 的 titleBarStyle Overlay，其余平台在此运行时关闭。
@@ -455,6 +465,7 @@ fn main() {
             local_files_cmd::get_local_audio_info,
             player_cmd::release_audio_file,
             player_cmd::get_playback_audio_info,
+            player_cmd::get_decoder_capabilities,
             library_cmd::list_playlists,
             library_cmd::get_playlist_usage_stats,
             library_cmd::record_playlist_open,

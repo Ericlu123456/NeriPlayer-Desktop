@@ -349,6 +349,17 @@ impl MediaSource for GrowingAudioReader {
     }
 }
 
+impl crate::audio::ffmpeg::ByteInput for GrowingAudioReader {
+    // 下载完成前不报长度：否则解封装器会去读文件尾（如 MP3 的 ID3v1），阻塞到整首下完
+    fn byte_len(&mut self) -> Option<u64> {
+        self.known_byte_len()
+    }
+
+    fn interrupted(&self) -> bool {
+        self.is_cancelled() || self.inner.aborted.load(Ordering::Acquire)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::GrowingAudioBuffer;

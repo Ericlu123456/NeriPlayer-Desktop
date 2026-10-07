@@ -2243,6 +2243,17 @@ impl MediaSource for RemoteAudioSource {
     }
 }
 
+impl crate::audio::ffmpeg::ByteInput for RemoteAudioSource {
+    // FFmpeg 靠 sidx/Cues 定位，不会像 symphonia 那样扫描全部顶层 atom，可以直接给出总长
+    fn byte_len(&mut self) -> Option<u64> {
+        Some(self.logical_len())
+    }
+
+    fn interrupted(&self) -> bool {
+        self.read_cancelled()
+    }
+}
+
 fn is_fragmented_mp4_url(value: &str) -> bool {
     url::Url::parse(value)
         .ok()
@@ -2318,18 +2329,34 @@ fn detect_fragmented_mp4(data: &[u8]) -> bool {
 #[serde(rename_all = "camelCase")]
 pub struct SourceAudioInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
-    sample_rate_hz: Option<u32>,
+    pub(crate) sample_rate_hz: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    channel_count: Option<u16>,
+    pub(crate) channel_count: Option<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    bit_depth: Option<u32>,
+    pub(crate) bit_depth: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    codec: Option<String>,
+    pub(crate) codec: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    bitrate: Option<u32>,
+    pub(crate) bitrate: Option<u32>,
 }
 
 impl SourceAudioInfo {
+    pub(crate) fn from_parts(
+        sample_rate_hz: Option<u32>,
+        channel_count: Option<u16>,
+        bit_depth: Option<u32>,
+        codec: Option<String>,
+        bitrate_kbps: Option<u32>,
+    ) -> Self {
+        Self {
+            sample_rate_hz: sample_rate_hz.filter(|value| *value > 0),
+            channel_count: channel_count.filter(|value| *value > 0),
+            bit_depth: bit_depth.filter(|value| *value > 0),
+            codec: codec.filter(|value| !value.is_empty()),
+            bitrate: bitrate_kbps.filter(|value| *value > 0),
+        }
+    }
+
     pub(crate) fn with_encoded_bitrate(mut self, byte_length: Option<u64>, duration: Option<Duration>) -> Self {
         if self.bitrate.is_none() {
             if let (Some(bytes), Some(duration)) = (byte_length.filter(|bytes| *bytes > 0), duration.filter(|duration| !duration.is_zero())) {

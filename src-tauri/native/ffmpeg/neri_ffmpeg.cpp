@@ -381,7 +381,8 @@ void build_downmix_matrix(NeriFfDecoder* decoder, const AVChannelLayout& source)
         channel_weights(api.av_channel_layout_channel_from_index(layout, static_cast<unsigned>(index)),
                         &left, &right);
         if (decoder->output_channels == 1) {
-            decoder->matrix[0][index] = left > right ? left : right;
+            // 单声道取立体声下混的平均
+            decoder->matrix[0][index] = (left + right) * 0.5f;
         } else {
             decoder->matrix[0][index] = left;
             decoder->matrix[1][index] = right;

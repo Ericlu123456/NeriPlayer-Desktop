@@ -1,5 +1,6 @@
 pub mod analyzer;
 pub mod buffered;
+pub mod decoder;
 pub mod effects;
 pub mod ffmpeg;
 pub mod growing;
