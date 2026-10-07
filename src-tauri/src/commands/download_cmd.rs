@@ -276,6 +276,64 @@ fn collapse_empty_name_separators(s: &str) -> String {
         .trim()
         .to_string()
 }
+/// 按文件头认出下载下来的音频容器，返回对应扩展名；认不出返回 None
+///
+/// CDN 的 Content-Type 不可靠：网易云把 FLAC 标成 audio/mpeg，按它命名会把 FLAC 存成 .mp3。
+fn downloaded_audio_extension(path: &std::path::Path) -> Option<&'static str> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut head = [0u8; 64];
+    let read = file.read(&mut head).ok()?;
+    let mut head = &head[..read];
+    let mut skipped = [0u8; 64];
+    // ID3v2 标签后面才是真正的音频：MP3 常见，FLAC 前面偶尔也带
+    if head.len() >= 10 && &head[..3] == b"ID3" {
+        let size = head[6..10]
+            .iter()
+            .fold(0u64, |size, byte| (size << 7) | u64::from(byte & 0x7f));
+        let footer = if head[5] & 0x10 != 0 { 10 } else { 0 };
+        file.seek(SeekFrom::Start(10 + size + footer)).ok()?;
+        let read = file.read(&mut skipped).ok()?;
+        head = &skipped[..read];
+        if head.len() >= 4 && &head[..4] == b"fLaC" {
+            return Some("flac");
+        }
+        return (head.len() >= 2 && head[0] == 0xff && head[1] & 0xe0 == 0xe0).then_some("mp3");
+    }
+    let starts = |magic: &[u8]| head.len() >= magic.len() && &head[..magic.len()] == magic;
+    let at = |offset: usize, magic: &[u8]| {
+        head.len() >= offset + magic.len() && &head[offset..offset + magic.len()] == magic
+    };
+    if starts(b"fLaC") {
+        Some("flac")
+    } else if at(4, b"ftyp") {
+        Some("m4a")
+    } else if starts(b"OggS") {
+        Some(if head.windows(8).any(|window| window == b"OpusHead") { "opus" } else { "ogg" })
+    } else if starts(b"RIFF") && at(8, b"WAVE") {
+        Some("wav")
+    } else if starts(b"FORM") && (at(8, b"AIFF") || at(8, b"AIFC")) {
+        Some("aiff")
+    } else if starts(&[0x1a, 0x45, 0xdf, 0xa3]) {
+        Some("webm")
+    } else if starts(b"MAC ") {
+        Some("ape")
+    } else if starts(b"wvpk") {
+        Some("wv")
+    } else if starts(b"DSD ") {
+        Some("dsf")
+    } else if starts(b"FRM8") {
+        Some("dff")
+    } else if head.len() >= 2 && head[0] == 0xff && head[1] & 0xf6 == 0xf0 {
+        // ADTS（AAC）：12 位同步字、layer 固定为 0
+        Some("aac")
+    } else if head.len() >= 2 && head[0] == 0xff && head[1] & 0xe0 == 0xe0 {
+        Some("mp3")
+    } else {
+        None
+    }
+}
+
 fn ext_from_content_type(content_type: &str) -> &str {
     if content_type.contains("mp4") || content_type.contains("m4a") || content_type.contains("aac")
     {
@@ -720,6 +778,17 @@ fn reserve_download_path(
     base_name: &str,
     ext: &str,
 ) -> AppResult<(PathBuf, PathBuf)> {
+    reserve_download_path_replacing(dir, base_name, ext, None)
+}
+
+/// 保留按主文件名生效（封面、歌词按它命名），与扩展名无关。改扩展名重新保留时
+/// 传入本任务原有的保留标记，它不算碰撞，否则同一首歌会被挤成 "(2)"
+fn reserve_download_path_replacing(
+    dir: &std::path::Path,
+    base_name: &str,
+    ext: &str,
+    own_reservation: Option<&std::path::Path>,
+) -> AppResult<(PathBuf, PathBuf)> {
     static LOCK: std::sync::OnceLock<parking_lot::Mutex<()>> = std::sync::OnceLock::new();
     let _guard = LOCK.get_or_init(|| parking_lot::Mutex::new(())).lock();
     let mut file_path = dir.join(format!("{base_name}.{ext}"));
@@ -730,6 +799,7 @@ fn reserve_download_path(
             || std::fs::read_dir(dir).is_ok_and(|entries| entries.flatten().any(|entry| {
                 let candidate = entry.path();
                 candidate.extension().is_some_and(|ext| ext == "reserve")
+                    && own_reservation != Some(candidate.as_path())
                     && candidate.file_stem().map(std::path::Path::new)
                         .and_then(std::path::Path::file_stem) == file_path.file_stem()
             }))
@@ -1425,28 +1495,35 @@ async fn perform_download(
     } else {
         duration_ms
     };
-    if stream_type == YtStreamType::Hls {
-        let final_target =
-            crate::audio::hls::detect_hls_audio_extension(&part_path).and_then(|actual_ext| {
-                if actual_ext == ext {
-                    Ok(None)
-                } else {
-                    reserve_download_path(&dir, &base_name, actual_ext).map(Some)
-                }
-            });
-        match final_target {
-            Ok(Some((actual_path, actual_reserve))) => {
-                artifacts.reservations.push(actual_reserve.clone());
-                let _ = tokio::fs::remove_file(&reserve_path).await;
-                file_path = actual_path;
-                reserve_path = actual_reserve;
-            }
-            Ok(None) => {}
-            Err(error) => {
-                let _ = tokio::fs::remove_file(&part_path).await;
-                let _ = tokio::fs::remove_file(&reserve_path).await;
-                return Err(error);
-            }
+    // 扩展名按实际内容定：HLS 拼出来的是 AAC 还是 MP4 要看分片；直链的 Content-Type 不可靠
+    let detected_ext = if stream_type == YtStreamType::Hls {
+        crate::audio::hls::detect_hls_audio_extension(&part_path).map(Some)
+    } else {
+        Ok(downloaded_audio_extension(&part_path))
+    };
+    let final_target = detected_ext.and_then(|actual_ext| match actual_ext {
+        Some(actual_ext) if actual_ext != ext => {
+            log::info!(
+                target: "download",
+                "download saved as .{actual_ext} by its content (content-type suggested .{ext})",
+            );
+            reserve_download_path_replacing(&dir, &base_name, actual_ext, Some(&reserve_path))
+                .map(Some)
+        }
+        _ => Ok(None),
+    });
+    match final_target {
+        Ok(Some((actual_path, actual_reserve))) => {
+            artifacts.reservations.push(actual_reserve.clone());
+            let _ = tokio::fs::remove_file(&reserve_path).await;
+            file_path = actual_path;
+            reserve_path = actual_reserve;
+        }
+        Ok(None) => {}
+        Err(error) => {
+            let _ = tokio::fs::remove_file(&part_path).await;
+            let _ = tokio::fs::remove_file(&reserve_path).await;
+            return Err(error);
         }
     }
     if cancel_flag.load(Ordering::Relaxed) {
@@ -2165,6 +2242,35 @@ mod tests {
         assert!(validate_download_audio(&path, None, None, 0, &AtomicBool::new(true)).is_err());
     }
 
+    /// 回归：网易云把 FLAC 标成 audio/mpeg，按 Content-Type 命名会把 FLAC 存成 .mp3
+    #[test]
+    fn downloads_are_named_by_their_content_not_the_content_type() {
+        let root = tempfile::tempdir().unwrap();
+        let flac: &[u8] = include_bytes!("../audio/fixtures/ffmpeg/flac-s16-stereo-0.5s.flac");
+        let mut tagged_flac = b"ID3\x04\x00\x00\x00\x00\x00\x0a".to_vec();
+        tagged_flac.extend([0u8; 10]);
+        tagged_flac.extend_from_slice(flac);
+        let mut ogg_opus = b"OggS\x00\x02".to_vec();
+        ogg_opus.extend([0u8; 22]);
+        ogg_opus.extend_from_slice(b"OpusHead\x01\x02");
+        let cases: [(&str, &[u8], Option<&str>); 9] = [
+            ("flac", flac, Some("flac")),
+            ("id3-flac", &tagged_flac, Some("flac")),
+            ("mp3", include_bytes!("../audio/fixtures/ffmpeg/mp3-stereo-1s.mp3"), Some("mp3")),
+            ("m4a", include_bytes!("../audio/fixtures/ffmpeg/aac-stereo-1s.m4a"), Some("m4a")),
+            ("webm", include_bytes!("../audio/fixtures/ffmpeg/opus-stereo-1s.webm"), Some("webm")),
+            ("wav", include_bytes!("../audio/fixtures/ffmpeg/pcm-s16-stereo-0.5s.wav"), Some("wav")),
+            ("adts", include_bytes!("../audio/fixtures/hls-silence.aac"), Some("aac")),
+            ("ogg-opus", &ogg_opus, Some("opus")),
+            ("html", b"<html>Access denied</html>", None),
+        ];
+        for (name, bytes, expected) in cases {
+            let path = root.path().join(format!("{name}.mp3.part"));
+            std::fs::write(&path, bytes).unwrap();
+            assert_eq!(downloaded_audio_extension(&path), expected, "{name}");
+        }
+    }
+
     /// 非法字符、控制字符替换为下划线，键盘可见字符原样保留
     #[test]
     fn sanitize_replaces_illegal_and_control_chars() {
@@ -2318,6 +2424,26 @@ mod tests {
         }
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 回归：按内容改扩展名时自己的 .mp3 保留不算碰撞，FLAC 不该被挤成 "(2)"
+    #[test]
+    fn correcting_the_extension_keeps_the_reserved_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_, mp3_reserve) = reserve_download_path(dir.path(), "Song", "mp3").unwrap();
+        let (flac, flac_reserve) =
+            reserve_download_path_replacing(dir.path(), "Song", "flac", Some(&mp3_reserve))
+                .unwrap();
+        assert_eq!(flac, dir.path().join("Song.flac"));
+        assert_eq!(flac_reserve, dir.path().join("Song.flac.reserve"));
+
+        // 别的任务的保留照样算碰撞
+        let (other, _) = reserve_download_path(dir.path(), "Tune", "mp3").unwrap();
+        assert_eq!(other, dir.path().join("Tune.mp3"));
+        let (_, own) = reserve_download_path(dir.path(), "Tune (2)", "mp3").unwrap();
+        let (moved, _) =
+            reserve_download_path_replacing(dir.path(), "Tune", "flac", Some(&own)).unwrap();
+        assert_eq!(moved, dir.path().join("Tune (2).flac"));
     }
 
     #[test]
