@@ -213,32 +213,25 @@ function openPlatformPlaylist(pl: any) {
 // 启动时恢复上次扫描 + 拉取推荐
 onMounted(() => {
   if (library.tracks.length === 0) library.restoreLastScan()
-  if (auth.netease.loggedIn) {
-    if (!recommend.userPlaylists['netease']?.length) recommend.fetchUserPlaylists('netease')
-  }
-  if (auth.bilibili.loggedIn && !recommend.userPlaylists.bilibili?.length) {
-    recommend.fetchUserPlaylists('bilibili')
-  }
+  if (auth.netease.loggedIn) void recommend.ensureUserPlaylists('netease')
+  if (auth.bilibili.loggedIn) void recommend.ensureUserPlaylists('bilibili')
 })
 
-// 登录状态变化时刷新推荐
+// 登录状态变化时刷新推荐；歌单先显示缓存，本次启动第一次用到时在后台刷新
 watch(() => auth.netease.loggedIn, (loggedIn) => {
-  if (loggedIn) {
-    recommend.fetchUserPlaylists('netease')
-  }
+  if (loggedIn) void recommend.ensureUserPlaylists('netease')
 })
 
 watch(() => auth.bilibili.loggedIn, (loggedIn) => {
-  if (loggedIn) recommend.fetchUserPlaylists('bilibili')
+  if (loggedIn) void recommend.ensureUserPlaylists('bilibili')
 })
 
-watch([showYoutubeFeed, () => auth.youtube], ([enabled, account], previous) => {
-  const accountChanged = Boolean(previous?.[1] && previous[1] !== account)
-  if (accountChanged) recommend.invalidatePlatform('youtube')
-  if (enabled) {
-    if (!recommend.userPlaylists.youtube?.length) recommend.fetchUserPlaylists('youtube')
-    if (recommend.homeFeedShelves.length === 0) recommend.fetchHomeFeed()
-  }
+// 换号由 auth 的 notifyAuthChanged 作废缓存。这里不能拿账号对象换没换来判断：
+// 启动时的登录态检查和资料刷新都会换掉它，那样每次启动都会清空缓存的 YouTube 歌单
+watch([showYoutubeFeed, () => auth.youtube], ([enabled]) => {
+  if (!enabled) return
+  void recommend.ensureUserPlaylists('youtube')
+  if (recommend.homeFeedShelves.length === 0) recommend.fetchHomeFeed()
 }, { immediate: true })
 
 // 通知历史

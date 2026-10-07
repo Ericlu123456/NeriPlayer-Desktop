@@ -211,6 +211,12 @@
     "tab_netease": "NetEase",
     "tab_netease_playlists_short": "Playlists",
     "tab_netease_albums_short": "Albums",
+    "cloud_loading": "Loading your cloud playlists…",
+    "cloud_load_failed": "Couldn't load your cloud playlists",
+    "cloud_albums_loading": "Loading your saved albums…",
+    "cloud_albums_load_failed": "Couldn't load your saved albums",
+    "cloud_refreshing": "Refreshing",
+    "cloud_refresh_failed": "Couldn't refresh. Showing the last loaded list",
     "favorite_empty_songs": "No tracks synced for this favorite yet",
     "playback_stats_entry": "Playback stats",
     "tab_search_hint": "Search"

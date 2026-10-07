@@ -211,6 +211,12 @@
     "tab_netease": "NetEase",
     "tab_netease_playlists_short": "プレイリスト",
     "tab_netease_albums_short": "アルバム",
+    "cloud_loading": "クラウドのプレイリストを読み込んでいます…",
+    "cloud_load_failed": "クラウドのプレイリストを読み込めませんでした",
+    "cloud_albums_loading": "保存したアルバムを読み込んでいます…",
+    "cloud_albums_load_failed": "保存したアルバムを読み込めませんでした",
+    "cloud_refreshing": "更新中",
+    "cloud_refresh_failed": "更新できませんでした。前回の内容を表示しています",
     "favorite_empty_songs": "このお気に入りの曲はまだ同期されていません",
     "playback_stats_entry": "再生統計",
     "tab_search_hint": "検索"

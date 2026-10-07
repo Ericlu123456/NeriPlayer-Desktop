@@ -6,8 +6,9 @@ defineOptions({ name: 'LibraryView' })
 import { useI18n } from 'vue-i18n'
 import LocalFilesView from '@/views/LocalFilesView.vue'
 import { normalizeTrack, usePlayerStore, type TrackInfo } from '@/stores/player'
-import { useRecommendStore } from '@/stores/recommend'
+import { useRecommendStore, type CloudListStatus } from '@/stores/recommend'
 import { AUTH_CHANGED_EVENT, useAuthStore } from '@/stores/auth'
+import CloudListState from '@/components/CloudListState.vue'
 import DownloadsView from '@/views/DownloadsView.vue'
 import { useToastStore } from '@/stores/toast'
 import { convertFileSrc, invoke } from '@tauri-apps/api/core'
@@ -668,47 +669,61 @@ onMounted(loadFavorites)
 /// 挂载那一刻通常还是 false，判完就再没有东西重新触发，
 /// 表现就是「明明登录了，云端歌单一直空着」。
 /// 这里改成对（登录态 × 当前 tab）响应式求值，任一变化都会补拉。
-const inFlightPlatforms = new Set<string>()
-let albumsInFlight = false
+/// 有缓存时先显示缓存，本次启动第一次打开时在后台刷新；同一平台的请求由 store 合并。
+type CloudPlatform = 'netease' | 'bilibili' | 'youtube'
 
-function ensurePlatformData(platform: string, loaded: boolean, force = false) {
-  const loggedIn =
-    platform === 'netease' ? auth.netease.loggedIn
-    : platform === 'bilibili' ? auth.bilibili.loggedIn
-    : auth.youtube.loggedIn
-  if (!loggedIn) return
+function isCloudPlatform(platform: string): platform is CloudPlatform {
+  return platform === 'netease' || platform === 'bilibili' || platform === 'youtube'
+}
 
-  // 专辑拉取必须独立于歌单的 loaded 早退：歌单会从 localStorage 缓存
-  // 恢复（loaded 直接为 true），若专辑判断挂在早退之后，重启后永远走
-  // 不到，表现为「必须重新登录专辑才出现」
-  if (platform === 'netease' && (force || !recommend.userAlbums.length) && !albumsInFlight) {
-    albumsInFlight = true
-    void Promise.resolve(recommend.fetchUserAlbums())
-      .finally(() => { albumsInFlight = false })
-  }
-
-  if (!force && loaded) return
-  if (inFlightPlatforms.has(platform)) return
-
-  inFlightPlatforms.add(platform)
-  void Promise.resolve(recommend.fetchUserPlaylists(platform))
-    .finally(() => inFlightPlatforms.delete(platform))
+function ensurePlatformData(platform: string, force = false) {
+  if (!isCloudPlatform(platform) || !auth[platform].loggedIn) return
+  // 专辑和歌单分开判断：歌单从缓存恢复了，专辑也要照样补拉
+  if (platform === 'netease') void (force ? recommend.fetchUserAlbums() : recommend.ensureUserAlbums())
+  void (force ? recommend.fetchUserPlaylists(platform) : recommend.ensureUserPlaylists(platform))
 }
 
 function syncActiveTabData(force = false) {
   switch (activeTab.value) {
     case 3:
-      ensurePlatformData('netease', neteasePlaylists.value.length > 0, force)
+      ensurePlatformData('netease', force)
       break
     case 4:
-      ensurePlatformData('bilibili', biliPlaylists.value.length > 0, force)
+      ensurePlatformData('bilibili', force)
       break
     case 5:
-      ensurePlatformData('youtube', youtubePlaylists.value.length > 0, force)
+      ensurePlatformData('youtube', force)
       break
     default:
       break
   }
+}
+
+/// 登录态还没查回来时按「已登录」对待：有缓存就先显示，免得启动瞬间闪一下登录提示
+function cloudSignedIn(platform: CloudPlatform): boolean {
+  return !auth.statusChecked || auth[platform].loggedIn
+}
+
+/// 登录态检查返回之前还不知道要不要拉，按加载中显示，不先闪一下「暂无」
+const PENDING_AUTH: CloudListStatus = { loading: true, error: null }
+
+function cloudPlaylistStatus(platform: CloudPlatform): CloudListStatus | undefined {
+  return auth.statusChecked ? recommend.userPlaylistsStatus[platform] : PENDING_AUTH
+}
+
+const neteaseAlbumsStatus = computed(() => auth.statusChecked ? recommend.userAlbumsStatus : PENDING_AUTH)
+
+/// 网易云分类栏右侧的刷新状态：只在已有列表时显示，没有列表时由占位区显示
+const neteaseRefreshStatus = computed(() => {
+  if (neteaseCategory.value === 'albums') {
+    return recommend.userAlbums.length > 0 ? recommend.userAlbumsStatus : undefined
+  }
+  return neteasePlaylists.value.length > 0 ? recommend.userPlaylistsStatus.netease : undefined
+})
+
+function retryNeteaseRefresh() {
+  if (neteaseCategory.value === 'albums') void recommend.fetchUserAlbums()
+  else void recommend.fetchUserPlaylists('netease')
 }
 
 watch(
@@ -726,7 +741,7 @@ watch(
 function handleAuthChanged(event: Event) {
   const platform = (event as CustomEvent<{ platform?: string }>).detail?.platform
   if (!platform) return
-  ensurePlatformData(platform, false, true)
+  ensurePlatformData(platform, true)
   void loadFavorites()
 }
 
@@ -1163,12 +1178,13 @@ onUnmounted(() => {
           </span>
           <span>{{ category === 'playlists' ? t('library.tab_netease_playlists_short') : t('library.tab_netease_albums_short') }}</span>
         </button>
+        <CloudListState class="platform-sync" variant="banner" :status="neteaseRefreshStatus" @retry="retryNeteaseRefresh" />
       </div>
 
       <!-- 歌单 / 专辑分类切换同样走交叉淡入，与本地页保持一致 -->
       <Transition name="fade" mode="out-in">
       <div v-if="neteaseCategory === 'albums'" key="ne-albums" class="local-subview">
-        <TransitionGroup v-if="filteredNeteaseAlbums.length > 0" tag="div" name="lib-list" class="lib-list">
+        <TransitionGroup v-if="filteredNeteaseAlbums.length > 0 && cloudSignedIn('netease')" tag="div" name="lib-list" class="lib-list">
           <div
             v-for="album in filteredNeteaseAlbums"
             :key="album.id"
@@ -1193,19 +1209,33 @@ onUnmounted(() => {
             <span class="material-symbols-rounded" style="font-size: 18px; opacity: 0.3">chevron_right</span>
           </div>
         </TransitionGroup>
-        <div v-else-if="recommend.userAlbums.length > 0" class="empty-tab">
+        <div v-else-if="recommend.userAlbums.length > 0 && cloudSignedIn('netease')" class="empty-tab">
           <div class="empty-circle"><span class="material-symbols-rounded" style="font-size: 40px">search_off</span></div>
           <p class="empty-title">{{ t('player.no_results') }}</p>
         </div>
+        <CloudListState
+          v-else-if="cloudSignedIn('netease')"
+          variant="placeholder"
+          :status="neteaseAlbumsStatus"
+          :loading-text="t('library.cloud_albums_loading')"
+          :failed-text="t('library.cloud_albums_load_failed')"
+          @retry="recommend.fetchUserAlbums()"
+        >
+          <template #icon>
+            <div class="empty-circle"><span class="material-symbols-rounded" style="font-size: 40px">album</span></div>
+          </template>
+          <p class="empty-title">{{ t('library.empty_title', { type: t('library.albums') }) }}</p>
+          <p class="empty-desc">{{ t('library.empty_desc') }}</p>
+        </CloudListState>
         <div v-else class="empty-tab">
           <div class="empty-circle"><span class="material-symbols-rounded" style="font-size: 40px">album</span></div>
           <p class="empty-title">{{ t('library.empty_title', { type: t('library.albums') }) }}</p>
-          <p class="empty-desc">{{ t('library.empty_desc') }}</p>
+          <p class="empty-desc">{{ t('explore.login_for_playlists') }}</p>
         </div>
       </div>
 
       <div v-else key="ne-playlists" class="local-subview">
-      <TransitionGroup v-if="filteredNeteasePlaylists.length > 0" tag="div" name="lib-list" class="lib-list">
+      <TransitionGroup v-if="filteredNeteasePlaylists.length > 0 && cloudSignedIn('netease')" tag="div" name="lib-list" class="lib-list">
         <div
           v-for="npl in filteredNeteasePlaylists"
           :key="'ne-' + npl.id"
@@ -1229,10 +1259,21 @@ onUnmounted(() => {
           <span class="material-symbols-rounded" style="font-size: 18px; opacity: 0.3">chevron_right</span>
         </div>
       </TransitionGroup>
-      <div v-else-if="neteasePlaylists.length > 0" class="empty-tab">
+      <div v-else-if="neteasePlaylists.length > 0 && cloudSignedIn('netease')" class="empty-tab">
         <div class="empty-circle"><span class="material-symbols-rounded" style="font-size: 40px">search_off</span></div>
         <p class="empty-title">{{ t('player.no_results') }}</p>
       </div>
+      <CloudListState
+        v-else-if="cloudSignedIn('netease')"
+        variant="placeholder"
+        :status="cloudPlaylistStatus('netease')"
+        @retry="recommend.fetchUserPlaylists('netease')"
+      >
+        <template #icon>
+          <div class="empty-circle"><span class="material-symbols-rounded" style="font-size: 40px">cloud_queue</span></div>
+        </template>
+        <p class="empty-title">{{ t('explore.no_playlists') }}</p>
+      </CloudListState>
       <div v-else class="empty-tab">
         <div class="empty-circle"><span class="material-symbols-rounded" style="font-size: 40px">cloud_queue</span></div>
         <p class="empty-title">{{ t('explore.no_playlists') }}</p>
@@ -1244,13 +1285,19 @@ onUnmounted(() => {
 
     <!-- Tab: Bili 收藏夹 -->
     <div v-else-if="activeTab === 4" key="tab-bilibili" class="playlist-list">
-      <template v-if="biliPlaylists.length > 0">
+      <template v-if="biliPlaylists.length > 0 && cloudSignedIn('bilibili')">
         <div class="platform-summary bilibili">
           <span class="platform-icon-mask" style="mask-image: url('/icons/ic_bilibili.svg')"></span>
           <div>
             <div class="platform-title">{{ t('library.bilibili_favorites') }}</div>
             <div class="platform-desc">{{ t('player.video_count', { count: biliPlaylists.reduce((sum, p) => sum + (p.trackCount || 0), 0) }) }}</div>
           </div>
+          <CloudListState
+            class="platform-sync"
+            variant="banner"
+            :status="recommend.userPlaylistsStatus.bilibili"
+            @retry="recommend.fetchUserPlaylists('bilibili')"
+          />
         </div>
         <TransitionGroup tag="div" name="lib-list" class="lib-list">
         <div
@@ -1277,22 +1324,40 @@ onUnmounted(() => {
           <p class="empty-title">{{ t('player.no_results') }}</p>
         </div>
       </template>
+      <CloudListState
+        v-else-if="cloudSignedIn('bilibili')"
+        variant="placeholder"
+        :status="cloudPlaylistStatus('bilibili')"
+        @retry="recommend.fetchUserPlaylists('bilibili')"
+      >
+        <template #icon>
+          <div class="empty-circle platform-empty bilibili"><span class="platform-icon-mask" style="mask-image: url('/icons/ic_bilibili.svg')"></span></div>
+        </template>
+        <p class="empty-title">{{ t('library.bilibili_favorites') }}</p>
+        <p class="empty-desc">{{ t('explore.no_playlists') }}</p>
+      </CloudListState>
       <div v-else class="empty-tab">
         <div class="empty-circle platform-empty bilibili"><span class="platform-icon-mask" style="mask-image: url('/icons/ic_bilibili.svg')"></span></div>
         <p class="empty-title">{{ t('library.bilibili_favorites') }}</p>
-        <p class="empty-desc">{{ auth.bilibili.loggedIn ? t('explore.no_playlists') : t('explore.login_for_playlists') }}</p>
+        <p class="empty-desc">{{ t('explore.login_for_playlists') }}</p>
       </div>
     </div>
 
     <!-- Tab: YouTube Music 歌单 -->
     <div v-else-if="activeTab === 5" key="tab-youtube" class="playlist-list">
-      <template v-if="youtubePlaylists.length > 0">
+      <template v-if="youtubePlaylists.length > 0 && cloudSignedIn('youtube')">
         <div class="platform-summary youtube">
           <span class="platform-icon-mask" style="mask-image: url('/icons/ic_youtube.svg')"></span>
           <div>
             <div class="platform-title">YouTube Music</div>
             <div class="platform-desc">{{ t('library.playlist_count', { count: youtubePlaylists.length }) }}</div>
           </div>
+          <CloudListState
+            class="platform-sync"
+            variant="banner"
+            :status="recommend.userPlaylistsStatus.youtube"
+            @retry="recommend.fetchUserPlaylists('youtube')"
+          />
         </div>
         <TransitionGroup tag="div" name="lib-list" class="lib-list">
         <div
@@ -1323,10 +1388,22 @@ onUnmounted(() => {
           <p class="empty-title">{{ t('player.no_results') }}</p>
         </div>
       </template>
+      <CloudListState
+        v-else-if="cloudSignedIn('youtube')"
+        variant="placeholder"
+        :status="cloudPlaylistStatus('youtube')"
+        @retry="recommend.fetchUserPlaylists('youtube')"
+      >
+        <template #icon>
+          <div class="empty-circle platform-empty youtube"><span class="platform-icon-mask" style="mask-image: url('/icons/ic_youtube.svg')"></span></div>
+        </template>
+        <p class="empty-title">YouTube Music</p>
+        <p class="empty-desc">{{ t('explore.no_playlists') }}</p>
+      </CloudListState>
       <div v-else class="empty-tab">
         <div class="empty-circle platform-empty youtube"><span class="platform-icon-mask" style="mask-image: url('/icons/ic_youtube.svg')"></span></div>
         <p class="empty-title">YouTube Music</p>
-        <p class="empty-desc">{{ auth.youtube.loggedIn ? t('explore.no_playlists') : t('explore.login_for_playlists') }}</p>
+        <p class="empty-desc">{{ t('explore.login_for_playlists') }}</p>
       </div>
     </div>
     </Transition>
@@ -1923,6 +2000,13 @@ onUnmounted(() => {
   margin-top: 2px;
   font-size: 12px;
   color: var(--md-on-surface-variant);
+}
+
+/* 云端列表的刷新状态贴在标题行右侧，出现和消失都不挤动下面的列表 */
+.platform-sync {
+  margin-left: auto;
+  flex-shrink: 0;
+  align-self: center;
 }
 
 .empty-circle.platform-empty {

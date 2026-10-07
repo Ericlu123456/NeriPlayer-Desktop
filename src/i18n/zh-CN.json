@@ -211,6 +211,12 @@
     "tab_netease": "网易云",
     "tab_netease_playlists_short": "歌单",
     "tab_netease_albums_short": "专辑",
+    "cloud_loading": "正在加载云端歌单…",
+    "cloud_load_failed": "云端歌单加载失败",
+    "cloud_albums_loading": "正在加载收藏的专辑…",
+    "cloud_albums_load_failed": "收藏的专辑加载失败",
+    "cloud_refreshing": "正在刷新",
+    "cloud_refresh_failed": "刷新失败，显示的是上次的结果",
     "favorite_empty_songs": "这个收藏还没有同步到曲目",
     "playback_stats_entry": "播放统计",
     "tab_search_hint": "搜索"

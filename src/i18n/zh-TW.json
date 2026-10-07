@@ -211,6 +211,12 @@
     "tab_netease": "網易雲",
     "tab_netease_playlists_short": "歌單",
     "tab_netease_albums_short": "專輯",
+    "cloud_loading": "正在載入雲端歌單…",
+    "cloud_load_failed": "雲端歌單載入失敗",
+    "cloud_albums_loading": "正在載入收藏的專輯…",
+    "cloud_albums_load_failed": "收藏的專輯載入失敗",
+    "cloud_refreshing": "正在重新整理",
+    "cloud_refresh_failed": "重新整理失敗，顯示的是上次的結果",
     "favorite_empty_songs": "這個收藏還沒有同步到曲目",
     "playback_stats_entry": "播放統計",
     "tab_search_hint": "搜尋"

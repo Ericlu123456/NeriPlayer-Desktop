@@ -47,6 +47,13 @@ export interface HomeSongSection {
   error: string | null
 }
 
+/** 云端列表（用户歌单、收藏专辑）的拉取状态；有缓存时 loading 表示在后台刷新 */
+export interface CloudListStatus {
+  loading: boolean
+  /** 最近一次拉取失败的原因，成功后清空 */
+  error: string | null
+}
+
 type HomeSongSectionKey = 'hot' | 'radar'
 
 const HOME_SEARCH_KEYWORDS: Record<HomeSongSectionKey, string> = {
@@ -74,9 +81,18 @@ export const useRecommendStore = defineStore('recommend', () => {
 
   // 用户歌单
   const userPlaylists = ref<Record<string, PlaylistInfo[]>>({})
+  const userPlaylistsStatus = ref<Record<string, CloudListStatus>>({})
 
   // 用户收藏专辑（网易云）
   const userAlbums = ref<any[]>([])
+  const userAlbumsStatus = ref<CloudListStatus>({ loading: false, error: null })
+
+  // 同一平台同时只发一个请求；登录态变化时代际递增，换账号前发出的请求回来也不写入
+  const cloudRequests = new Map<string, Promise<void>>()
+  const cloudGenerations = new Map<string, number>()
+  // 本次启动已向平台确认过的列表：缓存先顶上，每次启动后第一次用到时在后台刷新一次
+  const revalidatedCloudLists = new Set<string>()
+  const ALBUMS_KEY = 'netease-albums'
 
   // 用户喜欢的歌曲 ID 集合
   const likedSongIds = ref<Set<number>>(new Set())
@@ -123,8 +139,14 @@ export const useRecommendStore = defineStore('recommend', () => {
     const next = { ...userPlaylists.value }
     delete next[platform]
     userPlaylists.value = next
+    forgetCloudList(platform)
+    const status = { ...userPlaylistsStatus.value }
+    delete status[platform]
+    userPlaylistsStatus.value = status
     if (platform === 'netease') {
       userAlbums.value = []
+      forgetCloudList(ALBUMS_KEY)
+      userAlbumsStatus.value = { loading: false, error: null }
       likedSongIds.value = new Set()
     } else if (platform === 'youtube') {
       homeFeedRequestGeneration++
@@ -136,6 +158,52 @@ export const useRecommendStore = defineStore('recommend', () => {
     }
     // 内存清了也要落盘，否则重启后 loadCache 又把旧数据恢复回来
     saveCache()
+  }
+
+  function forgetCloudList(key: string) {
+    cloudGenerations.set(key, cloudGeneration(key) + 1)
+    cloudRequests.delete(key)
+    revalidatedCloudLists.delete(key)
+  }
+
+  function cloudGeneration(key: string): number {
+    return cloudGenerations.get(key) ?? 0
+  }
+
+  /// 拉取一个云端列表：同一列表合并成一个请求，拉取期间换了账号则丢弃结果
+  ///
+  /// 失败时保留已有的列表（缓存或上次结果），把原因记在状态里由页面显示；
+  /// 页面上什么都没有时再弹提示，免得失败看起来像「暂无歌单」。
+  function loadCloudList(
+    key: string,
+    setStatus: (status: CloudListStatus) => void,
+    hasData: () => boolean,
+    load: () => Promise<(() => void) | undefined>,
+  ): Promise<void> {
+    const pending = cloudRequests.get(key)
+    if (pending) return pending
+    const generation = cloudGeneration(key)
+    revalidatedCloudLists.add(key)
+    setStatus({ loading: true, error: null })
+    const request: Promise<void> = (async () => {
+      try {
+        const commit = await load()
+        if (generation !== cloudGeneration(key)) return
+        commit?.()
+        setStatus({ loading: false, error: null })
+        saveCache()
+      } catch (e) {
+        if (generation !== cloudGeneration(key)) return
+        log.error(`load ${key}:`, e)
+        error.value = String(e)
+        setStatus({ loading: false, error: String(e) })
+        if (!hasData()) useToastStore().error(String(e))
+      }
+    })().finally(() => {
+      if (cloudRequests.get(key) === request) cloudRequests.delete(key)
+    })
+    cloudRequests.set(key, request)
+    return request
   }
 
   function isCacheFresh(): boolean {
@@ -229,8 +297,26 @@ export const useRecommendStore = defineStore('recommend', () => {
     saveCache()
   }
 
-  /** 获取用户歌单 */
-  async function fetchUserPlaylists(platform: string) {
+  /** 向平台拉取用户歌单；正在拉时返回同一个请求 */
+  function fetchUserPlaylists(platform: string): Promise<void> {
+    return loadCloudList(
+      platform,
+      (status) => { userPlaylistsStatus.value = { ...userPlaylistsStatus.value, [platform]: status } },
+      () => (userPlaylists.value[platform]?.length ?? 0) > 0,
+      async () => {
+        const playlists = await requestUserPlaylists(platform)
+        return () => { userPlaylists.value = { ...userPlaylists.value, [platform]: playlists } }
+      },
+    )
+  }
+
+  /** 先显示缓存的歌单；本次启动还没向平台确认过时在后台刷新一次 */
+  function ensureUserPlaylists(platform: string): Promise<void> {
+    if (revalidatedCloudLists.has(platform)) return cloudRequests.get(platform) ?? Promise.resolve()
+    return fetchUserPlaylists(platform)
+  }
+
+  async function requestUserPlaylists(platform: string): Promise<PlaylistInfo[]> {
     isLoading.value = true
     try {
       const data = await invoke<any>('get_user_playlists', { platform })
@@ -275,14 +361,7 @@ export const useRecommendStore = defineStore('recommend', () => {
         // YouTube browse 响应需要解析 sectionListRenderer
         playlists = parseYouTubeLibraryPlaylistsShared(data)
       }
-
-      userPlaylists.value[platform] = playlists
-      saveCache()
-    } catch (e) {
-      // 静默失败会渲染成"暂无云端歌单"，把登录失效之类的问题藏起来
-      log.error(`fetchUserPlaylists(${platform}):`, e)
-      error.value = String(e)
-      useToastStore().error(String(e))
+      return playlists
     } finally {
       isLoading.value = false
     }
@@ -382,22 +461,31 @@ export const useRecommendStore = defineStore('recommend', () => {
     }
   }
 
-  /** 获取用户收藏的专辑列表（网易云） */
-  async function fetchUserAlbums() {
-    try {
-      const data = await invoke<any>('get_user_stared_albums', {})
-      const list = data?.data || []
-      userAlbums.value = list.map((a: any) => ({
-        id: a.id,
-        name: a.name,
-        coverUrl: a.picUrl || '',
-        artist: a.artists?.map((ar: any) => ar.name).join(', ') || '',
-        trackCount: a.size || 0,
-      }))
-      saveCache()
-    } catch (e) {
-      log.error('fetchUserAlbums:', e)
-    }
+  /** 向网易云拉取用户收藏的专辑；正在拉时返回同一个请求 */
+  function fetchUserAlbums(): Promise<void> {
+    return loadCloudList(
+      ALBUMS_KEY,
+      (status) => { userAlbumsStatus.value = status },
+      () => userAlbums.value.length > 0,
+      async () => {
+        const data = await invoke<any>('get_user_stared_albums', {})
+        const list = data?.data || []
+        const albums = list.map((a: any) => ({
+          id: a.id,
+          name: a.name,
+          coverUrl: a.picUrl || '',
+          artist: a.artists?.map((ar: any) => ar.name).join(', ') || '',
+          trackCount: a.size || 0,
+        }))
+        return () => { userAlbums.value = albums }
+      },
+    )
+  }
+
+  /** 先显示缓存的专辑；本次启动还没向网易云确认过时在后台刷新一次 */
+  function ensureUserAlbums(): Promise<void> {
+    if (revalidatedCloudLists.has(ALBUMS_KEY)) return cloudRequests.get(ALBUMS_KEY) ?? Promise.resolve()
+    return fetchUserAlbums()
   }
 
   /** 获取 B站收藏夹内容 */
@@ -421,12 +509,12 @@ export const useRecommendStore = defineStore('recommend', () => {
 
   return {
     recommendedPlaylists, recommendedSongs, homeHotSongs, homeRadarSongs,
-    homeFeedShelves, homeFeedLoading, userPlaylists,
-    userAlbums, likedSongIds, isLoading, error, isCacheFresh,
-    fetchRecommendedPlaylists, fetchRecommendedSongs, fetchUserPlaylists,
+    homeFeedShelves, homeFeedLoading, userPlaylists, userPlaylistsStatus,
+    userAlbums, userAlbumsStatus, likedSongIds, isLoading, error, isCacheFresh,
+    fetchRecommendedPlaylists, fetchRecommendedSongs, fetchUserPlaylists, ensureUserPlaylists,
     fetchHomeSearchRecommendations, clearHomeSearchRecommendations,
     fetchHomeFeed, fetchHighQualityPlaylists, fetchHighQualityTags,
-    fetchLikedSongIds, toggleLikeSong, fetchAlbumDetail, fetchUserAlbums,
+    fetchLikedSongIds, toggleLikeSong, fetchAlbumDetail, fetchUserAlbums, ensureUserAlbums,
     invalidatePlatform,
     fetchBiliFavoriteItems, validateAuth,
   }

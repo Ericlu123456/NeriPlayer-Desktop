@@ -10,6 +10,7 @@ import { installGlobalShortcuts } from '@/modules/shortcuts/globalShortcuts'
 import { installDesktopLyricsBridge } from '@/modules/desktopLyrics/bridge'
 import { syncFrequencyDelayMs, useSyncStore } from '@/stores/sync'
 import { useAuthStore } from '@/stores/auth'
+import { useRecommendStore } from '@/stores/recommend'
 import { useSettingsStore } from '@/stores/settings'
 import { HISTORY_CHANGED_EVENT } from '@/stores/history'
 import { useLikedSongsStore } from '@/stores/likedSongs'
@@ -476,6 +477,13 @@ onMounted(async () => {
 
   // 账号状态就绪后再接着下上次没下完的任务（解析地址需要登录态）
   void useDownloadStore().resumePendingDownloads().catch(error => appLog.warn('Resume pending downloads failed:', error))
+
+  // 云端歌单先用上次的缓存显示，这里在后台按已登录的账号各刷新一份，进音乐库时就是新的
+  const recommend = useRecommendStore()
+  for (const platform of ['netease', 'bilibili', 'youtube'] as const) {
+    if (authStore[platform].loggedIn) void recommend.ensureUserPlaylists(platform)
+  }
+  if (authStore.netease.loggedIn) void recommend.ensureUserAlbums()
 
   // 监听后端 playlists-changed 事件，防抖触发自动同步；同步自己写回的歌单带 "sync" 标记，不再触发
   unlistenPlaylistChanged = await listen<string | null>('playlists-changed', (event) => {
