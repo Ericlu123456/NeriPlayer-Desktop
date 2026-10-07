@@ -117,6 +117,8 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
   const _outbox = new Map<string, { event: ListenTogetherEvent; queueSnapshot: boolean }>()
   // 房主断线期间自己改过播放：重连时的 welcome/房态只更新房间，不能把这些改动撤回去
   let _hostControlledOffline = false
+  // 正在应答链接请求的曲目，同一首歌的重复请求只应答一次
+  const _linkAnswers = new Set<string>()
   // 会话代际：leaveRoom 后递增，让在途的延迟回调失效，不再操作播放器
   let _sessionGeneration = 0
   // 出站事件排序字段：实例标识会话内生成一次，序号单调递增（对齐 Android EventFactory）
@@ -686,47 +688,80 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
   }
 
   function handleLinkRequested(envelope: ListenTogetherSocketEnvelope) {
-    // 房主收到链接请求：下发当前已解析的音频 URL
+    // 房主收到链接请求：下发当前曲目的可分享直链
     if (!isController.value || !roomSettings.value.shareAudioLinks) return
 
     // 检查 requestTrackStableKey 是否与当前曲目匹配
     const player = usePlayerStore()
     if (!player.currentTrack) return
 
-    const currentLt = trackInfoToLtTrack(player.currentTrack)
-    if (envelope.requestTrackStableKey && envelope.requestTrackStableKey !== currentLt.stableKey) {
-      return // 请求的曲目已不是当前播放的
-    }
+    const currentKey = trackInfoToLtTrack(player.currentTrack).stableKey
+    const requestedKey = envelope.requestTrackStableKey ?? currentKey
+    if (requestedKey !== currentKey) return // 请求的曲目已不是当前播放的
+    void answerLinkRequest(requestedKey, _sessionGeneration)
+  }
 
-    const streamUrl = player.getCurrentStreamUrl(player.currentTrack.id)
-    const { queue, resolvedIndex } = toShareableQueueSnapshot(
-      player.queue,
-      player.queueIndex,
-      true,
-      streamUrl || undefined,
-      false,
-      player.getCurrentStreamUrls(player.currentTrack.id),
-    )
-    const track = queue[resolvedIndex]
-    if (!track || track.stableKey !== currentLt.stableKey || !track.streamUrl) {
-      log.debug('link requested but current stream is unavailable:', currentLt.stableKey)
-      return
-    }
+  function currentShareableUrls(): string[] {
+    const player = usePlayerStore()
+    const id = player.currentTrack?.id
+    return [...new Set([player.getCurrentStreamUrl(id), ...player.getCurrentStreamUrls(id)]
+      .filter((url): url is string => !!url))]
+  }
 
-    // 只把与请求 stableKey 对应的当前直链发回，避免异步解析结果串到另一首歌
-    sendEvent({
-      type: 'LINK_READY',
-      track,
-      queue,
-      currentIndex: resolvedIndex,
-      positionMs: player.positionMs,
-      state: player.isPlaying ? 'playing' : 'paused',
-      requestTrackStableKey: track.stableKey,
-    })
+  const delay = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms))
+
+  /**
+   * 对齐 Android ListenTogetherControllerLinkOwner：房主自己还在加载时每 200ms 看一次，最多 40 次；
+   * 还没有（从缓存/下载播放时本来就没有直链）就单独解析，最多 3 次、间隔 2s。
+   * 拿到就回 LINK_READY，彻底拿不到回 LINK_UNAVAILABLE，听众不会一直干等
+   */
+  async function answerLinkRequest(stableKey: string, generation: number) {
+    if (_linkAnswers.has(stableKey)) return
+    _linkAnswers.add(stableKey)
+    try {
+      const player = usePlayerStore()
+      const stillCurrent = () => generation === _sessionGeneration && isController.value
+        && roomSettings.value.shareAudioLinks && !!player.currentTrack
+        && trackInfoToLtTrack(player.currentTrack).stableKey === stableKey
+      let urls = currentShareableUrls()
+      for (let attempt = 0; urls.length === 0 && player.isLoadingAudio && attempt < 40; attempt++) {
+        await delay(200)
+        if (!stillCurrent()) return
+        urls = currentShareableUrls()
+      }
+      for (let attempt = 0; urls.length === 0 && attempt < 3; attempt++) {
+        if (attempt > 0) await delay(2000)
+        if (!stillCurrent()) return
+        urls = await player.resolveShareableStreamUrls(player.currentTrack!)
+        if (!stillCurrent()) return
+      }
+      if (urls.length === 0) {
+        sendEvent({ type: 'LINK_UNAVAILABLE', requestTrackStableKey: stableKey })
+        return
+      }
+      const { queue, resolvedIndex } = toShareableQueueSnapshot(
+        player.queue, player.queueIndex, true, urls[0], false, urls,
+      )
+      const track = queue[resolvedIndex]
+      if (!track || track.stableKey !== stableKey || !track.streamUrl) return
+      // 只带这首歌和它的直链，不附整份队列（对齐 Android LINK_READY）
+      sendEvent({
+        type: 'LINK_READY',
+        track,
+        currentIndex: resolvedIndex,
+        positionMs: player.positionMs,
+        state: player.isPlaying ? 'playing' : 'paused',
+        requestTrackStableKey: stableKey,
+      })
+    } finally {
+      _linkAnswers.delete(stableKey)
+    }
   }
 
   function requestLinkForTrack(track: import('./protocol').ListenTogetherTrack, currentIndex: number) {
     if (isController.value || !roomSettings.value.shareAudioLinks || currentIndex < 0) return
+    // 房主离线时服务端只会回 "controller offline"，没必要发（对齐 Android）
+    if (connectionState.value !== 'connected' || (roomState.value?.roomStatus ?? 'active') !== 'active') return
     const now = Date.now()
     if (
       _lastRequestedLinkStableKey === track.stableKey

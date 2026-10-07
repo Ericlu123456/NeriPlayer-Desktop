@@ -167,6 +167,10 @@ async function harness(options = {}) {
     lastSeekCommand: { seq: 0, source: 'local', positionMs: 0 },
     getCurrentStreamUrl() { return player.currentTrack?.audioUrl || '' },
     getCurrentStreamUrls() { return [] },
+    async resolveShareableStreamUrls(track) {
+      playback.push({ type: 'resolve-shareable', trackId: track.id })
+      return options.shareableUrls?.(track) ?? []
+    },
     isRemoteSyncGuardActive() { return timers.Date.now() < remoteGuardUntil },
     setListenTogetherSyncPlaybackRate(rate) { playback.push({ type: 'rate', rate }) },
     applyListenTogetherPlaybackMode(mode) {
@@ -971,6 +975,43 @@ await test('TRACK_FINISHED reports where the finished track ended', async h => {
   assert.equal(finished?.args.event.finishedTrackStableKey, 'netease:1')
   assert.equal(finished?.args.event.positionMs, 60_000, 'the finish position is at least the track duration')
 })
+
+const sharingRoom = () => room([wireTrack(1)], { settings: { ...room().settings, shareAudioLinks: true } })
+
+const unavailableLink = async h => {
+  await h.create()
+  await h.message({ type: 'welcome', role: 'controller', state: sharingRoom() })
+  const baseline = h.commands.length
+  await h.message({ type: 'link_requested', requestTrackStableKey: 'netease:1' })
+  await h.timers.advance(14_000)
+  const sent = h.commands.slice(baseline).filter(entry => entry.command === 'lt_send_event').map(entry => entry.args.event)
+  assert.deepEqual(sent.filter(event => event.type.startsWith('LINK_')).map(event => [event.type, event.requestTrackStableKey]),
+    [['LINK_UNAVAILABLE', 'netease:1']], 'a host without a shareable link says so instead of staying silent')
+  assert.equal(h.playback.filter(entry => entry.type === 'resolve-shareable').length, 3)
+}
+unavailableLink.options = { role: 'controller' }
+await test('a host that cannot share a link answers LINK_UNAVAILABLE', unavailableLink)
+
+const resolvedLink = async h => {
+  await h.create()
+  await h.message({ type: 'welcome', role: 'controller', state: sharingRoom() })
+  const baseline = h.commands.length
+  await h.message({ type: 'link_requested', requestTrackStableKey: 'netease:1' })
+  await h.message({ type: 'link_requested', requestTrackStableKey: 'netease:1' })
+  await h.timers.advance(14_000)
+  const links = h.commands.slice(baseline).filter(entry => entry.command === 'lt_send_event'
+    && entry.args.event.type.startsWith('LINK_')).map(entry => entry.args.event)
+  assert.equal(links.length, 1, 'a repeated request for the same track is answered once')
+  assert.equal(links[0].type, 'LINK_READY')
+  assert.equal(links[0].track.streamUrl, 'https://m701.music.126.net/shared.mp3')
+  assert.equal(links[0].queue, undefined, 'LINK_READY carries only the requested track')
+}
+resolvedLink.attempts = 0
+resolvedLink.options = {
+  role: 'controller',
+  shareableUrls: () => ++resolvedLink.attempts >= 2 ? ['https://m701.music.126.net/shared.mp3'] : [],
+}
+await test('a host resolves a shareable link when it has none to hand', resolvedLink)
 
 if (failures.length) {
   console.error(`${passed} store tests passed; ${failures.length} failed: ${failures.join('; ')}`)

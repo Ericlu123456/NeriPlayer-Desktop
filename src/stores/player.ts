@@ -2433,6 +2433,21 @@ export const usePlayerStore = defineStore('player', () => {
     return [...currentResolvedStreamUrls]
   }
 
+  /**
+   * 一起听房主给听众准备可分享的直链：只解析不播放，也不看本地缓存或下载
+   * （对齐 Android resolveShareableStreamUrls）。预览片段和 HLS 分享不了，返回空
+   */
+  async function resolveShareableStreamUrls(track: TrackInfo): Promise<string[]> {
+    try {
+      const result = await resolvePlaybackResult(track, playbackSourceSettings())
+      if (result.type !== 'success' || result.isPreview || result.streamType === 'hls') return []
+      return [...new Set([result.url, ...result.candidateUrls])].filter(url => isDirectStreamUrl(url))
+    } catch (error) {
+      log.warn('resolve shareable stream failed:', error)
+      return []
+    }
+  }
+
   async function setSpeed(spd: number) {
     const next = Math.max(0.25, Math.min(3, spd))
     const wasPlaying = _interpIsPlaying
@@ -2815,6 +2830,7 @@ export const usePlayerStore = defineStore('player', () => {
     flushPlayerState,
     toggleRepeatMode, toggleShuffle, cyclePlayMode, applyListenTogetherPlaybackMode,
     playMode, setVolume, setSpeed, setListenTogetherSyncPlaybackRate, getCurrentStreamUrl, getCurrentStreamUrls,
+    resolveShareableStreamUrls,
     setLoudnessGain, setEqualizer, setEqualizerPreset, resetAudioEffects,
     applyPersistedSettings,
     startSleepTimer, startSleepTimerEndOfTrack, startSleepTimerEndOfQueue, cancelSleepTimer,
