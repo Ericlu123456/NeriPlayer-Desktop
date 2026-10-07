@@ -129,6 +129,10 @@ pub async fn list_playlists() -> AppResult<Vec<PlaylistInfo>> {
     Ok(playlists)
 }
 
+/// 列表每次刷新都会检查同名歌单，同一个歌单每次运行只提示一次
+static WARNED_DUPLICATE_PLAYLISTS: std::sync::Mutex<std::collections::BTreeSet<i64>> =
+    std::sync::Mutex::new(std::collections::BTreeSet::new());
+
 fn list_playlists_blocking() -> AppResult<Vec<PlaylistInfo>> {
     let summaries = playlist::list_summaries()?;
 
@@ -139,7 +143,8 @@ fn list_playlists_blocking() -> AppResult<Vec<PlaylistInfo>> {
         let mut seen_names: std::collections::HashSet<String> = std::collections::HashSet::new();
         for pl in &summaries {
             let name = pl.name.trim().to_string();
-            if !seen_names.insert(name.clone()) {
+            let first_report = || WARNED_DUPLICATE_PLAYLISTS.lock().map_or(true, |mut warned| warned.insert(pl.id));
+            if !seen_names.insert(name.clone()) && first_report() {
                 log::warn!(
                     target: "playlist-io",
                     "发现同名歌单未合并: name={:?}, id={}, tracks={} (全部保留, 不自动删除)",
