@@ -4541,6 +4541,8 @@ mod tests {
                     Err(error) => panic!("loopback range server did not receive a request: {error}"),
                 }
             };
+            // Windows 上 accept 出来的连接继承监听端的非阻塞模式，读超时只对阻塞套接字生效
+            stream.set_nonblocking(false).unwrap();
             stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
             let mut request = Vec::new();
             let mut chunk = [0u8; 1024];

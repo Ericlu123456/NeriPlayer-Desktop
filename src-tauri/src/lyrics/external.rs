@@ -728,6 +728,8 @@ mod tests {
                         Err(_) => return,
                     }
                 };
+                // Windows 上 accept 出来的连接继承监听端的非阻塞模式，读超时只对阻塞套接字生效
+                stream.set_nonblocking(false).unwrap();
                 stream
                     .set_read_timeout(Some(Duration::from_secs(1)))
                     .unwrap();
@@ -944,6 +946,8 @@ mod tests {
                         Err(_) => return,
                     }
                 };
+                // Windows 上 accept 出来的连接继承监听端的非阻塞模式，读超时只对阻塞套接字生效
+                stream.set_nonblocking(false).unwrap();
                 stream
                     .set_read_timeout(Some(std::time::Duration::from_secs(1)))
                     .unwrap();
