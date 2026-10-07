@@ -172,6 +172,13 @@ export interface LyricLine {
 }
 
 export type RepeatMode = 'off' | 'all' | 'one'
+
+/** 后端 get_decoder_capabilities 的结果 */
+export interface DecoderCapabilities {
+  ffmpeg: { directory: string; avutil: string; avcodec: string; avformat: string } | null
+  ffmpegError?: string | null
+  codecs: string[]
+}
 /** local_safety：睡眠定时、失败跳过、自动推进等内部操作，不受一起听的成员控制限制（对齐 Android LOCAL_SAFETY） */
 export type PlaybackCommandSource = 'local' | 'local_safety' | 'remote_sync'
 
@@ -2720,10 +2727,12 @@ export const usePlayerStore = defineStore('player', () => {
 
   // 取流按后端实际能解的编码挑选；查询失败或 FFmpeg 没加载上时只认内置解码器，
   // Opus、E-AC-3 这类流排到后面，选出来的流一定能播
+  const decoderCapabilities = ref<DecoderCapabilities | null>(null)
   async function loadDecoderCapabilities() {
     try {
-      const capabilities = await invoke<{ codecs: string[]; ffmpegError?: string | null }>('get_decoder_capabilities')
+      const capabilities = await invoke<DecoderCapabilities>('get_decoder_capabilities')
       setDecodableCodecs(capabilities.codecs)
+      decoderCapabilities.value = capabilities
       if (capabilities.ffmpegError) {
         log.warn('FFmpeg unavailable, streams that need it will be avoided:', capabilities.ffmpegError)
       }
@@ -3061,7 +3070,7 @@ export const usePlayerStore = defineStore('player', () => {
     resolveShareableStreamUrls,
     localPlaylistIdFor,
     setLoudnessGain, setEqualizer, setEqualizerPreset, resetAudioEffects,
-    applyPersistedSettings,
+    applyPersistedSettings, decoderCapabilities,
     startSleepTimer, startSleepTimerEndOfTrack, startSleepTimerEndOfQueue, cancelSleepTimer,
     playAll, shufflePlay, addToQueueNext, addToQueueEnd, removeFromQueue, clearQueue,
     prefetchPlaybackTracks,

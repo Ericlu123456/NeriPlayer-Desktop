@@ -972,6 +972,13 @@ const githubExistingRepo = ref('') // owner/repo 格式
 const githubIsSettingRepo = ref(false)
 const GITHUB_TOKEN_URL = 'https://github.com/settings/tokens/new?scopes=repo&description=NeriPlayer%20Backup'
 const PROJECT_REPOSITORY_URL = 'https://github.com/cwuom/NeriPlayer-Desktop'
+const FFMPEG_LEGAL_URL = 'https://ffmpeg.org/legal.html'
+// 随包的 FFmpeg 是否加载成功、加载的是哪个版本；没加载上时说明哪些格式受影响
+const ffmpegComponentText = computed(() => {
+  const capabilities = player.decoderCapabilities
+  if (capabilities?.ffmpeg) return t('settings.ffmpeg_component_loaded', { version: capabilities.ffmpeg.avcodec })
+  return t('settings.ffmpeg_component_unavailable')
+})
 
 function openGitHubSetup() {
   githubPhase.value = 1
@@ -2472,6 +2479,19 @@ useEscapeClose(
       <div class="setting-info">
         <div class="setting-title">{{ t('settings.github') }}</div>
         <div class="setting-desc">{{ t('settings.github_desc') }}</div>
+      </div>
+      <span class="material-symbols-rounded" style="font-size: 20px; opacity: 0.3">open_in_new</span>
+    </div>
+    <div
+      class="setting-card"
+      style="cursor: pointer"
+      :title="player.decoderCapabilities?.ffmpegError ?? player.decoderCapabilities?.ffmpeg?.directory ?? ''"
+      @click="openExternalUrl(FFMPEG_LEGAL_URL)"
+    >
+      <div class="setting-icon-wrap"><span class="material-symbols-rounded">graphic_eq</span></div>
+      <div class="setting-info">
+        <div class="setting-title">{{ t('settings.ffmpeg_component') }}</div>
+        <div class="setting-desc">{{ ffmpegComponentText }}</div>
       </div>
       <span class="material-symbols-rounded" style="font-size: 20px; opacity: 0.3">open_in_new</span>
     </div>
