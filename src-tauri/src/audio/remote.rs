@@ -54,8 +54,8 @@ const MAX_DECODE_RETRIES: usize = 3;
 const MAX_VIRTUAL_BODY_SKIP_PACKETS: usize = 256;
 /// virtual-body 拼接 demux：最多吞掉的 moov 假样本数（stco 指向文件头 mdat）
 const MAX_VIRTUAL_BODY_SKIP_MOOV_SAMPLES: usize = 4096;
-// 超长 YouTube 首包探测 2s 容易假失败，放宽到 6s
-const REMOTE_PROBE_TIMEOUT: Duration = Duration::from_secs(6);
+// 首包探测含建连、TLS 与首段下载；经代理时单是 TLS 握手就要 2-3 秒，6 秒常常假超时
+const REMOTE_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 /// per-request 超时下限：15s 在实机上被 512KB 块贴脸打穿（成功请求已到
 /// 12.4s），抬到 20s 并按块大小/吞吐向上缩放，避免"块越大越必超时"
 const REMOTE_REQUEST_TIMEOUT_FLOOR: Duration = Duration::from_secs(20);
@@ -525,7 +525,23 @@ impl RemoteAudioSource {
         };
         let probe_started = Instant::now();
         let range_result = {
-            let range_probe = probe_range_len(&client, &url, &referer, initial_block);
+            // 连接层失败（重置、超时）只说明这条链路一时不通，换条连接再试一次；
+            // 状态码或 Range 不受支持则直接交给调用方走兜底
+            let range_probe = async {
+                match probe_range_len(&client, &url, &referer, initial_block).await {
+                    Err(AppError::Network(error)) if error.is_connect() || error.is_timeout() => {
+                        log::warn!(
+                            target: "remote-audio",
+                            "range probe transport failure host={}, elapsed_ms={}, retrying: {}",
+                            host,
+                            probe_started.elapsed().as_millis(),
+                            error.without_url(),
+                        );
+                        probe_range_len(&client, &url, &referer, initial_block).await
+                    }
+                    result => result,
+                }
+            };
             tokio::pin!(range_probe);
             tokio::select! {
                 result = &mut range_probe => result,
