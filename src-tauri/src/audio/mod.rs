@@ -11,3 +11,4 @@ pub mod pcm;
 pub mod player;
 pub mod queue;
 pub mod remote;
+pub mod stretch;

@@ -2529,7 +2529,8 @@ export const usePlayerStore = defineStore('player', () => {
     if (_speedInvokeTimer) clearTimeout(_speedInvokeTimer)
     _speedInvokeTimer = setTimeout(() => {
       _speedInvokeTimer = null
-      invoke('set_speed', { speed: effectivePlaybackSpeed() }).catch(() => {})
+      invoke('set_speed', { speed: effectivePlaybackSpeed() })
+        .catch(error => log.warn('listen together sync rate not applied:', error))
     }, 80)
   }
 
@@ -2631,12 +2632,13 @@ export const usePlayerStore = defineStore('player', () => {
         requestGeneration: playbackRequestToken,
       }
     }
-    // 去抖后再下发：后端改速度要从当前位置重建解码会话，滑条 @input
-    // 每 tick 连发会触发连环重建。UI/插值已即时更新，音频落地晚 200ms 无感
+    // 去抖后再下发：滑条 @input 每 tick 都会触发，只需送出最后的值。
+    // 后端在输出端保持音调地实时变速，UI/插值已即时更新，音频落地晚 200ms 无感
     if (_speedInvokeTimer) clearTimeout(_speedInvokeTimer)
     _speedInvokeTimer = setTimeout(() => {
       _speedInvokeTimer = null
-      invoke('set_speed', { speed: effectivePlaybackSpeed() }).catch(() => {})
+      invoke('set_speed', { speed: effectivePlaybackSpeed() })
+        .catch(error => log.warn('playback speed not applied:', error))
     }, 200)
   }
 

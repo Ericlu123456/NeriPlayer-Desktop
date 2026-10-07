@@ -22,6 +22,7 @@ use crate::audio::pcm::PcmSource;
 use crate::audio::remote::{
     RemoteAudioSource, RemoteReadCancellation, SourceAudioInfo, SymphoniaAudioDecoder,
 };
+use crate::audio::stretch::Stretcher;
 use crate::error::{AppError, AppResult};
 
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
@@ -47,6 +48,8 @@ const SEEK_SUPERSEDED: &str = "Seek request superseded";
 // 宽限只兜发送线程被调度延迟的极端情况，超时则回滚旧位置，绝不悬空
 const SEEK_ADOPT_GRACE: Duration = Duration::from_millis(200);
 const OUTPUT_DEVICE_POLL_INTERVAL: Duration = Duration::from_secs(2);
+/// 回调一次最多经变速器处理的帧数；更大的设备缓冲按这个大小分块
+const RENDER_CHUNK_FRAMES: usize = 4096;
 
 #[derive(Clone)]
 struct GenerationToken {
@@ -295,6 +298,8 @@ struct PlaybackShared {
     device_lost: AtomicBool,
     /// 首帧交给设备的时刻（`metrics::monotonic_ns`），0 表示还没出过帧
     first_frame_ns: Arc<AtomicU64>,
+    /// 变速器已从 ring 取出、还没送到设备的帧数：判断「播完」时要算上
+    stretch_buffered: AtomicUsize,
 }
 
 impl PlaybackShared {
@@ -625,6 +630,7 @@ impl PlaybackSession {
     fn is_empty(&self) -> bool {
         self.shared.finished.load(Ordering::Acquire)
             && self.shared.ring.readable_samples() < self.shared.channels
+            && self.shared.stretch_buffered.load(Ordering::Acquire) == 0
     }
 }
 
@@ -755,7 +761,8 @@ impl FrameResampler {
         true
     }
 
-    fn next_frame(&mut self, output_rate: u32, speed: f32, output: &mut [f32]) -> bool {
+    /// 只做采样率转换；倍速在输出端由变速器完成，这样 ring 里的内容与倍速无关
+    fn next_frame(&mut self, output_rate: u32, output: &mut [f32]) -> bool {
         if self.finished || !self.initialize() {
             return false;
         }
@@ -772,8 +779,7 @@ impl FrameResampler {
             *sample = current + (next - current) * phase;
         }
 
-        self.phase += f64::from(self.source_rate) * f64::from(speed.clamp(0.25, 3.0))
-            / f64::from(output_rate.max(1));
+        self.phase += f64::from(self.source_rate) / f64::from(output_rate.max(1));
         while self.phase >= 1.0 {
             self.phase -= 1.0;
             if self.source_ended {
@@ -1160,7 +1166,7 @@ impl PlayerEngine {
 
     pub fn set_speed(&mut self, speed: f32) {
         self.speed = speed.clamp(0.25, 3.0);
-        // SetSpeed 内部按旧速丢 ring 并补时钟，无需再发 Invalidate
+        // 倍速在输出端实时生效，不需要重建会话
         let _ = self.cmd_tx.send(AudioCmd::SetSpeed(self.speed));
     }
 
@@ -1900,21 +1906,11 @@ fn audio_control_loop(
             }
             AudioCmd::SetSpeed(next_speed) => {
                 speed = next_speed.clamp(0.25, 3.0);
+                // 输出端的变速器在下一跳（约 15 ms 内）就按新倍速、保持音调地播放，
+                // ring 里的内容与倍速无关，不用停下会话重新解码
                 if let Some(session) = &current {
                     session.shared.speed.store(speed);
                 }
-                // 速度固化在 ring 的输出帧里，必须从当前位置重解码；
-                // 旧做法「丢缓冲 + 按旧速补时钟」会把缓冲住的内容整段跳过
-                rebuild_session_in_place(
-                    &mut current,
-                    volume,
-                    speed,
-                    &shared_level,
-                    &effects_params,
-                    &playback_generation,
-                    &mut output_profile,
-                    &loopback_tx,
-                );
             }
             AudioCmd::Seek {
                 position_ms,
@@ -2618,6 +2614,7 @@ fn prepare_session(
         wake: Condvar::new(),
         device_lost: AtomicBool::new(false),
         first_frame_ns: Arc::new(AtomicU64::new(0)),
+        stretch_buffered: AtomicUsize::new(0),
     });
 
     let processed: Box<dyn PcmSource> = Box::new(LoudnessSource::new(
@@ -2784,7 +2781,7 @@ fn spawn_decode_worker(
                     }
                     continue;
                 }
-                if !converter.next_frame(shared.sample_rate, shared.speed.load(), &mut frame) {
+                if !converter.next_frame(shared.sample_rate, &mut frame) {
                     exit_reason = "decoder_exhausted";
                     break;
                 }
@@ -2908,12 +2905,20 @@ where
     T: SizedSample + FromSample<f32>,
 {
     let callback_shared = Arc::clone(&shared);
-    let mut frame = vec![0.0f32; shared.channels];
+    // 变速器与暂存缓冲在建流时一次分配，回调里只复用
+    let mut stretcher = Stretcher::new(shared.channels, shared.sample_rate);
+    let mut scratch = vec![0.0f32; RENDER_CHUNK_FRAMES * shared.channels.max(1)];
     device
         .build_output_stream(
             config,
             move |output: &mut [T], _| {
-                render_output(&callback_shared, output, &mut frame, &metrics::OUTPUT_METRICS);
+                render_output(
+                    &callback_shared,
+                    output,
+                    &mut stretcher,
+                    &mut scratch,
+                    &metrics::OUTPUT_METRICS,
+                );
             },
             move |error| {
                 log::error!(target: "cpal-output", "stream error: {error}");
@@ -2933,14 +2938,16 @@ where
         .map_err(|error| format!("Could not build audio output: {error}"))
 }
 
-/// 输出回调主体：从 ring 取帧写入设备缓冲，推进时钟并记录指标
+/// 输出回调主体：经变速器从 ring 取帧写入设备缓冲，推进时钟并记录指标
 ///
-/// 运行在设备回调线程：只用原子操作和预分配的 `frame`，不加锁、不分配。
+/// 运行在设备回调线程：只用原子操作和预分配的变速器、暂存缓冲，不加锁、不分配。
+/// 倍速在这里实时生效（保持音调），改倍速不需要重建解码会话。
 /// 播放中途取空 ring 记一次欠载；解码已结束后自然排空不算。
 fn render_output<T>(
     shared: &PlaybackShared,
     output: &mut [T],
-    frame: &mut [f32],
+    stretcher: &mut Stretcher,
+    scratch: &mut [f32],
     counters: &OutputMetrics,
 ) where
     T: SizedSample + FromSample<f32>,
@@ -2953,27 +2960,40 @@ fn render_output<T>(
         return;
     }
 
-    let mut rendered_frames = 0usize;
-    let mut silent_frames = 0usize;
+    let channels = shared.channels.max(1);
+    let speed = shared.speed.load();
+    let draining = shared.finished.load(Ordering::Acquire);
     let gain = shared.volume.load() * shared.fade_gain.load();
-    for output_frame in output.chunks_mut(shared.channels.max(1)) {
+    let mut pull = |target: &mut [f32]| shared.ring.pop_frames(target, channels);
+    let mut rendered_frames = 0usize;
+    let mut media_frames = 0.0f64;
+    let mut silent_frames = 0usize;
+    let chunk_samples = (scratch.len() / channels * channels).max(channels);
+    for chunk in output.chunks_mut(chunk_samples) {
+        let frames = chunk.len() / channels;
         if silent_frames > 0 {
-            output_frame.fill(silence);
-            silent_frames += 1;
+            chunk.fill(silence);
+            silent_frames += frames;
             continue;
         }
-        if !shared.ring.try_pop_frame(frame) {
-            output_frame.fill(silence);
-            shared.begin_rebuffering();
-            silent_frames = 1;
-            continue;
-        }
-
-        for (target, sample) in output_frame.iter_mut().zip(frame.iter().copied()) {
+        let rendered = stretcher.render(&mut scratch[..frames * channels], speed, draining, &mut pull);
+        let filled = rendered.frames * channels;
+        for (target, sample) in chunk[..filled].iter_mut().zip(scratch[..filled].iter().copied()) {
             *target = T::from_sample((sample * gain).clamp(-1.0, 1.0));
         }
-        rendered_frames += 1;
+        chunk[filled..].fill(silence);
+        rendered_frames += rendered.frames;
+        media_frames += rendered.media_frames;
+        if rendered.frames < frames {
+            silent_frames = frames - rendered.frames;
+            shared.begin_rebuffering();
+            // 断流后的新数据和断点前不连续，变速器不能拿旧历史去拼接
+            stretcher.reset();
+        }
     }
+    shared
+        .stretch_buffered
+        .store(stretcher.buffered_frames(), Ordering::Release);
     if rendered_frames > 0 {
         let _ = shared.first_frame_ns.compare_exchange(
             0,
@@ -2981,12 +3001,10 @@ fn render_output<T>(
             Ordering::AcqRel,
             Ordering::Acquire,
         );
-        let speed = shared.speed.load().clamp(0.25, 3.0);
-        let elapsed_us = ((rendered_frames as f64 * 1_000_000.0 / f64::from(shared.sample_rate))
-            * f64::from(speed)) as u64;
+        let elapsed_us = (media_frames * 1_000_000.0 / f64::from(shared.sample_rate)) as u64;
         shared.clock.position_us.fetch_add(elapsed_us, Ordering::AcqRel);
     }
-    let underrun = silent_frames > 0 && !shared.finished.load(Ordering::Acquire);
+    let underrun = silent_frames > 0 && !draining;
     counters.record_callback(
         rendered_frames,
         silent_frames,
@@ -3320,6 +3338,7 @@ mod tests {
             wake_lock: std::sync::Mutex::new(()), wake: std::sync::Condvar::new(),
             device_lost: std::sync::atomic::AtomicBool::new(false),
             first_frame_ns: Arc::new(AtomicU64::new(0)),
+            stretch_buffered: std::sync::atomic::AtomicUsize::new(0),
         });
         let exited = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let worker_shared = Arc::clone(&shared);
@@ -3389,6 +3408,7 @@ mod tests {
             wake_lock: std::sync::Mutex::new(()), wake: std::sync::Condvar::new(),
             device_lost: std::sync::atomic::AtomicBool::new(false),
             first_frame_ns: Arc::new(AtomicU64::new(0)),
+            stretch_buffered: std::sync::atomic::AtomicUsize::new(0),
         });
         let (resume, blocked) = mpsc::channel();
         let (exited, done) = mpsc::channel();
@@ -3577,6 +3597,7 @@ mod tests {
             wake_lock: std::sync::Mutex::new(()), wake: std::sync::Condvar::new(),
             device_lost: std::sync::atomic::AtomicBool::new(false),
             first_frame_ns: Arc::new(AtomicU64::new(0)),
+            stretch_buffered: std::sync::atomic::AtomicUsize::new(0),
         });
         let decoder = crate::audio::remote::SymphoniaAudioDecoder::new(
             Box::new(std::io::Cursor::new(include_bytes!("fixtures/hls-silence.aac").as_slice())), Some("aac"),
@@ -3880,7 +3901,27 @@ mod tests {
             wake_lock: std::sync::Mutex::new(()), wake: std::sync::Condvar::new(),
             device_lost: std::sync::atomic::AtomicBool::new(false),
             first_frame_ns: Arc::new(AtomicU64::new(0)),
+            stretch_buffered: std::sync::atomic::AtomicUsize::new(0),
         })
+    }
+
+    /// 与 build_typed_stream 里一样的回调状态：变速器与暂存缓冲
+    struct CallbackState {
+        stretcher: crate::audio::stretch::Stretcher,
+        scratch: Vec<f32>,
+    }
+
+    impl CallbackState {
+        fn new(shared: &super::PlaybackShared) -> Self {
+            Self {
+                stretcher: crate::audio::stretch::Stretcher::new(shared.channels, shared.sample_rate),
+                scratch: vec![0.0; super::RENDER_CHUNK_FRAMES * shared.channels],
+            }
+        }
+
+        fn render(&mut self, shared: &super::PlaybackShared, output: &mut [f32], counters: &crate::audio::metrics::OutputMetrics) {
+            super::render_output(shared, output, &mut self.stretcher, &mut self.scratch, counters);
+        }
     }
 
     #[test]
@@ -3891,10 +3932,10 @@ mod tests {
             assert!(shared.ring.try_push_frame(&[value, -value]));
         }
         let counters = crate::audio::metrics::OutputMetrics::new();
-        let mut frame = [0.0f32; 2];
+        let mut callback = CallbackState::new(&shared);
         let mut output = [1.0f32; 16];
 
-        super::render_output(&shared, &mut output, &mut frame, &counters);
+        callback.render(&shared, &mut output, &counters);
 
         assert!((output[4] - 0.3).abs() < 1e-6 && (output[5] + 0.3).abs() < 1e-6);
         assert!(output[6..].iter().all(|sample| *sample == 0.0), "取空后整块补静音");
@@ -3903,7 +3944,7 @@ mod tests {
         assert!(shared.buffering.load(Ordering::Acquire), "欠载后进入重缓冲");
         assert_eq!(shared.clock.position_us.load(Ordering::Acquire), 62);
 
-        super::render_output(&shared, &mut output, &mut frame, &counters);
+        callback.render(&shared, &mut output, &counters);
         assert_eq!(counters.snapshot().underruns, 1, "重缓冲期间的静音不重复计数");
     }
 
@@ -3913,13 +3954,14 @@ mod tests {
         assert!(shared.ring.try_push_frame(&[0.5, 0.5]));
         shared.finished.store(true, Ordering::Release);
         let counters = crate::audio::metrics::OutputMetrics::new();
-        let mut frame = [0.0f32; 2];
+        let mut callback = CallbackState::new(&shared);
         let mut output = [0.0f32; 8];
 
-        super::render_output(&shared, &mut output, &mut frame, &counters);
+        callback.render(&shared, &mut output, &counters);
 
         let snapshot = counters.snapshot();
         assert_eq!((snapshot.underruns, snapshot.underrun_frames, snapshot.rendered_frames), (0, 0, 1));
+        assert_eq!(shared.stretch_buffered.load(Ordering::Acquire), 0, "播完时变速器里不能有残留");
     }
 
     #[test]
@@ -3928,10 +3970,10 @@ mod tests {
         assert!(shared.ring.try_push_frame(&[0.5, 0.5]));
         shared.paused.store(true, Ordering::Release);
         let counters = crate::audio::metrics::OutputMetrics::new();
-        let mut frame = [0.0f32; 2];
+        let mut callback = CallbackState::new(&shared);
         let mut output = [1.0f32; 8];
 
-        super::render_output(&shared, &mut output, &mut frame, &counters);
+        callback.render(&shared, &mut output, &counters);
 
         assert!(output.iter().all(|sample| *sample == 0.0));
         assert_eq!(shared.ring.readable_samples(), 2, "暂停时不消费 ring");
@@ -3946,16 +3988,46 @@ mod tests {
             assert!(shared.ring.try_push_frame(&[0.25]));
         }
         let counters = crate::audio::metrics::OutputMetrics::new();
-        let mut frame = [0.0f32; 1];
+        let mut callback = CallbackState::new(&shared);
         let mut output = [0.0f32; 4];
 
-        super::render_output(&shared, &mut output, &mut frame, &counters);
+        callback.render(&shared, &mut output, &counters);
         let first = shared.first_frame_ns.load(Ordering::Acquire);
         assert_ne!(first, 0);
         std::thread::sleep(Duration::from_millis(2));
-        super::render_output(&shared, &mut output, &mut frame, &counters);
+        callback.render(&shared, &mut output, &counters);
 
         assert_eq!(shared.first_frame_ns.load(Ordering::Acquire), first);
         assert_eq!(counters.snapshot().rendered_frames, 8);
+    }
+
+    /// 一起听的软同步把倍速调到 1.05：回调里立即按新倍速消费 ring、推进时钟，不停下会话
+    #[test]
+    fn speed_changes_take_effect_inside_the_callback_without_a_gap() {
+        let shared = render_test_shared(1, 96_000);
+        for index in 0..96_000 {
+            let sample = (0.5 * (std::f64::consts::TAU * 440.0 * index as f64 / 48_000.0).sin()) as f32;
+            assert!(shared.ring.try_push_frame(&[sample]));
+        }
+        let counters = crate::audio::metrics::OutputMetrics::new();
+        let mut callback = CallbackState::new(&shared);
+        let mut output = [0.0f32; 480];
+        for _ in 0..20 {
+            callback.render(&shared, &mut output, &counters);
+        }
+        let clock_before = shared.clock.position_us.load(Ordering::Acquire);
+        let ring_before = shared.ring.readable_samples();
+        assert_eq!(clock_before, 200_000, "1 倍速时 9 600 帧对应 200 ms");
+
+        shared.speed.store(1.05);
+        for _ in 0..100 {
+            callback.render(&shared, &mut output, &counters);
+        }
+        let clock_advance = shared.clock.position_us.load(Ordering::Acquire) - clock_before;
+        let consumed = ring_before - shared.ring.readable_samples();
+        assert!((clock_advance as f64 - 1_050_000.0).abs() < 25_000.0, "1 秒输出应推进约 1.05 秒媒体时间: {clock_advance}");
+        assert!(consumed > 48_000, "倍速后每秒应消费多于 48 000 帧: {consumed}");
+        assert_eq!(counters.snapshot().underruns, 0, "变速不能造成断音");
+        assert!(output.iter().any(|sample| sample.abs() > 0.1), "变速后仍在出声");
     }
 }
