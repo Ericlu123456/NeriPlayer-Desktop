@@ -325,6 +325,7 @@
     "shuffle_play": "Shuffle Play",
     "search_tracks": "Search tracks...",
     "locate_current": "Locate Now Playing",
+    "now_playing_failed": "The player view failed to open and was closed. Please try again.",
     "play_next": "Play Next",
     "add_to_queue": "Add to Queue",
     "add_to_playlist": "Add to Playlist",

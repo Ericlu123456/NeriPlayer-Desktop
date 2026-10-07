@@ -325,6 +325,7 @@
     "shuffle_play": "シャッフル再生",
     "search_tracks": "曲を検索...",
     "locate_current": "再生中の曲へ移動",
+    "now_playing_failed": "再生画面を開けなかったため閉じました。もう一度お試しください",
     "play_next": "次に再生",
     "add_to_queue": "キューに追加",
     "add_to_playlist": "プレイリストに追加",

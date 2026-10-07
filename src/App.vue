@@ -1,5 +1,8 @@
 <script setup lang="ts">
-import { ref, computed, nextTick, onMounted, onUnmounted, watch } from 'vue'
+import {
+  ref, computed, nextTick, onErrorCaptured, onMounted, onUnmounted, watch,
+  type ComponentInternalInstance, type ComponentPublicInstance,
+} from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { usePlayerStore, displayAlbum } from '@/stores/player'
 import { usePlaybackStatsStore } from '@/stores/playbackStats'
@@ -20,7 +23,8 @@ import NowPlaying from '@/components/NowPlaying.vue'
 import SideNav from '@/components/SideNav.vue'
 import AppToast from '@/components/AppToast.vue'
 import TitleBar from '@/components/TitleBar.vue'
-import { setLocale } from '@/i18n'
+import i18n, { setLocale } from '@/i18n'
+import { useToastStore } from '@/stores/toast'
 import { applyTheme } from '@/utils/theme'
 import { applyThemeColor } from '@/utils/themeColor'
 import { getTrackCoverUrl } from '@/utils/trackCover'
@@ -150,6 +154,29 @@ async function openNowPlaying() {
   playerTransitionPulse.value = Date.now()
   isNowPlayingOpen.value = true
 }
+
+// 播放页里的组件挂载失败后，外层 <transition> 之后的每次更新都会因为它没有渲染结果而抛错，
+// 整个界面就此卡住：关掉播放页，并换 key 重建这层 transition
+const nowPlayingBoundaryKey = ref(0)
+
+function failedToMountInNowPlaying(instance: ComponentPublicInstance | null): boolean {
+  let current: ComponentInternalInstance | null = instance?.$ ?? null
+  if (!current || current.isMounted) return false
+  for (; current; current = current.parent) {
+    if (current.type === NowPlaying) return true
+  }
+  return false
+}
+
+onErrorCaptured((error, instance) => {
+  if (!failedToMountInNowPlaying(instance)) return
+  appLog.error('now playing failed to mount:', error)
+  isNowPlayingOpen.value = false
+  nowPlayingMotionState.value = null
+  nowPlayingBoundaryKey.value++
+  useToastStore().error((i18n.global as any).t('player.now_playing_failed'))
+  return false
+})
 
 async function closeNowPlaying() {
   if (!isNowPlayingOpen.value && nowPlayingMotionState.value !== 'opening') return
@@ -526,7 +553,7 @@ onUnmounted(() => {
     </transition>
 
     <!-- NowPlaying 全屏覆盖 -->
-    <transition name="slide-up">
+    <transition :key="nowPlayingBoundaryKey" name="slide-up">
       <NowPlaying
         v-if="isNowPlayingOpen"
         ref="nowPlayingRef"

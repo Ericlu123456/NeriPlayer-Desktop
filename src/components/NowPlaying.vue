@@ -1443,6 +1443,40 @@ function restoreInfo() {
 }
 
 // 音质切换
+// 下面的计算属性在 setup 时就会被 watch 求值，选项表必须先于它们声明
+const neteaseQualities = [
+  { key: 'standard', label: 'settings.q_standard' },
+  { key: 'higher', label: 'settings.q_high' },
+  { key: 'exhigh', label: 'settings.q_exhigh' },
+  { key: 'lossless', label: 'settings.q_lossless' },
+  { key: 'hires', label: 'settings.q_hires' },
+  { key: 'jyeffect', label: 'settings.q_surround' },
+  { key: 'sky', label: 'settings.q_sky' },
+  { key: 'jymaster', label: 'settings.q_master' },
+]
+
+const qqQualities = [
+  { key: 'standard', label: 'settings.q_standard' },
+  { key: 'high', label: 'settings.q_high_yt' },
+  { key: 'lossless', label: 'settings.q_lossless' },
+]
+
+const youtubeQualities = [
+  { key: 'low', label: 'settings.q_low' },
+  { key: 'medium', label: 'settings.q_medium' },
+  { key: 'high', label: 'settings.q_high_yt' },
+  { key: 'very_high', label: 'settings.q_very_high' },
+]
+
+const biliQualities = [
+  { key: 'low', label: 'settings.q_smooth' },
+  { key: 'medium', label: 'settings.q_standard' },
+  { key: 'high', label: 'settings.q_good' },
+  { key: 'lossless', label: 'settings.q_lossless' },
+  { key: 'hires', label: 'settings.q_hires' },
+  { key: 'dolby', label: 'settings.q_dolby' },
+]
+
 const currentSource = computed(() => {
   const id = player.currentTrack?.id || ''
   if (id.startsWith('netease:')) return 'netease'
@@ -1619,39 +1653,6 @@ const downloadActionDisabled = computed(() =>
   !player.currentTrack
   || (isCurrentDownloading.value && !isCurrentDownloadCancellable.value && currentDownloadTask.value?.status !== 'error' && currentDownloadTask.value?.status !== 'cancelled')
 )
-
-const neteaseQualities = [
-  { key: 'standard', label: 'settings.q_standard' },
-  { key: 'higher', label: 'settings.q_high' },
-  { key: 'exhigh', label: 'settings.q_exhigh' },
-  { key: 'lossless', label: 'settings.q_lossless' },
-  { key: 'hires', label: 'settings.q_hires' },
-  { key: 'jyeffect', label: 'settings.q_surround' },
-  { key: 'sky', label: 'settings.q_sky' },
-  { key: 'jymaster', label: 'settings.q_master' },
-]
-
-const qqQualities = [
-  { key: 'standard', label: 'settings.q_standard' },
-  { key: 'high', label: 'settings.q_high_yt' },
-  { key: 'lossless', label: 'settings.q_lossless' },
-]
-
-const youtubeQualities = [
-  { key: 'low', label: 'settings.q_low' },
-  { key: 'medium', label: 'settings.q_medium' },
-  { key: 'high', label: 'settings.q_high_yt' },
-  { key: 'very_high', label: 'settings.q_very_high' },
-]
-
-const biliQualities = [
-  { key: 'low', label: 'settings.q_smooth' },
-  { key: 'medium', label: 'settings.q_standard' },
-  { key: 'high', label: 'settings.q_good' },
-  { key: 'lossless', label: 'settings.q_lossless' },
-  { key: 'hires', label: 'settings.q_hires' },
-  { key: 'dolby', label: 'settings.q_dolby' },
-]
 
 const isQualitySwitching = ref(false)
 

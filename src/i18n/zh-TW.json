@@ -325,6 +325,7 @@
     "shuffle_play": "隨機播放",
     "search_tracks": "搜尋歌曲...",
     "locate_current": "定位到正在播放",
+    "now_playing_failed": "播放頁開啟失敗，已關閉，可以重試",
     "play_next": "下一首播放",
     "add_to_queue": "加入佇列",
     "add_to_playlist": "加入歌單",
