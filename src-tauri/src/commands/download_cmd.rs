@@ -298,6 +298,10 @@ fn downloaded_audio_extension(path: &std::path::Path) -> Option<&'static str> {
         if head.len() >= 4 && &head[..4] == b"fLaC" {
             return Some("flac");
         }
+        // HLS 抽出的 AAC 前面也带 ID3（时间戳）；ADTS 同步字也满足 MP3 的掩码，要先判
+        if head.len() >= 2 && head[0] == 0xff && head[1] & 0xf6 == 0xf0 {
+            return Some("aac");
+        }
         return (head.len() >= 2 && head[0] == 0xff && head[1] & 0xe0 == 0xe0).then_some("mp3");
     }
     let starts = |magic: &[u8]| head.len() >= magic.len() && &head[..magic.len()] == magic;
@@ -2252,17 +2256,22 @@ mod tests {
         let mut tagged_flac = b"ID3\x04\x00\x00\x00\x00\x00\x0a".to_vec();
         tagged_flac.extend([0u8; 10]);
         tagged_flac.extend_from_slice(flac);
+        let adts: &[u8] = include_bytes!("../audio/fixtures/hls-silence.aac");
+        let mut tagged_adts = b"ID3\x04\x00\x00\x00\x00\x00\x0a".to_vec();
+        tagged_adts.extend([0u8; 10]);
+        tagged_adts.extend_from_slice(adts);
         let mut ogg_opus = b"OggS\x00\x02".to_vec();
         ogg_opus.extend([0u8; 22]);
         ogg_opus.extend_from_slice(b"OpusHead\x01\x02");
-        let cases: [(&str, &[u8], Option<&str>); 9] = [
+        let cases: [(&str, &[u8], Option<&str>); 10] = [
             ("flac", flac, Some("flac")),
             ("id3-flac", &tagged_flac, Some("flac")),
+            ("id3-adts", &tagged_adts, Some("aac")),
             ("mp3", include_bytes!("../audio/fixtures/ffmpeg/mp3-stereo-1s.mp3"), Some("mp3")),
             ("m4a", include_bytes!("../audio/fixtures/ffmpeg/aac-stereo-1s.m4a"), Some("m4a")),
             ("webm", include_bytes!("../audio/fixtures/ffmpeg/opus-stereo-1s.webm"), Some("webm")),
             ("wav", include_bytes!("../audio/fixtures/ffmpeg/pcm-s16-stereo-0.5s.wav"), Some("wav")),
-            ("adts", include_bytes!("../audio/fixtures/hls-silence.aac"), Some("aac")),
+            ("adts", adts, Some("aac")),
             ("ogg-opus", &ogg_opus, Some("opus")),
             ("html", b"<html>Access denied</html>", None),
         ];
