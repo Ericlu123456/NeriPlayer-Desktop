@@ -36,6 +36,7 @@ import {
 import { trackInfoToLtTrack, ltTrackToTrackInfo, toShareableQueueSnapshot, trustedInboundStreamUrls } from './mapper'
 import { queueReferences, applyListenTogetherQueueMutation, buildListenTogetherQueueMutationPlan, getLtQueueReference, setLtQueueReference } from './queue'
 import { acceptRoomState, resolveExpectedPosition, resolvePositionSync, resolveSoftSyncRecheckAction, SOFT_SYNC_RECHECK_INTERVAL_MS } from './playbackSync'
+import { isTerminalReconnectError, MAX_RECONNECT_ATTEMPTS, reconnectDelayMs } from './reconnect'
 import { createLogger } from '@/utils/logger'
 
 const log = createLogger('listen-together')
@@ -57,9 +58,6 @@ const LISTENER_PING_INTERVAL_MS = 20_000
 // 已处理转发请求 eventId 上限（对齐 Android ForwardedRequestDeduper 语义）
 const HANDLED_FORWARDED_EVENT_LIMIT = 256
 const HANDLED_FORWARDED_REQUESTER_LIMIT = 64
-
-// 重连配置
-const RECONNECT_DELAYS = [1000, 2000, 4000, 8000, 16000, 30000]
 
 export const useListenTogetherStore = defineStore('listenTogether', () => {
   const settings = useSettingsStore()
@@ -305,6 +303,21 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
 
   /** 离开房间 */
   async function leaveRoom() {
+    await endSession(true)
+  }
+
+  /**
+   * 服务器已经结束了这次会话（房间关闭、凭据失效、重连次数用尽）：只在本地收尾，
+   * 不再向 /leave 发请求，并把原因留给界面显示（对齐 Android closeRoomLocally）
+   */
+  async function closeRoomLocally(reason: string) {
+    if (!roomId.value) return
+    await endSession(false)
+    sessionError.value = reason
+    useToastStore().error((i18n.global as any).t('listen_together.room_closed'))
+  }
+
+  async function endSession(notifyServer: boolean) {
     // 递增会话代际，让在途的延迟同步回调失效
     _sessionGeneration++
     _playbackApplySequence++
@@ -322,11 +335,13 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
       _reconnectTimer = null
     }
 
-    try {
-      const result = await invoke<ListenTogetherControlResponse | null>('lt_leave_room')
-      if (result?.ok === false) log.warn('leave room rejected:', result.error)
-    } catch (error) {
-      log.warn('leave room request failed:', error)
+    if (notifyServer) {
+      try {
+        const result = await invoke<ListenTogetherControlResponse | null>('lt_leave_room')
+        if (result?.ok === false) log.warn('leave room rejected:', result.error)
+      } catch (error) {
+        log.warn('leave room request failed:', error)
+      }
     }
     try {
       await invoke('lt_disconnect_ws')
@@ -429,6 +444,11 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
       stopHeartbeat()
       setSyncRate(null)
 
+      // 服务器以"房间已关闭"等理由关掉连接时重连没有意义
+      if (roomId.value && isTerminalReconnectError(event.payload.reason)) {
+        void closeRoomLocally(event.payload.reason)
+        return
+      }
       // 是否需要重连
       if (wasConnected && roomId.value) {
         scheduleReconnect()
@@ -1577,32 +1597,45 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
   // 断线重连
   function scheduleReconnect() {
     if (_reconnectTimer) return
-
-    const delay = RECONNECT_DELAYS[Math.min(_reconnectAttempt, RECONNECT_DELAYS.length - 1)]
+    // 对齐 Android：重连有上限，用尽后在本地结束会话，而不是一直显示"连接中"
+    if (_reconnectAttempt >= MAX_RECONNECT_ATTEMPTS) {
+      void closeRoomLocally('reconnect_max_attempts_exceeded')
+      return
+    }
     _reconnectAttempt++
+    const delay = reconnectDelayMs(_reconnectAttempt)
 
     _reconnectTimer = setTimeout(async () => {
       _reconnectTimer = null
       if (!_wsUrl || !roomId.value) return
       const generation = _sessionGeneration
+      const targetRoomId = roomId.value
 
       connectionState.value = 'connecting'
       try {
+        // 听众每次重连前都重新入房：凭据过期或被移出成员时才能拿到新的连接地址（对齐 Android）
+        if (!isController.value) {
+          const resp = await invoke<ListenTogetherRoomResponse>('lt_join_room', {
+            baseUrl: baseUrl.value,
+            roomId: targetRoomId,
+            userUuid: userUuid.value,
+            nickname: nickname.value,
+            joinSecret: _joinSecret || undefined,
+          })
+          if (generation !== _sessionGeneration) return
+          if (!resp.ok) throw new Error(resp.error || 'rejoin failed')
+          updateJoinSecret(resp.joinSecret, _joinSecret)
+          _wsUrl = resolveWsUrl(resp, targetRoomId)
+        }
         await invoke('lt_connect_ws', { wsUrl: _wsUrl })
         if (generation !== _sessionGeneration) return
         // 重连后拉取最新 state
         const stateResp = await invoke<ListenTogetherStateResponse>('lt_get_room_state', {
           baseUrl: baseUrl.value,
-          roomId: roomId.value,
+          roomId: targetRoomId,
         })
         if (generation !== _sessionGeneration) return
-        if (stateResp.ok === false) {
-          // 房间不存在/已关闭属终态: 不再无限重连, 直接离房并提示
-          const t = (i18n.global as any).t
-          useToastStore().error(stateResp.error || t('listen_together.room_closed'))
-          await leaveRoom()
-          return
-        }
+        if (stateResp.ok === false) throw new Error(stateResp.error || 'room closed')
         if (stateResp.ok && stateResp.state) {
           if (stateResp.serverNowMs && Number.isFinite(stateResp.serverNowMs)) {
             _serverClockOffsetMs = stateResp.serverNowMs - Date.now()
@@ -1610,32 +1643,12 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
           commitRoomState(stateResp.state, 'reconnect', stateResp.expectedPositionMs)
         }
         if (isController.value) startHeartbeat()
-      } catch {
+      } catch (error) {
         if (generation !== _sessionGeneration) return
-        // 反复失败且非房主时, 尝试用新 token/wsUrl 重新入房恢复成员资格
-        if (!isController.value && _reconnectAttempt >= RECONNECT_DELAYS.length && roomId.value) {
-          const targetRoomId = roomId.value
-          try {
-            const resp = await invoke<ListenTogetherRoomResponse>('lt_join_room', {
-              baseUrl: baseUrl.value,
-              roomId: targetRoomId,
-              userUuid: userUuid.value,
-              nickname: nickname.value,
-              joinSecret: _joinSecret || undefined,
-            })
-            if (generation !== _sessionGeneration) return
-            if (resp.ok) {
-              _reconnectAttempt = 0
-              updateJoinSecret(resp.joinSecret, _joinSecret)
-              const newWsUrl = resolveWsUrl(resp, targetRoomId)
-              await connectWs(newWsUrl)
-              startListenerPing()
-              if (resp.state) {
-                commitRoomState(resp.state, 'reconnect')
-              }
-              return
-            }
-          } catch {}
+        const message = error instanceof Error ? error.message : String(error)
+        if (isTerminalReconnectError(message)) {
+          await closeRoomLocally(message)
+          return
         }
         scheduleReconnect()
       }

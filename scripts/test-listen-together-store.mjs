@@ -797,6 +797,47 @@ await test('identity reset is immediate and refused inside a room', async h => {
   assert.equal(h.store.userUuid.value, inRoom)
 })
 
+const closedWhileAway = async h => {
+  await h.join()
+  await h.message({ type: 'welcome', state: room(), role: 'listener' })
+  h.emit('lt:disconnected', { connectionId: 'connection-current', code: 1006, reason: '' })
+  await flush()
+  await h.timers.advance(2000)
+  assert.equal(h.store.roomId.value, null, 'a closed room ends the session instead of reconnecting forever')
+  assert.ok(!h.commands.some(entry => entry.command === 'lt_leave_room'), 'a closed room is not asked to let us leave')
+  assert.match(h.store.sessionError.value, /410/)
+  const connects = h.commands.filter(entry => entry.command === 'lt_connect_ws').length
+  await h.timers.advance(120_000)
+  assert.equal(h.commands.filter(entry => entry.command === 'lt_connect_ws').length, connects)
+}
+closedWhileAway.connects = 0
+closedWhileAway.options = {
+  invoke: command => command === 'lt_connect_ws' && ++closedWhileAway.connects > 1
+    ? Promise.reject(new Error('WebSocket connect failed: HTTP error: 410 Gone'))
+    : undefined,
+}
+await test('a room closed while disconnected is closed locally without reconnecting', closedWhileAway)
+
+const exhausted = async h => {
+  await h.join()
+  await h.message({ type: 'welcome', state: room(), role: 'listener' })
+  exhausted.failing = true
+  h.emit('lt:disconnected', { connectionId: 'connection-current', code: 1006, reason: '' })
+  await flush()
+  await h.timers.advance(240_000)
+  assert.equal(h.store.roomId.value, null)
+  assert.equal(h.store.sessionError.value, 'reconnect_max_attempts_exceeded')
+  assert.equal(h.commands.filter(entry => entry.command === 'lt_connect_ws').length, 1 + 15)
+  const rejoins = h.commands.filter(entry => entry.command === 'lt_join_room').length
+  assert.equal(rejoins, 1 + 15, 'a listener rejoins before every reconnect attempt')
+}
+exhausted.options = {
+  invoke: command => exhausted.failing && command === 'lt_connect_ws'
+    ? Promise.reject(new Error('connection reset by peer'))
+    : undefined,
+}
+await test('reconnecting gives up after fifteen attempts', exhausted)
+
 if (failures.length) {
   console.error(`${passed} store tests passed; ${failures.length} failed: ${failures.join('; ')}`)
   process.exitCode = 1
