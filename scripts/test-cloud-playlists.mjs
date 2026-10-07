@@ -126,6 +126,28 @@ try {
     assert.match(current.store.userPlaylistsStatus.youtube.error, /登录已失效/)
   })
 
+  await regression('a background prefetch fails quietly unless a page joins it', async () => {
+    const current = await runtime()
+    const quiet = current.store.ensureUserPlaylists('netease', { quiet: true })
+    current.requests[0].reject(new Error('离线'))
+    await quiet
+    assert.equal(current.toasts.length, 0, '后台预取失败不弹提示')
+    assert.match(current.store.userPlaylistsStatus.netease.error, /离线/, '失败仍记在状态里，进页面能看到')
+    assert.equal(current.errors.length, 1, '失败要记日志')
+
+    const prefetch = current.store.fetchUserPlaylists('bilibili', { quiet: true })
+    const page = current.store.ensureUserPlaylists('bilibili')
+    assert.equal(current.requests.length, 2, '页面加入同一个请求，不重复拉')
+    current.requests[1].reject(new Error('超时'))
+    await Promise.all([prefetch, page])
+    assert.equal(current.toasts.length, 1, '页面在等结果时失败要提示')
+
+    const next = current.store.fetchUserPlaylists('bilibili', { quiet: true })
+    current.requests[2].reject(new Error('超时'))
+    await next
+    assert.equal(current.toasts.length, 1, '上一次页面等待不能让下一次后台请求也弹提示')
+  })
+
   await regression('switching accounts mid-request drops the old account result', async () => {
     const current = await runtime({ userPlaylists: { youtube: [playlist('VL-A', '账号 A')] } })
     const old = current.store.ensureUserPlaylists('youtube')

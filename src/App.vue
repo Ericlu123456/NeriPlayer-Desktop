@@ -478,12 +478,16 @@ onMounted(async () => {
   // 账号状态就绪后再接着下上次没下完的任务（解析地址需要登录态）
   void useDownloadStore().resumePendingDownloads().catch(error => appLog.warn('Resume pending downloads failed:', error))
 
-  // 云端歌单先用上次的缓存显示，这里在后台按已登录的账号各刷新一份，进音乐库时就是新的
+  // 云端歌单先用上次的缓存显示，这里在后台按已登录的账号各刷新一份，进音乐库时就是新的。
+  // 关了国际化就没有 YouTube 入口，不去请求它
   const recommend = useRecommendStore()
-  for (const platform of ['netease', 'bilibili', 'youtube'] as const) {
-    if (authStore[platform].loggedIn) void recommend.ensureUserPlaylists(platform)
+  const prefetched = settingsStore.internationalizationEnabled
+    ? ['netease', 'bilibili', 'youtube'] as const
+    : ['netease', 'bilibili'] as const
+  for (const platform of prefetched) {
+    if (authStore[platform].loggedIn) void recommend.ensureUserPlaylists(platform, { quiet: true })
   }
-  if (authStore.netease.loggedIn) void recommend.ensureUserAlbums()
+  if (authStore.netease.loggedIn) void recommend.ensureUserAlbums({ quiet: true })
 
   // 监听后端 playlists-changed 事件，防抖触发自动同步；同步自己写回的歌单带 "sync" 标记，不再触发
   unlistenPlaylistChanged = await listen<string | null>('playlists-changed', (event) => {

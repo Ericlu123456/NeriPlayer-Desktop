@@ -54,6 +54,11 @@ export interface CloudListStatus {
   error: string | null
 }
 
+export interface CloudListLoadOptions {
+  /** 后台预取：失败只记在状态里，不弹提示 */
+  quiet?: boolean
+}
+
 type HomeSongSectionKey = 'hot' | 'radar'
 
 const HOME_SEARCH_KEYWORDS: Record<HomeSongSectionKey, string> = {
@@ -92,6 +97,8 @@ export const useRecommendStore = defineStore('recommend', () => {
   const cloudGenerations = new Map<string, number>()
   // 本次启动已向平台确认过的列表：缓存先顶上，每次启动后第一次用到时在后台刷新一次
   const revalidatedCloudLists = new Set<string>()
+  // 有页面在等结果的请求；只有后台预取在等时失败不弹提示，页面上的状态照样会显示失败
+  const cloudRequestsToNotify = new Set<string>()
   const ALBUMS_KEY = 'netease-albums'
 
   // 用户喜欢的歌曲 ID 集合
@@ -163,6 +170,7 @@ export const useRecommendStore = defineStore('recommend', () => {
   function forgetCloudList(key: string) {
     cloudGenerations.set(key, cloudGeneration(key) + 1)
     cloudRequests.delete(key)
+    cloudRequestsToNotify.delete(key)
     revalidatedCloudLists.delete(key)
   }
 
@@ -179,7 +187,9 @@ export const useRecommendStore = defineStore('recommend', () => {
     setStatus: (status: CloudListStatus) => void,
     hasData: () => boolean,
     load: () => Promise<(() => void) | undefined>,
+    { quiet = false }: CloudListLoadOptions = {},
   ): Promise<void> {
+    if (!quiet) cloudRequestsToNotify.add(key)
     const pending = cloudRequests.get(key)
     if (pending) return pending
     const generation = cloudGeneration(key)
@@ -197,10 +207,12 @@ export const useRecommendStore = defineStore('recommend', () => {
         log.error(`load ${key}:`, e)
         error.value = String(e)
         setStatus({ loading: false, error: String(e) })
-        if (!hasData()) useToastStore().error(String(e))
+        if (!hasData() && cloudRequestsToNotify.has(key)) useToastStore().error(String(e))
       }
     })().finally(() => {
-      if (cloudRequests.get(key) === request) cloudRequests.delete(key)
+      if (cloudRequests.get(key) !== request) return
+      cloudRequests.delete(key)
+      cloudRequestsToNotify.delete(key)
     })
     cloudRequests.set(key, request)
     return request
@@ -298,7 +310,7 @@ export const useRecommendStore = defineStore('recommend', () => {
   }
 
   /** 向平台拉取用户歌单；正在拉时返回同一个请求 */
-  function fetchUserPlaylists(platform: string): Promise<void> {
+  function fetchUserPlaylists(platform: string, options?: CloudListLoadOptions): Promise<void> {
     return loadCloudList(
       platform,
       (status) => { userPlaylistsStatus.value = { ...userPlaylistsStatus.value, [platform]: status } },
@@ -307,13 +319,14 @@ export const useRecommendStore = defineStore('recommend', () => {
         const playlists = await requestUserPlaylists(platform)
         return () => { userPlaylists.value = { ...userPlaylists.value, [platform]: playlists } }
       },
+      options,
     )
   }
 
   /** 先显示缓存的歌单；本次启动还没向平台确认过时在后台刷新一次 */
-  function ensureUserPlaylists(platform: string): Promise<void> {
-    if (revalidatedCloudLists.has(platform)) return cloudRequests.get(platform) ?? Promise.resolve()
-    return fetchUserPlaylists(platform)
+  function ensureUserPlaylists(platform: string, options?: CloudListLoadOptions): Promise<void> {
+    if (revalidatedCloudLists.has(platform) && !cloudRequests.has(platform)) return Promise.resolve()
+    return fetchUserPlaylists(platform, options)
   }
 
   async function requestUserPlaylists(platform: string): Promise<PlaylistInfo[]> {
@@ -462,7 +475,7 @@ export const useRecommendStore = defineStore('recommend', () => {
   }
 
   /** 向网易云拉取用户收藏的专辑；正在拉时返回同一个请求 */
-  function fetchUserAlbums(): Promise<void> {
+  function fetchUserAlbums(options?: CloudListLoadOptions): Promise<void> {
     return loadCloudList(
       ALBUMS_KEY,
       (status) => { userAlbumsStatus.value = status },
@@ -479,13 +492,14 @@ export const useRecommendStore = defineStore('recommend', () => {
         }))
         return () => { userAlbums.value = albums }
       },
+      options,
     )
   }
 
   /** 先显示缓存的专辑；本次启动还没向网易云确认过时在后台刷新一次 */
-  function ensureUserAlbums(): Promise<void> {
-    if (revalidatedCloudLists.has(ALBUMS_KEY)) return cloudRequests.get(ALBUMS_KEY) ?? Promise.resolve()
-    return fetchUserAlbums()
+  function ensureUserAlbums(options?: CloudListLoadOptions): Promise<void> {
+    if (revalidatedCloudLists.has(ALBUMS_KEY) && !cloudRequests.has(ALBUMS_KEY)) return Promise.resolve()
+    return fetchUserAlbums(options)
   }
 
   /** 获取 B站收藏夹内容 */
