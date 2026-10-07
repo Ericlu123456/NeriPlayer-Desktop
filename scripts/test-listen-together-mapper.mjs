@@ -28,16 +28,22 @@ async function loadMapperModule() {
     compilerOptions: { module: ts.ModuleKind.ES2022, target: ts.ScriptTarget.ES2022 },
   }).outputText
   const queueUrl = `data:text/javascript;base64,${Buffer.from(queueCompiled).toString('base64')}`
+  const streamQualitySource = await readFile(path.join(root, 'src/stores/listenTogether/streamQuality.ts'), 'utf8')
+  const streamQualityCompiled = ts.transpileModule(streamQualitySource.replace("from './protocol'", `from '${protocolUrl}'`), {
+    compilerOptions: { module: ts.ModuleKind.ES2022, target: ts.ScriptTarget.ES2022 },
+  }).outputText
+  const streamQualityUrl = `data:text/javascript;base64,${Buffer.from(streamQualityCompiled).toString('base64')}`
   const compiled = ts.transpileModule(mapperSource.replace(
     "from './protocol'", `from '${protocolUrl}'`,
-  ).replace("from './queue'", `from '${queueUrl}'`), {
+  ).replace("from './queue'", `from '${queueUrl}'`)
+    .replace("from './streamQuality'", `from '${streamQualityUrl}'`), {
     compilerOptions: {
       module: ts.ModuleKind.ES2022,
       target: ts.ScriptTarget.ES2022,
     },
   }).outputText
   const moduleUrl = `data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}`
-  return { ...await import(moduleUrl), ...await import(queueUrl) }
+  return { ...await import(moduleUrl), ...await import(queueUrl), ...await import(streamQualityUrl) }
 }
 
 async function loadProtocolModule() {
@@ -63,6 +69,12 @@ const {
   hasSameLtTrackSequence,
   getLtQueueReference,
   buildListenTogetherQueueMutationPlan,
+  decorateLtStreamUrl,
+  hasLtStreamQuality,
+  ltStreamQuality,
+  orderLtStreamUrlsForPreference,
+  neteaseShareQualityGroups,
+  biliShareQualityOrder,
 } = await loadMapperModule()
 
 const {
@@ -327,6 +339,51 @@ assert.equal(isTrustedInboundStreamUrl('https://music.126.net.evil.test/a', 'net
     '{"stableKey":"netease:dup","occurrence":-1}', '{"stableKey":"netease:dup","occurrence":0.5}']) {
     assert.equal(getLtQueueReference(trackInfoToLtTrack({ ...local(0), playlistKey })), undefined)
   }
+}
+
+// 共享直链音质标记与挑选：对齐 Android ListenTogetherQualityPolicy / PlayerManagerListenTogetherStreamExtensions
+{
+  const base = 'https://m701.music.126.net/a.flac'
+  assert.equal(decorateLtStreamUrl(base, 'netease', 'Lossless'), `${base}#neriplayer-ltw-quality=netease:lossless`)
+  assert.equal(decorateLtStreamUrl(`${base}#x=1`, 'netease', 'sky'), `${base}#x=1&neriplayer-ltw-quality=netease:sky`)
+  assert.equal(decorateLtStreamUrl(`${base}#neriplayer-ltw-quality=netease:exhigh`, 'netease', 'sky'),
+    `${base}#neriplayer-ltw-quality=netease:sky`, 'an existing tag is replaced')
+  assert.equal(decorateLtStreamUrl(base, 'netease', 'ultra'), base, 'unknown qualities stay untagged')
+  assert.equal(decorateLtStreamUrl(base, 'bilibili', 'high'), `${base}#neriplayer-ltw-quality=bili:high`)
+  assert.equal(ltStreamQuality(`${base}#x=1&neriplayer-ltw-quality=bili:dolby`, 'bilibili'), 'dolby')
+  assert.equal(ltStreamQuality(`${base}#neriplayer-ltw-quality=bili:dolby`, 'netease'), null, 'the source must match')
+  assert.equal(hasLtStreamQuality(`${base}#neriplayer-ltw-quality=netease:hires`), true)
+  assert.equal(hasLtStreamQuality(base), false)
+
+  const tagged = quality => `https://m701.music.126.net/${quality}.flac#neriplayer-ltw-quality=netease:${quality}`
+  const offered = [tagged('exhigh'), tagged('lossless'), tagged('sky'), 'https://m701.music.126.net/plain.mp3']
+  const order = preferred => orderLtStreamUrlsForPreference(offered, 'netease', preferred)
+    .map(url => ltStreamQuality(url, 'netease') ?? 'untagged')
+  assert.deepEqual(order('lossless'), ['lossless', 'exhigh', 'sky', 'untagged'])
+  assert.deepEqual(order('hires'), ['lossless', 'exhigh', 'sky', 'untagged'], 'equally close: the lower quality first')
+  assert.deepEqual(order('standard'), ['exhigh', 'lossless', 'sky', 'untagged'])
+  assert.deepEqual(order('jymaster'), ['sky', 'lossless', 'exhigh', 'untagged'])
+  assert.deepEqual(orderLtStreamUrlsForPreference([tagged('sky'), tagged('sky').replace('#', '#a=1&')], 'netease', 'sky').length, 1,
+    'the same address with different fragments is one candidate')
+
+  assert.deepEqual(neteaseShareQualityGroups('lossless'), [['lossless'], ['exhigh', 'higher', 'standard'], ['sky']])
+  assert.deepEqual(neteaseShareQualityGroups('exhigh'), [['exhigh', 'higher', 'standard'], ['lossless'], ['sky']])
+  assert.deepEqual(neteaseShareQualityGroups('hires'), [['hires'], ['exhigh', 'higher', 'standard'], ['lossless']])
+  assert.deepEqual(neteaseShareQualityGroups('bogus'), [['exhigh', 'higher', 'standard'], ['lossless'], ['sky']])
+
+  assert.deepEqual(biliShareQualityOrder('high', new Set(['high', 'medium', 'lossless'])), ['high', 'lossless'])
+  assert.deepEqual(biliShareQualityOrder('hires', new Set(['hires', 'high'])), ['hires', 'high'])
+  assert.deepEqual(biliShareQualityOrder('high', new Set(['medium', 'low'])), ['medium', 'low'])
+  assert.deepEqual(biliShareQualityOrder('dolby', new Set(['high'])), ['high'])
+
+  // 听众：标了音质的直链按自己的偏好挑，没给偏好时保持房主的顺序
+  const room = {
+    channelId: 'netease', audioId: '1', name: 'Song', artist: 'A', album: '', durationMs: 1000,
+    stableKey: 'netease:1', streamUrls: [tagged('exhigh'), tagged('lossless')],
+  }
+  assert.equal(ltTrackToTrackInfo(room, 'lossless').audioUrl, tagged('lossless'))
+  assert.deepEqual(ltTrackToTrackInfo(room, 'lossless').syncPayload.streamUrls, [tagged('lossless'), tagged('exhigh')])
+  assert.equal(ltTrackToTrackInfo(room).audioUrl, tagged('exhigh'))
 }
 
 console.log('test-listen-together-mapper: ok')

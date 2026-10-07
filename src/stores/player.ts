@@ -47,6 +47,14 @@ import {
 } from '@/modules/playback/playbackPolicy'
 import { resolvePlaybackQueueStartIndex } from '@/modules/playback/playbackQueue'
 import {
+  biliShareQualityOrder,
+  decorateLtStreamUrl,
+  hasLtStreamQuality,
+  LT_SHARE_LIMITS,
+  ltChannelForSource,
+  neteaseShareQualityGroups,
+} from '@/stores/listenTogether/streamQuality'
+import {
   LONG_FORM_MIN_DURATION_MS,
   longFormPositionForPersistence,
   resolveLongFormResumePosition,
@@ -1304,6 +1312,7 @@ export const usePlayerStore = defineStore('player', () => {
       ? track.audioUrl.trim()
       : null
     currentResolvedStreamUrls = currentStreamUrl.value ? [currentStreamUrl.value] : []
+    rememberStreamQualities(null)
     const wasPlayingBeforeSwitch = isPlaying.value
     const hadPlaybackSessionBeforeRequest = hasPlaybackSession.value
     const isSwitchingTrack = !!previousTrack && previousTrack.id !== track.id
@@ -1622,6 +1631,7 @@ export const usePlayerStore = defineStore('player', () => {
                   if (token === playbackRequestToken) {
                     currentStreamUrl.value = resolved.source === 'local' ? null : candidateUrl
                     currentResolvedStreamUrls = resolved.source === 'local' ? [] : candidates.slice(candidateIndex)
+                    rememberStreamQualities(resolved)
                     result = selectPlaybackCandidate(resolved, candidateIndex)
                   }
                   markLoadStartApplied(startPlan)
@@ -2479,7 +2489,27 @@ export const usePlayerStore = defineStore('player', () => {
   const playbackSpeed = ref(settings.playbackSpeed)
   const currentStreamUrl = ref<string | null>(null)
   let currentResolvedStreamUrls: string[] = []
+  // 自己解析出的直链对应的一起听频道和音质，分享给听众时据此加音质标记
+  let currentStreamChannel: string | null = null
+  let currentStreamQualities = new Map<string, string>()
   let listenTogetherSyncRateMultiplier: number | null = null
+
+  function rememberStreamQualities(resolved: ResolvedPlaybackSource | null) {
+    // 直链（包括房间给的）和试听片段的实际音质未知，不标
+    currentStreamChannel = resolved && !resolved.isPreview ? ltChannelForSource(resolved.source) : null
+    currentStreamQualities = new Map()
+    if (!resolved || !currentStreamChannel) return
+    currentStreamQualities.set(resolved.url, resolved.audioInfo?.qualityKey ?? resolved.qualityKey)
+    for (const detail of resolved.candidateDetails ?? []) {
+      currentStreamQualities.set(detail.url, detail.audioInfo?.qualityKey ?? detail.qualityKey)
+    }
+  }
+
+  /** 分享出去的链接带音质标记（对齐 Android decorateListenTogetherStreamUrl）；已带标记的保持原样 */
+  function shareableStreamUrl(url: string): string {
+    if (!currentStreamChannel || hasLtStreamQuality(url)) return url
+    return decorateLtStreamUrl(url, currentStreamChannel, currentStreamQualities.get(url))
+  }
 
   function effectivePlaybackSpeed(): number {
     const multiplier = listenTogetherSyncRateMultiplier ?? 1
@@ -2505,12 +2535,12 @@ export const usePlayerStore = defineStore('player', () => {
 
   function getCurrentStreamUrl(trackId?: string): string | null {
     if (!currentTrack.value || (trackId && currentTrack.value.id !== trackId)) return null
-    return currentStreamUrl.value
+    return currentStreamUrl.value ? shareableStreamUrl(currentStreamUrl.value) : null
   }
 
   function getCurrentStreamUrls(trackId?: string): string[] {
     if (!currentTrack.value || (trackId && currentTrack.value.id !== trackId)) return []
-    return [...currentResolvedStreamUrls]
+    return currentResolvedStreamUrls.map(shareableStreamUrl)
   }
 
   /**
@@ -2519,13 +2549,65 @@ export const usePlayerStore = defineStore('player', () => {
    */
   async function resolveShareableStreamUrls(track: TrackInfo): Promise<string[]> {
     try {
-      const result = await resolvePlaybackResult(track, playbackSourceSettings())
+      const settings = playbackSourceSettings()
+      if (getPlaybackSourceKind(track) === 'netease') return await resolveNeteaseShareableStreamUrls(track, settings)
+      const result = await resolvePlaybackResult(track, settings)
       if (result.type !== 'success' || result.isPreview || result.streamType === 'hls') return []
-      return [...new Set([result.url, ...result.candidateUrls])].filter(url => isDirectStreamUrl(url))
+      const channelId = ltChannelForSource(result.source)
+      if (!channelId) return []
+      const candidates = [
+        { url: result.url, quality: result.audioInfo?.qualityKey ?? result.qualityKey, bitrate: result.bitrate ?? 0 },
+        ...(result.candidateDetails ?? []).filter(detail => detail.streamType !== 'hls').map(detail => ({
+          url: detail.url, quality: detail.audioInfo?.qualityKey ?? detail.qualityKey, bitrate: detail.bitrate ?? 0,
+        })),
+      ].filter((candidate, index, all) =>
+        isDirectStreamUrl(candidate.url) && all.findIndex(other => other.url === candidate.url) === index)
+      const chosen = result.source === 'bilibili'
+        ? pickBiliShareableStreams(candidates, settings.biliQuality)
+        : candidates.slice(0, LT_SHARE_LIMITS[channelId] ?? 1)
+      return chosen.map(candidate => decorateLtStreamUrl(candidate.url, channelId, candidate.quality))
     } catch (error) {
       log.warn('resolve shareable stream failed:', error)
       return []
     }
+  }
+
+  /**
+   * 网易云按音质组各取一条（对齐 Android resolveNeteaseListenTogetherShareableStreams）：
+   * 组内依次请求，实际音质已经分享过就试下一档，最多三条
+   */
+  async function resolveNeteaseShareableStreamUrls(track: TrackInfo, settings: PlaybackSourceSettings): Promise<string[]> {
+    const urls: string[] = []
+    const qualities = new Set<string>()
+    for (const group of neteaseShareQualityGroups(settings.neteaseQuality)) {
+      if (urls.length >= (LT_SHARE_LIMITS.netease ?? 3)) break
+      for (const quality of group) {
+        const result = await resolvePlaybackResult(track, settings, { qualityOverride: quality, allowFallback: false })
+          .catch(() => null)
+        if (!result || result.type !== 'success' || result.isPreview || result.source !== 'netease') continue
+        if (!isDirectStreamUrl(result.url)) continue
+        const actual = (result.audioInfo?.qualityKey ?? result.qualityKey ?? quality).toLowerCase()
+        if (qualities.has(actual)) continue
+        qualities.add(actual)
+        urls.push(decorateLtStreamUrl(result.url, 'netease', actual))
+        break
+      }
+    }
+    return urls
+  }
+
+  /** B 站按偏好、高→中→低、无损的顺序各取码率最高的一条，最多两条（对齐 Android selectBiliListenTogetherShareableStreams） */
+  function pickBiliShareableStreams<T extends { url: string; quality: string; bitrate: number }>(
+    candidates: T[],
+    preferredQuality: string,
+  ): T[] {
+    const byQuality = new Map<string, T>()
+    for (const candidate of [...candidates].sort((left, right) => right.bitrate - left.bitrate)) {
+      if (!byQuality.has(candidate.quality)) byQuality.set(candidate.quality, candidate)
+    }
+    return biliShareQualityOrder(preferredQuality, new Set(byQuality.keys()))
+      .map(quality => byQuality.get(quality))
+      .filter((candidate): candidate is T => !!candidate)
   }
 
   async function setSpeed(spd: number) {

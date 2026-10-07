@@ -5,6 +5,7 @@
 import type { TrackInfo } from '@/stores/player'
 import { LtChannels, type ListenTogetherTrack } from './protocol'
 import { setLtQueueReference } from './queue'
+import { orderLtStreamUrlsForPreference } from './streamQuality'
 
 type PayloadRecord = Record<string, unknown>
 
@@ -236,7 +237,7 @@ export function trackInfoToLtTrack(
  * ListenTogetherTrack -> TrackInfo
  * 按 channelId 构造 Desktop 的 id 格式, 并回填 syncPayload 供播放/同步复用
  */
-export function ltTrackToTrackInfo(lt: ListenTogetherTrack): TrackInfo {
+export function ltTrackToTrackInfo(lt: ListenTogetherTrack, preferredQuality?: string): TrackInfo {
   let id: string
   let album = lt.album || ''
   let source: string
@@ -280,8 +281,11 @@ export function ltTrackToTrackInfo(lt: ListenTogetherTrack): TrackInfo {
   if (mediaUri) syncPayload.mediaUri = mediaUri
 
   // 入站 streamUrl 必须过白名单再用作 audioUrl，未通过则回落到本地解析（audioUrl 置空）;
-  // mediaUri 仅作身份/回落，不作为可信直链
-  const trustedStreamUrls = trustedInboundStreamUrls(lt.channelId, lt.streamUrls, lt.streamUrl)
+  // mediaUri 仅作身份/回落，不作为可信直链。房主标了音质时按听众自己的偏好排序
+  const trusted = trustedInboundStreamUrls(lt.channelId, lt.streamUrls, lt.streamUrl)
+  const trustedStreamUrls = preferredQuality
+    ? orderLtStreamUrlsForPreference(trusted, lt.channelId, preferredQuality)
+    : trusted
   if (trustedStreamUrls.length) syncPayload.streamUrls = trustedStreamUrls
 
   return {

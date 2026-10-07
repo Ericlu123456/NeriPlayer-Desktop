@@ -22,9 +22,12 @@ function transpileUrl(source) {
 }
 const protocolUrl = transpileUrl(await readFile(new URL('../src/stores/listenTogether/protocol.ts', import.meta.url), 'utf8'))
 const queueUrl = transpileUrl(await readFile(new URL('../src/stores/listenTogether/queue.ts', import.meta.url), 'utf8'))
+const streamQualityUrl = transpileUrl((await readFile(new URL('../src/stores/listenTogether/streamQuality.ts', import.meta.url), 'utf8'))
+  .replace("from './protocol'", `from '${protocolUrl}'`))
 const mapperUrl = transpileUrl((await readFile(new URL('../src/stores/listenTogether/mapper.ts', import.meta.url), 'utf8'))
   .replace("from './protocol'", `from '${protocolUrl}'`)
-  .replace("from './queue'", `from '${queueUrl}'`))
+  .replace("from './queue'", `from '${queueUrl}'`)
+  .replace("from './streamQuality'", `from '${streamQualityUrl}'`))
 const failureUrl = transpileUrl(await readFile(new URL('../src/modules/playback/playbackFailure.ts', import.meta.url), 'utf8'))
 const sourceUrl = new URL('../src/modules/playback/playbackSource.ts', import.meta.url)
 const source = (await readFile(sourceUrl, 'utf8')).replace(

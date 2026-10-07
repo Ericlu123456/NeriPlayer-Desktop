@@ -50,6 +50,8 @@ const metadataText = await readFile(new URL('modules/playback/playbackAudioInfo.
 const localInfoText = await readFile(new URL('modules/playback/localAudioInfo.ts', root), 'utf8')
 const failure = await load(await readFile(new URL('modules/playback/playbackFailure.ts', root), 'utf8'))
 const longForm = await load(await readFile(new URL('modules/playback/longFormProgress.ts', root), 'utf8'))
+const ltProtocol = await load(await readFile(new URL('stores/listenTogether/protocol.ts', root), 'utf8'))
+const streamQuality = await load(await readFile(new URL('stores/listenTogether/streamQuality.ts', root), 'utf8'), { './protocol': ltProtocol })
 const deferred = () => {
   let resolve, reject
   const promise = new Promise((yes, no) => { resolve = yes; reject = no })
@@ -119,6 +121,7 @@ async function runtime(options = {}) {
     '@/modules/playback/playbackPolicy': { ...policy, PlaybackStartupWatchdog: class { cancel() {} schedule() {} } },
     '@/modules/playback/playbackQueue': queue,
     '@/modules/playback/longFormProgress': longForm,
+    '@/stores/listenTogether/streamQuality': streamQuality,
     '@/modules/playback/playbackRequest': request,
     '@/modules/playback/playerState': state,
     '@/utils/logger': { createLogger: () => ({ info() {}, warn() {}, error() {} }) },
@@ -374,6 +377,38 @@ await run('the remembered position is ignored when the setting is off or the tra
   for (const r of [off, short]) {
     assert.equal(r.calls.find(call => call.command === 'play_url_streaming').args.startPositionMs, 0)
   }
+})
+
+await run('a host shares NetEase links per quality group and tags what it plays', async () => {
+  const levels = []
+  const r = await runtime({
+    resolve: args => {
+      levels.push(args.quality)
+      // 没有超清母带：请求 sky 时平台退回无损
+      const level = args.quality === 'sky' ? 'lossless' : args.quality
+      return { url: `https://m701.music.126.net/${level}.flac`, bitrate: 1000000, format: 'flac', level, duration_ms: 180000 }
+    },
+  })
+  const song = track('401')
+  assert.deepEqual(await r.store.resolveShareableStreamUrls(song), [
+    'https://m701.music.126.net/hires.flac#neriplayer-ltw-quality=netease:hires',
+    'https://m701.music.126.net/exhigh.flac#neriplayer-ltw-quality=netease:exhigh',
+    'https://m701.music.126.net/lossless.flac#neriplayer-ltw-quality=netease:lossless',
+  ], 'the preferred quality first, then exhigh and lossless (Android takes three groups)')
+
+  await r.store.play(song); await flush()
+  assert.deepEqual(r.store.getCurrentStreamUrls(song.id), ['https://m701.music.126.net/hires.flac#neriplayer-ltw-quality=netease:hires'])
+  assert.equal(r.store.getCurrentStreamUrl(song.id), 'https://m701.music.126.net/hires.flac#neriplayer-ltw-quality=netease:hires')
+})
+
+await run('a link received from the room keeps the host tag and an untagged one gets none', async () => {
+  const r = await runtime()
+  const tagged = 'https://m701.music.126.net/a.flac#neriplayer-ltw-quality=netease:lossless'
+  await r.store.play({ ...track('402'), audioUrl: tagged, syncPayload: { channelId: 'netease', streamUrls: [tagged] } }); await flush()
+  assert.equal(r.store.getCurrentStreamUrl('netease:402'), tagged)
+  const untagged = 'https://m701.music.126.net/b.flac'
+  await r.store.play({ ...track('403'), audioUrl: untagged }); await flush()
+  assert.equal(r.store.getCurrentStreamUrl('netease:403'), untagged, 'the quality of a direct link is unknown')
 })
 
 if (failures) process.exitCode = 1

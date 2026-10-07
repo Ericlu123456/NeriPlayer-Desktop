@@ -26,6 +26,7 @@ import type {
 import {
   desktopRepeatToWire,
   isValidLtNickname,
+  LtChannels,
   normalizeLtHttpBaseUrl,
   normalizeLtInviteBaseUrl,
   normalizeLtJoinSecret,
@@ -1014,11 +1015,19 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
     return JSON.stringify([key, reference?.stableKey === key ? reference.occurrence : 0])
   }
 
+  /** 房主给的直链标了音质时，听众按自己的音质设置挑（对齐 Android orderListenTogetherStreamUrlsForPreference） */
+  function preferredStreamQuality(channelId: string): string | undefined {
+    if (channelId === LtChannels.NETEASE) return settings.neteaseQuality
+    if (channelId === LtChannels.BILIBILI) return settings.biliQuality
+    if (channelId === LtChannels.YOUTUBE_MUSIC) return settings.youtubeQuality
+    return undefined
+  }
+
   function replacePlayerQueue(queue: import('./protocol').ListenTogetherTrack[], currentIndex: number) {
     const player = usePlayerStore()
     const references = queueReferences(queue)
     const tracks = queue.map((track, index) => ({
-      ...ltTrackToTrackInfo(track),
+      ...ltTrackToTrackInfo(track, preferredStreamQuality(track.channelId)),
       playlistKey: JSON.stringify(references[index]),
     }))
     player.queue.splice(0, player.queue.length, ...tracks)
@@ -1107,7 +1116,7 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
         || (!queueUpdate && previousIdentity !== targetIdentity)
       const remoteIsPlaying = state.playback.state === 'playing'
       const expectedPos = resolveExpectedPosition(state, Date.now() + _serverClockOffsetMs, expectedPositionMs)
-      const remoteTrack = ltTrackToTrackInfo(effectiveLtTrack)
+      const remoteTrack = ltTrackToTrackInfo(effectiveLtTrack, preferredStreamQuality(effectiveLtTrack.channelId))
       if (!isController.value && roomSettings.value.shareAudioLinks && !remoteTrack.audioUrl) {
         requestLinkForTrack(effectiveLtTrack, targetIndex)
       }
