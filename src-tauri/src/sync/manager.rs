@@ -135,7 +135,7 @@ pub(crate) fn complete_cloud_sync(
     local: &SyncData,
     epoch: u64,
 ) -> AppResult<SyncOutcome> {
-    apply_cloud_sync_locally(&completed.merged, &completed.scope, epoch)?;
+    let lyric_offsets = apply_cloud_sync_locally(&completed.merged, &completed.scope, epoch)?;
     let previous_playlists = completed
         .remote
         .as_ref()
@@ -174,6 +174,7 @@ pub(crate) fn complete_cloud_sync(
                 .map(|playlist| playlist.songs.len())
                 .sum::<usize>()
                 .saturating_sub(previous_songs) as i32,
+            lyric_offsets,
             ..Default::default()
         },
         &completed.merged,
@@ -185,21 +186,49 @@ pub(crate) fn complete_cloud_sync(
     })
 }
 
-/// 把云端合并结果整体落到本地：归档扩展、歌单与收藏、最近播放快照和合并基线
-/// 在同一个事务里提交，任何一步失败都不会留下只应用了一半的同步结果
-fn apply_cloud_sync_locally(merged: &SyncData, scope: &str, epoch: u64) -> AppResult<()> {
+/// 把云端合并结果整体落到本地：归档扩展、歌单与收藏、最近播放快照、合并基线和逐曲
+/// 歌词偏移校正在同一个事务里提交，任何一步失败都不会留下只应用了一半的同步结果
+///
+/// 返回校正后的歌词偏移映射（没有改动时为 None）
+fn apply_cloud_sync_locally(
+    merged: &SyncData,
+    scope: &str,
+    epoch: u64,
+) -> AppResult<Option<std::collections::BTreeMap<String, i64>>> {
     let _guard = playlist::lock_io();
     ensure_local_playlist_epoch(epoch)?;
     let store = merged_playlist_store(merged)?;
-    crate::db::user_db()?.write(|transaction| {
+    let synced_offsets = synced_lyric_offsets(merged);
+    let lyric_offsets = crate::db::user_db()?.write(|transaction| {
         super::storage::save_archive_metadata(transaction, merged)?;
         store.save_into(transaction)?;
         crate::library::favorites::save_into(transaction, &merged.favorite_playlists)?;
         super::storage::save_recent_play_history(transaction, merged)?;
-        super::storage::save_base_snapshot(transaction, merged, scope)
+        super::storage::save_base_snapshot(transaction, merged, scope)?;
+        crate::library::lyric_offsets::reconcile_with_synced(transaction, &synced_offsets)
     })?;
     playlist::mark_io_changed();
-    Ok(())
+    Ok(lyric_offsets)
+}
+
+/// 合并后各歌单副本里出现过的非 0 逐曲歌词偏移，按桌面曲目 id 汇总
+///
+/// 只看本地歌单：Android 改偏移时会写回所有包含该曲的本地歌单，收藏的在线歌单只是快照
+fn synced_lyric_offsets(merged: &SyncData) -> HashMap<String, Vec<i64>> {
+    let mut offsets: HashMap<String, Vec<i64>> = HashMap::new();
+    let songs = merged
+        .playlists
+        .iter()
+        .filter(|playlist| !playlist.is_deleted)
+        .flat_map(|playlist| playlist.songs.iter())
+        .filter(|song| song.user_lyric_offset_ms != 0);
+    for song in songs {
+        let values = offsets.entry(sync_song_to_track(song).id).or_default();
+        if !values.contains(&song.user_lyric_offset_ms) {
+            values.push(song.user_lyric_offset_ms);
+        }
+    }
+    offsets
 }
 
 /// 读取旧版同步侧车里的统计来源（仅供旧版统计导入使用）
@@ -1089,6 +1118,32 @@ mod tests {
         ];
         let ids: Vec<_> = local_sync_playlists(&store).into_iter().map(|playlist| playlist.id).collect();
         assert_eq!(ids, vec!["-1001", "42"], "a look-alike user playlist must not collide with favorites");
+    }
+
+    #[test]
+    fn synced_lyric_offsets_come_from_live_local_playlists_only() {
+        let song = |id: &str, offset| SyncSong { id: id.into(), name: "Song".into(), user_lyric_offset_ms: offset, ..Default::default() };
+        let playlist = |id: &str, songs, is_deleted| crate::sync::models::SyncPlaylist {
+            id: id.into(),
+            name: id.into(),
+            songs,
+            created_at: 1,
+            modified_at: 1,
+            is_deleted,
+            song_order_version: 0,
+        };
+        let data = SyncData {
+            playlists: vec![
+                playlist("1", vec![song("100", -200), song("101", 0)], false),
+                playlist("2", vec![song("100", 300), song("100", -200)], false),
+                playlist("3", vec![song("102", 50)], true),
+            ],
+            ..Default::default()
+        };
+        let offsets = synced_lyric_offsets(&data);
+        assert_eq!(offsets.get("netease:100"), Some(&vec![-200, 300]));
+        assert!(!offsets.contains_key("netease:101"), "0 carries no information");
+        assert!(!offsets.contains_key("netease:102"), "deleted playlists do not count");
     }
 
     #[test]

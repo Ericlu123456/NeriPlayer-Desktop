@@ -3,6 +3,7 @@ import { computed, ref, watch } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { useToastStore } from './toast'
 import { useHistoryStore } from './history'
+import { useLyricOffsetStore } from './lyricOffset'
 import { useSettingsStore } from './settings'
 import { useAuthStore } from './auth'
 import i18n from '@/i18n'
@@ -483,6 +484,7 @@ export const useSyncStore = defineStore('sync', () => {
         historyEntries: historySnapshot.entries,
         historyDeletions: historySnapshot.deletions,
       })
+      applySyncedLyricOffsets(result)
       if (!isCurrentConfiguration('github', generation)) return
       clearProtocolUpgrade('github')
       if (result.deferred) {
@@ -603,6 +605,7 @@ export const useSyncStore = defineStore('sync', () => {
         historyEntries: historySnapshot.entries,
         historyDeletions: historySnapshot.deletions,
       })
+      applySyncedLyricOffsets(result)
       if (!isCurrentConfiguration('webdav', generation)) return
       clearProtocolUpgrade('webdav')
       webdavBlockedBy = null
@@ -702,6 +705,11 @@ export const useSyncStore = defineStore('sync', () => {
 
   const followUpBackends = new Set<SyncBackend>()
   let followUpTimer: ReturnType<typeof setTimeout> | null = null
+
+  /** 合并结果校正过的逐曲歌词偏移已经写进数据库，内存里的映射跟上（不论账号配置是否已变化） */
+  function applySyncedLyricOffsets(result: { lyricOffsets?: Record<string, number> } | null | undefined) {
+    if (result?.lyricOffsets) useLyricOffsetStore().replaceFromSync(result.lyricOffsets)
+  }
 
   /** 记下需要补同步的提供商，不传时取所有已开启自动同步的提供商 */
   function requestFollowUpSync(backends?: SyncBackend[]) {

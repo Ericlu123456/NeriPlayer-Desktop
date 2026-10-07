@@ -137,6 +137,11 @@ export const useLyricOffsetStore = defineStore('lyricOffset', () => {
     }
   }
 
+  /** 同步把其它设备胜出的逐曲偏移写进了数据库，换成数据库里的新映射（不再回写） */
+  function replaceFromSync(map: Record<string, number>) {
+    offsets.value = sanitizeOffsets(map)
+  }
+
   // 该来源的系统全局默认偏移(基线)
   function defaultOffsetMs(bucket: LyricOffsetBucket): number {
     return resolveLyricDefaultOffsetMs(bucket, settings.cloudMusicOffset, settings.qqMusicOffset)
@@ -199,6 +204,7 @@ export const useLyricOffsetStore = defineStore('lyricOffset', () => {
     offsets,
     getUserOffsetMs,
     setUserOffsetMs,
+    replaceFromSync,
     defaultOffsetMs,
     effectiveOffsetMs,
     rebaseBucket,

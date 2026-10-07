@@ -52,6 +52,7 @@ const toast = {
 }
 const historyApplications = []
 const historyCommits = []
+const lyricOffsetReplacements = []
 let historyOutcome = 'applied'
 const mocks = {
   pinia, vue,
@@ -70,6 +71,7 @@ const mocks = {
       return historyOutcome
     },
   }) },
+  './lyricOffset': { useLyricOffsetStore: () => ({ replaceFromSync: map => lyricOffsetReplacements.push(map) }) },
   './settings': { useSettingsStore: () => ({ applySnapshot() {} }) },
   './auth': { useAuthStore: () => ({ async checkStatus() {} }) },
   '@/i18n': { __esModule: true, default: { global: { t: key => key } }, setLocale() {} },
@@ -748,6 +750,20 @@ await regression('a follow-up requested mid-sync waits for that sync to finish',
   } finally {
     clock.restore()
   }
+})
+
+await regression('lyric offsets corrected by the merge reach the offset store', async current => {
+  lyricOffsetReplacements.length = 0
+  const plain = delayInvoke('sync_github')
+  const first = current.syncGitHub(true)
+  plain.resolve({ success: true, message: 'Sync complete' })
+  await first
+  assert.deepEqual(lyricOffsetReplacements, [], 'a sync that changed no offsets leaves the store alone')
+  const corrected = delayInvoke('sync_webdav')
+  const second = current.syncWebDav(true)
+  corrected.resolve({ success: true, message: 'Sync complete', lyricOffsets: { 'netease:1': -200 } })
+  await second
+  assert.deepEqual(lyricOffsetReplacements, [{ 'netease:1': -200 }])
 })
 
 console.log(`test-sync-protocol-upgrade: existing approval checks and ${cases - failures.length}/${cases} delayed-response regressions passed`)

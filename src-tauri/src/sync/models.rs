@@ -1071,6 +1071,9 @@ pub struct SyncResult {
     pub songs_removed: i32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub history: Option<Value>,
+    /// 合并结果校正了本地逐曲歌词偏移时，给出新的完整映射
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lyric_offsets: Option<std::collections::BTreeMap<String, i64>>,
     /// 同步期间本地数据有变化，这一轮没有写回任何东西，前端应稍后再同步一次
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub deferred: bool,
