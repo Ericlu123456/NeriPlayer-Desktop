@@ -12,7 +12,10 @@ use std::time::{Duration, Instant};
 use crate::audio::analyzer::{AudioAnalyzer, SharedAudioLevel};
 use crate::audio::buffered::PcmRing;
 use crate::audio::decoder::{self, AudioDecoder};
-use crate::audio::effects::{AudioEffectsParams, EqualizerSource, LoudnessSource};
+use crate::audio::effects::{
+    gain_to_millibels, EffectsControl, EffectsProcessor, LoudnessMeter, TrackLoudness,
+    NORMALIZE_WARMUP,
+};
 use crate::audio::ffmpeg::ByteInput;
 use crate::audio::growing::GrowingAudioReader;
 use crate::audio::metrics::{
@@ -209,8 +212,6 @@ enum AudioCmd {
         reply: mpsc::Sender<Result<(), String>>,
     },
     QueryEmpty { reply: mpsc::Sender<bool> },
-    /// 丢掉 ring 中过期的已处理样本，使 EQ/响度/倍速近似实时
-    InvalidateProcessedBuffer,
     FadeOutPause {
         duration_ms: u32,
         transition_generation: u64,
@@ -300,6 +301,9 @@ struct PlaybackShared {
     first_frame_ns: Arc<AtomicU64>,
     /// 变速器已从 ring 取出、还没送到设备的帧数：判断「播完」时要算上
     stretch_buffered: AtomicUsize,
+    effects: Arc<EffectsControl>,
+    /// 这首歌的响度统计：解码线程写，输出回调读；同一首歌重建会话时沿用
+    loudness: Arc<TrackLoudness>,
 }
 
 impl PlaybackShared {
@@ -728,6 +732,10 @@ impl FrameResampler {
         }
     }
 
+    fn source_channels(&self) -> usize {
+        self.current.len()
+    }
+
     fn mixed_sample(&self, frame: &[f32], channel: usize, output_channels: usize) -> f32 {
         match &self.downmix {
             Some(downmix) => downmix.sample(frame, channel),
@@ -796,6 +804,15 @@ impl FrameResampler {
     }
 }
 
+/// 输出帧里承载节目内容的前几个声道，响度只按它们统计
+///
+/// 声道少的源接到声道多的设备上（立体声接 7.1），多出来的声道补的是零；
+/// 把它们算进去会把 RMS 拉低，音量均衡就会把每首歌都多抬几 dB。
+/// 单声道源复制到了每个声道，统计其中一个就够。
+fn loudness_channels(source_channels: usize, output_channels: usize) -> usize {
+    source_channels.clamp(1, output_channels.max(1))
+}
+
 fn channel_sample(frame: &[f32], output_channel: usize, output_channels: usize) -> f32 {
     match (frame.len(), output_channels) {
         (1, _) => frame[0],
@@ -824,7 +841,7 @@ pub struct PlayerEngine {
     pub current_path: Option<String>,
     pub duration_ms: u64,
     pub shared_audio_level: Arc<Mutex<SharedAudioLevel>>,
-    pub effects_params: Arc<Mutex<AudioEffectsParams>>,
+    effects: Arc<EffectsControl>,
     playback_generation: Arc<AtomicU64>,
     seek_generation: Arc<AtomicU64>,
     transition_generation: Arc<AtomicU64>,
@@ -848,12 +865,12 @@ impl PlayerEngine {
         // 先定下单调时钟原点，回调里就不会走到初始化分支
         metrics::monotonic_ns();
         let shared_audio_level = SharedAudioLevel::new();
-        let effects_params = AudioEffectsParams::new_shared();
+        let effects = EffectsControl::new_shared();
         let seek_generation = Arc::new(AtomicU64::new(0));
         let transition_generation = Arc::new(AtomicU64::new(0));
         let (cmd_tx, thread_alive) = spawn_audio_thread(
             Arc::clone(&shared_audio_level),
-            Arc::clone(&effects_params),
+            Arc::clone(&effects),
             Arc::clone(&playback_generation),
             Arc::clone(&seek_generation),
             Arc::clone(&transition_generation),
@@ -867,7 +884,7 @@ impl PlayerEngine {
             current_path: None,
             duration_ms: 0,
             shared_audio_level,
-            effects_params,
+            effects,
             playback_generation,
             seek_generation,
             transition_generation,
@@ -884,7 +901,7 @@ impl PlayerEngine {
         log::warn!(target: "cpal-output", "audio thread stopped, restarting");
         let (cmd_tx, thread_alive) = spawn_audio_thread(
             Arc::clone(&self.shared_audio_level),
-            Arc::clone(&self.effects_params),
+            Arc::clone(&self.effects),
             Arc::clone(&self.playback_generation),
             Arc::clone(&self.seek_generation),
             Arc::clone(&self.transition_generation),
@@ -1170,35 +1187,30 @@ impl PlayerEngine {
         let _ = self.cmd_tx.send(AudioCmd::SetSpeed(self.speed));
     }
 
+    // 音效参数直接写进原子量，正在播放的回调下一块（约 10 ms）就平滑切过去，
+    // 不用停下会话重新解码
     pub fn set_loudness_gain(&self, millibels: i32) {
-        if let Ok(mut params) = self.effects_params.lock() {
-            params.loudness_gain_mb = millibels.clamp(0, 1_500);
-        }
-        let _ = self.cmd_tx.send(AudioCmd::InvalidateProcessedBuffer);
+        self.effects
+            .update(|settings| settings.loudness_gain_mb = millibels);
     }
 
     pub fn set_normalize_volume(&self, enabled: bool) {
-        if let Ok(mut params) = self.effects_params.lock() {
-            params.normalize_volume = enabled;
-        }
-        let _ = self.cmd_tx.send(AudioCmd::InvalidateProcessedBuffer);
+        self.effects
+            .update(|settings| settings.normalize_volume = enabled);
     }
 
     pub fn set_equalizer(&self, enabled: bool, bands: &[i32]) {
-        if let Ok(mut params) = self.effects_params.lock() {
-            params.eq_enabled = enabled;
-            for (index, value) in bands.iter().copied().enumerate().take(5) {
-                params.eq_band_levels_mb[index] = value.clamp(-1_500, 1_500);
+        self.effects.update(|settings| {
+            settings.eq_enabled = enabled;
+            for (level, value) in settings.eq_band_levels_mb.iter_mut().zip(bands) {
+                *level = *value;
             }
-        }
-        let _ = self.cmd_tx.send(AudioCmd::InvalidateProcessedBuffer);
+        });
     }
 
     pub fn reset_effects(&self) {
-        if let Ok(mut params) = self.effects_params.lock() {
-            params.reset();
-        }
-        let _ = self.cmd_tx.send(AudioCmd::InvalidateProcessedBuffer);
+        self.effects
+            .update(|settings| *settings = settings.reset_panel());
     }
 
     pub fn request_seek(
@@ -1578,7 +1590,7 @@ impl PlayerEngine {
 
 fn spawn_audio_thread(
     shared_level: Arc<Mutex<SharedAudioLevel>>,
-    effects_params: Arc<Mutex<AudioEffectsParams>>,
+    effects: Arc<EffectsControl>,
     playback_generation: Arc<AtomicU64>,
     seek_generation: Arc<AtomicU64>,
     transition_generation: Arc<AtomicU64>,
@@ -1597,7 +1609,7 @@ fn spawn_audio_thread(
                     cmd_rx,
                     loopback_tx,
                     shared_level,
-                    effects_params,
+                    effects,
                     playback_generation,
                     seek_generation,
                     transition_generation,
@@ -1616,7 +1628,7 @@ fn audio_control_loop(
     receiver: mpsc::Receiver<AudioCmd>,
     loopback_tx: mpsc::Sender<AudioCmd>,
     shared_level: Arc<Mutex<SharedAudioLevel>>,
-    effects_params: Arc<Mutex<AudioEffectsParams>>,
+    effects: Arc<EffectsControl>,
     playback_generation: Arc<AtomicU64>,
     seek_generation: Arc<AtomicU64>,
     transition_generation: Arc<AtomicU64>,
@@ -1680,7 +1692,7 @@ fn audio_control_loop(
                 let result = OutputDeviceProfile::open_named(&name).and_then(|candidate| {
                     switch_output_device_in_place(
                         &mut current, candidate, &mut output_profile, volume, speed,
-                        &shared_level, &effects_params, &playback_generation, &loopback_tx,
+                        &shared_level, &effects, &playback_generation, &loopback_tx,
                         Arc::new(AtomicBool::new(false)),
                     )
                 });
@@ -1724,7 +1736,9 @@ fn audio_control_loop(
                         volume,
                         speed,
                         Arc::clone(&shared_level),
-                        Arc::clone(&effects_params),
+                        Arc::clone(&effects),
+                        // 新曲目：响度从头统计
+                        TrackLoudness::new_shared(),
                         Arc::clone(&playback_generation),
                         expected,
                         None,
@@ -1894,7 +1908,7 @@ fn audio_control_loop(
                     } else {
                         switch_output_device_in_place(
                             &mut current, candidate, &mut output_profile, volume, speed,
-                            &shared_level, &effects_params, &playback_generation, &loopback_tx,
+                            &shared_level, &effects, &playback_generation, &loopback_tx,
                             cancel,
                         )
                     }
@@ -1939,6 +1953,7 @@ fn audio_control_loop(
                     paused,
                     rollback_position_ms,
                     clock,
+                    loudness,
                 ) = {
                     let Some(session) = current.as_ref() else {
                         let _ = latest_reply.send(Err("Nothing is playing".into()));
@@ -1963,6 +1978,8 @@ fn audio_control_loop(
                         session.shared.paused.load(Ordering::Acquire),
                         session.shared.clock.position_ms(),
                         Arc::clone(&session.shared.clock),
+                        // 同一首歌：响度统计和已施加的增益接着用，seek 后音量不跳
+                        Arc::clone(&session.shared.loudness),
                     )
                 };
                 let mut previous = match current.take() {
@@ -2012,7 +2029,7 @@ fn audio_control_loop(
                             volume,
                             speed,
                             &shared_level,
-                            &effects_params,
+                            &effects,
                             &playback_generation,
                             latest_generation,
                             &clock,
@@ -2036,7 +2053,8 @@ fn audio_control_loop(
                             volume,
                             speed,
                             Arc::clone(&shared_level),
-                            Arc::clone(&effects_params),
+                            Arc::clone(&effects),
+                            Arc::clone(&loudness),
                             Arc::clone(&playback_generation),
                             latest_generation,
                             Some(seek_token.clone()),
@@ -2085,7 +2103,7 @@ fn audio_control_loop(
                                         volume,
                                         speed,
                                         &shared_level,
-                                        &effects_params,
+                                        &effects,
                                         &playback_generation,
                                         latest_generation,
                                         &clock,
@@ -2139,7 +2157,7 @@ fn audio_control_loop(
                                 volume,
                                 speed,
                                 &shared_level,
-                                &effects_params,
+                                &effects,
                                 &playback_generation,
                                 latest_generation,
                                 &clock,
@@ -2154,22 +2172,6 @@ fn audio_control_loop(
             }
             AudioCmd::QueryEmpty { reply } => {
                 let _ = reply.send(current.as_ref().is_none_or(PlaybackSession::is_empty));
-            }
-            AudioCmd::InvalidateProcessedBuffer => {
-                // EQ/响度已改 params。ring 里最多缓着 4 秒按旧参数处理完的
-                // 输出帧，旧做法「丢弃 + 前拨时钟」等于把这段内容直接跳过——
-                // 用户拨一下均衡器歌就快进了。改为从当前位置重建，内容不丢，
-                // 新参数立即可闻。
-                rebuild_session_in_place(
-                    &mut current,
-                    volume,
-                    speed,
-                    &shared_level,
-                    &effects_params,
-                    &playback_generation,
-                    &mut output_profile,
-                    &loopback_tx,
-                );
             }
             AudioCmd::FadeOutPause {
                 duration_ms,
@@ -2247,7 +2249,7 @@ fn audio_control_loop(
                     volume,
                     speed,
                     &shared_level,
-                    &effects_params,
+                    &effects,
                     &playback_generation,
                     &mut output_profile,
                     &loopback_tx,
@@ -2277,7 +2279,7 @@ fn switch_output_device_in_place(
     volume: f32,
     speed: f32,
     shared_level: &Arc<Mutex<SharedAudioLevel>>,
-    effects_params: &Arc<Mutex<AudioEffectsParams>>,
+    effects: &Arc<EffectsControl>,
     playback_generation: &Arc<AtomicU64>,
     loopback_tx: &mpsc::Sender<AudioCmd>,
     cancel: Arc<AtomicBool>,
@@ -2295,7 +2297,8 @@ fn switch_output_device_in_place(
     // 保留旧流和源，目标设备准备失败时还能回到原位置
     let prepared = prepare_session(
         previous.source.clone(), previous.shared.clock.position_ms(), volume, speed,
-        Arc::clone(shared_level), Arc::clone(effects_params), Arc::clone(playback_generation),
+        Arc::clone(shared_level), Arc::clone(effects), Arc::clone(&previous.shared.loudness),
+        Arc::clone(playback_generation),
         previous.playback_generation, None, Some(Arc::clone(&previous.shared.clock)),
         &candidate, Arc::clone(&cancel), loopback_tx,
     ).and_then(|next| {
@@ -2326,19 +2329,17 @@ fn switch_output_device_in_place(
     }
 }
 
-/// EQ/响度/速度变化时按当前位置原地重建会话
+/// 输出设备失效后按当前位置原地重建会话
 ///
-/// 这些参数都固化在 ring 的输出帧里，改参数只有两种选择：跳过已缓冲的
-/// 内容（旧做法——ring 容量 4 秒，用户拨一下均衡器歌就快进一大段），
-/// 或者从当前位置重解码。这里选后者。重建失败时降级重试一次原会话，
-/// 宁可参数晚生效，也不能把声音弄停。
+/// 同一首歌的响度统计沿用，重建前后音量一致。重建失败时再重试一次，
+/// 两次都失败才放弃会话（由上层发出结束事件推进队列，不会静默卡住）。
 #[allow(clippy::too_many_arguments)]
 fn rebuild_session_in_place(
     current: &mut Option<PlaybackSession>,
     volume: f32,
     speed: f32,
     shared_level: &Arc<Mutex<SharedAudioLevel>>,
-    effects_params: &Arc<Mutex<AudioEffectsParams>>,
+    effects: &Arc<EffectsControl>,
     playback_generation: &Arc<AtomicU64>,
     output_profile: &mut OutputDeviceState,
     loopback_tx: &mpsc::Sender<AudioCmd>,
@@ -2353,6 +2354,7 @@ fn rebuild_session_in_place(
     let position_ms = session.shared.clock.position_ms();
     let paused = session.shared.paused.load(Ordering::Acquire);
     let clock = Arc::clone(&session.shared.clock);
+    let loudness = Arc::clone(&session.shared.loudness);
     let source = session.source.clone();
 
     let Some(mut previous) = current.take() else {
@@ -2370,7 +2372,8 @@ fn rebuild_session_in_place(
             volume,
             speed,
             Arc::clone(shared_level),
-            Arc::clone(effects_params),
+            Arc::clone(effects),
+            Arc::clone(&loudness),
             Arc::clone(playback_generation),
             latest_generation,
             None,
@@ -2383,7 +2386,7 @@ fn rebuild_session_in_place(
     let prepared = build().or_else(|error| {
         log::warn!(
             target: "cpal-output",
-            "effects rebuild failed once, retrying: {error}"
+            "session rebuild failed once, retrying: {error}"
         );
         build()
     });
@@ -2391,10 +2394,10 @@ fn rebuild_session_in_place(
         Ok(next) => {
             if !paused {
                 if let Err(error) = next.play() {
-                    log::warn!(target: "cpal-output", "effects rebuild play failed: {error}");
+                    log::warn!(target: "cpal-output", "session rebuild play failed: {error}");
                 }
             } else {
-                // 暂停态重建：保持静音，避免调音效时突然出声
+                // 暂停态重建：保持静音，不能因为重建就出声
                 next.pause();
             }
             *current = Some(next);
@@ -2402,7 +2405,7 @@ fn rebuild_session_in_place(
         Err(error) => {
             log::warn!(
                 target: "cpal-output",
-                "effects rebuild failed, playback session lost: {error}"
+                "session rebuild failed, playback session lost: {error}"
             );
         }
     }
@@ -2437,7 +2440,7 @@ fn rebuild_after_failed_seek(
     volume: f32,
     speed: f32,
     shared_level: &Arc<Mutex<SharedAudioLevel>>,
-    effects_params: &Arc<Mutex<AudioEffectsParams>>,
+    effects: &Arc<EffectsControl>,
     playback_generation: &Arc<AtomicU64>,
     expected_generation: u64,
     clock: &Arc<PlaybackClock>,
@@ -2453,7 +2456,8 @@ fn rebuild_after_failed_seek(
             volume,
             speed,
             Arc::clone(shared_level),
-            Arc::clone(effects_params),
+            Arc::clone(effects),
+            Arc::clone(&previous.shared.loudness),
             Arc::clone(playback_generation),
             expected_generation,
             None,
@@ -2497,7 +2501,8 @@ fn prepare_session(
     volume: f32,
     speed: f32,
     shared_level: Arc<Mutex<SharedAudioLevel>>,
-    effects_params: Arc<Mutex<AudioEffectsParams>>,
+    effects: Arc<EffectsControl>,
+    loudness: Arc<TrackLoudness>,
     playback_generation: Arc<AtomicU64>,
     expected_generation: u64,
     operation_generation: Option<GenerationToken>,
@@ -2592,7 +2597,14 @@ fn prepare_session(
     let capacity_samples = duration_to_frames(PCM_CAPACITY, sample_rate)
         .saturating_mul(channels)
         .max(channels * 2);
-    let initial_target = duration_to_frames(source.prebuffer_duration(), sample_rate);
+    // 新曲目开着音量均衡：先分析够预热时长再出声，第一个可闻样本就是正确的响度。
+    // 同一首歌重建会话时增益已经落定，不必再等
+    let prebuffer = if effects.snapshot().normalize_volume && !loudness.is_seeded() {
+        source.prebuffer_duration().max(NORMALIZE_WARMUP)
+    } else {
+        source.prebuffer_duration()
+    };
+    let initial_target = duration_to_frames(prebuffer, sample_rate);
     let clock = clock.unwrap_or_else(|| Arc::new(PlaybackClock::new(start_position_ms)));
     clock
         .position_us
@@ -2615,14 +2627,12 @@ fn prepare_session(
         device_lost: AtomicBool::new(false),
         first_frame_ns: Arc::new(AtomicU64::new(0)),
         stretch_buffered: AtomicUsize::new(0),
+        effects,
+        loudness,
     });
 
-    let processed: Box<dyn PcmSource> = Box::new(LoudnessSource::new(
-        EqualizerSource::new(decoder, Arc::clone(&effects_params)),
-        effects_params,
-    ));
     let worker = spawn_decode_worker(
-        processed,
+        decoder,
         Arc::clone(&shared),
         shared_level,
         Arc::clone(&playback_generation),
@@ -2756,6 +2766,9 @@ fn spawn_decode_worker(
             let mut analyzer = AudioAnalyzer::new();
             analyzer.configure(shared.sample_rate, ANALYSIS_FRAME_SIZE);
             let mut analysis = Vec::with_capacity(ANALYSIS_FRAME_SIZE);
+            let mut loudness = LoudnessMeter::new(Arc::clone(&shared.loudness));
+            let measured_channels =
+                loudness_channels(converter.source_channels(), shared.channels);
 
             let mut frames_pushed = 0u64;
             let mut exit_reason = "source_eof";
@@ -2783,6 +2796,7 @@ fn spawn_decode_worker(
                 }
                 if !converter.next_frame(shared.sample_rate, &mut frame) {
                     exit_reason = "decoder_exhausted";
+                    loudness.flush();
                     break;
                 }
                 if !shared.ring.try_push_frame(&frame) {
@@ -2790,6 +2804,7 @@ fn spawn_decode_worker(
                     continue;
                 }
                 frames_pushed = frames_pushed.saturating_add(1);
+                loudness.observe(&frame[..measured_channels]);
 
                 analysis.push(frame[0]);
                 if analysis.len() >= ANALYSIS_FRAME_SIZE {
@@ -2905,20 +2920,12 @@ where
     T: SizedSample + FromSample<f32>,
 {
     let callback_shared = Arc::clone(&shared);
-    // 变速器与暂存缓冲在建流时一次分配，回调里只复用
-    let mut stretcher = Stretcher::new(shared.channels, shared.sample_rate);
-    let mut scratch = vec![0.0f32; RENDER_CHUNK_FRAMES * shared.channels.max(1)];
+    let mut chain = OutputChain::new(&shared);
     device
         .build_output_stream(
             config,
             move |output: &mut [T], _| {
-                render_output(
-                    &callback_shared,
-                    output,
-                    &mut stretcher,
-                    &mut scratch,
-                    &metrics::OUTPUT_METRICS,
-                );
+                render_output(&callback_shared, output, &mut chain, &metrics::OUTPUT_METRICS);
             },
             move |error| {
                 log::error!(target: "cpal-output", "stream error: {error}");
@@ -2938,20 +2945,44 @@ where
         .map_err(|error| format!("Could not build audio output: {error}"))
 }
 
-/// 输出回调主体：经变速器从 ring 取帧写入设备缓冲，推进时钟并记录指标
+/// 输出回调独占的处理状态，建流时一次分配，回调里只复用
+struct OutputChain {
+    stretcher: Stretcher,
+    effects: EffectsProcessor,
+    scratch: Vec<f32>,
+}
+
+impl OutputChain {
+    fn new(shared: &PlaybackShared) -> Self {
+        let channels = shared.channels.max(1);
+        Self {
+            stretcher: Stretcher::new(channels, shared.sample_rate),
+            effects: EffectsProcessor::new(
+                channels,
+                shared.sample_rate,
+                Arc::clone(&shared.effects),
+                Arc::clone(&shared.loudness),
+                RENDER_CHUNK_FRAMES,
+            ),
+            scratch: vec![0.0; RENDER_CHUNK_FRAMES * channels],
+        }
+    }
+}
+
+/// 输出回调主体：经变速器从 ring 取帧，过音效后写入设备缓冲，推进时钟并记录指标
 ///
-/// 运行在设备回调线程：只用原子操作和预分配的变速器、暂存缓冲，不加锁、不分配。
-/// 倍速在这里实时生效（保持音调），改倍速不需要重建解码会话。
+/// 运行在设备回调线程：只用原子操作和预分配的状态，不加锁、不分配。
+/// 倍速（保持音调）和音效参数都在这里实时生效，改它们不需要重建解码会话。
 /// 播放中途取空 ring 记一次欠载；解码已结束后自然排空不算。
 fn render_output<T>(
     shared: &PlaybackShared,
     output: &mut [T],
-    stretcher: &mut Stretcher,
-    scratch: &mut [f32],
+    chain: &mut OutputChain,
     counters: &OutputMetrics,
 ) where
     T: SizedSample + FromSample<f32>,
 {
+    let OutputChain { stretcher, effects, scratch } = chain;
     let started_ns = metrics::monotonic_ns();
     let silence = T::from_sample(0.0);
     if shared.paused.load(Ordering::Acquire) || shared.buffering.load(Ordering::Acquire) {
@@ -2978,6 +3009,7 @@ fn render_output<T>(
         }
         let rendered = stretcher.render(&mut scratch[..frames * channels], speed, draining, &mut pull);
         let filled = rendered.frames * channels;
+        effects.process(&mut scratch[..filled]);
         for (target, sample) in chunk[..filled].iter_mut().zip(scratch[..filled].iter().copied()) {
             *target = T::from_sample((sample * gain).clamp(-1.0, 1.0));
         }
@@ -3004,6 +3036,10 @@ fn render_output<T>(
         let elapsed_us = (media_frames * 1_000_000.0 / f64::from(shared.sample_rate)) as u64;
         shared.clock.position_us.fetch_add(elapsed_us, Ordering::AcqRel);
     }
+    counters.record_effects(
+        gain_to_millibels(effects.normalization_gain()),
+        effects.take_limited_frames(),
+    );
     let underrun = silent_frames > 0 && !draining;
     counters.record_callback(
         rendered_frames,
@@ -3339,6 +3375,8 @@ mod tests {
             device_lost: std::sync::atomic::AtomicBool::new(false),
             first_frame_ns: Arc::new(AtomicU64::new(0)),
             stretch_buffered: std::sync::atomic::AtomicUsize::new(0),
+            effects: crate::audio::effects::EffectsControl::new_shared(),
+            loudness: crate::audio::effects::TrackLoudness::new_shared(),
         });
         let exited = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let worker_shared = Arc::clone(&shared);
@@ -3409,6 +3447,8 @@ mod tests {
             device_lost: std::sync::atomic::AtomicBool::new(false),
             first_frame_ns: Arc::new(AtomicU64::new(0)),
             stretch_buffered: std::sync::atomic::AtomicUsize::new(0),
+            effects: crate::audio::effects::EffectsControl::new_shared(),
+            loudness: crate::audio::effects::TrackLoudness::new_shared(),
         });
         let (resume, blocked) = mpsc::channel();
         let (exited, done) = mpsc::channel();
@@ -3431,7 +3471,7 @@ mod tests {
             is_playing: true, volume: 1.0, speed: 1.0,
             current_path: Some("other.aac".into()), duration_ms: 192,
             shared_audio_level: crate::audio::analyzer::SharedAudioLevel::new(),
-            effects_params: crate::audio::effects::AudioEffectsParams::new_shared(),
+            effects: crate::audio::effects::EffectsControl::new_shared(),
             playback_generation: Arc::new(AtomicU64::new(generation)),
             seek_generation: Arc::new(AtomicU64::new(0)),
             transition_generation: Arc::new(AtomicU64::new(0)),
@@ -3598,6 +3638,8 @@ mod tests {
             device_lost: std::sync::atomic::AtomicBool::new(false),
             first_frame_ns: Arc::new(AtomicU64::new(0)),
             stretch_buffered: std::sync::atomic::AtomicUsize::new(0),
+            effects: crate::audio::effects::EffectsControl::new_shared(),
+            loudness: crate::audio::effects::TrackLoudness::new_shared(),
         });
         let decoder = crate::audio::remote::SymphoniaAudioDecoder::new(
             Box::new(std::io::Cursor::new(include_bytes!("fixtures/hls-silence.aac").as_slice())), Some("aac"),
@@ -3699,7 +3741,7 @@ mod tests {
         let (sender, receiver) = mpsc::channel();
         let (reply, _result) = mpsc::channel();
         sender
-            .send(AudioCmd::InvalidateProcessedBuffer)
+            .send(AudioCmd::SetVolume(0.5))
             .expect("queue non-seek command");
         sender
             .send(AudioCmd::Seek {
@@ -3717,10 +3759,7 @@ mod tests {
 
         assert_eq!(adopted.position_ms, 4_606_826);
         assert_eq!(deferred.len(), 1);
-        assert!(matches!(
-            deferred.front(),
-            Some(AudioCmd::InvalidateProcessedBuffer)
-        ));
+        assert!(matches!(deferred.front(), Some(AudioCmd::SetVolume(_))));
     }
 
     /// 宽限超时（极端调度竞态下新 Seek 未入队）：返回 None，
@@ -3730,7 +3769,7 @@ mod tests {
     fn wait_for_newer_seek_times_out_on_empty_queue() {
         let (sender, receiver) = mpsc::channel::<AudioCmd>();
         sender
-            .send(AudioCmd::InvalidateProcessedBuffer)
+            .send(AudioCmd::SetVolume(0.5))
             .expect("queue non-seek command");
         let mut deferred = VecDeque::new();
 
@@ -3902,25 +3941,23 @@ mod tests {
             device_lost: std::sync::atomic::AtomicBool::new(false),
             first_frame_ns: Arc::new(AtomicU64::new(0)),
             stretch_buffered: std::sync::atomic::AtomicUsize::new(0),
+            effects: crate::audio::effects::EffectsControl::new_shared(),
+            loudness: crate::audio::effects::TrackLoudness::new_shared(),
         })
     }
 
-    /// 与 build_typed_stream 里一样的回调状态：变速器与暂存缓冲
+    /// 与 build_typed_stream 里一样的回调状态
     struct CallbackState {
-        stretcher: crate::audio::stretch::Stretcher,
-        scratch: Vec<f32>,
+        chain: super::OutputChain,
     }
 
     impl CallbackState {
         fn new(shared: &super::PlaybackShared) -> Self {
-            Self {
-                stretcher: crate::audio::stretch::Stretcher::new(shared.channels, shared.sample_rate),
-                scratch: vec![0.0; super::RENDER_CHUNK_FRAMES * shared.channels],
-            }
+            Self { chain: super::OutputChain::new(shared) }
         }
 
         fn render(&mut self, shared: &super::PlaybackShared, output: &mut [f32], counters: &crate::audio::metrics::OutputMetrics) {
-            super::render_output(shared, output, &mut self.stretcher, &mut self.scratch, counters);
+            super::render_output(shared, output, &mut self.chain, counters);
         }
     }
 
@@ -4029,5 +4066,43 @@ mod tests {
         assert!(consumed > 48_000, "倍速后每秒应消费多于 48 000 帧: {consumed}");
         assert_eq!(counters.snapshot().underruns, 0, "变速不能造成断音");
         assert!(output.iter().any(|sample| sample.abs() > 0.1), "变速后仍在出声");
+    }
+
+    /// 播放中打开音量均衡：回调下一块就开始过渡，会话不重建、时钟连续、不断音
+    #[test]
+    fn normalization_toggles_inside_the_callback_without_a_rebuild() {
+        let shared = render_test_shared(2, 2 * 48_000);
+        let mut meter = crate::audio::effects::LoudnessMeter::new(Arc::clone(&shared.loudness));
+        for _ in 0..48_000 {
+            assert!(shared.ring.try_push_frame(&[0.01, 0.01]));
+            meter.observe(&[0.01, 0.01]);
+        }
+        meter.flush();
+        let counters = crate::audio::metrics::OutputMetrics::new();
+        let mut callback = CallbackState::new(&shared);
+        let mut output = [0.0f32; 960];
+        callback.render(&shared, &mut output, &counters);
+        assert!(output.iter().all(|sample| *sample == 0.01), "关着时逐位直通");
+
+        shared.effects.update(|settings| settings.normalize_volume = true);
+        for _ in 0..10 {
+            callback.render(&shared, &mut output, &counters);
+        }
+
+        let boosted = output[output.len() - 1] / 0.01;
+        assert!((boosted - 1.995).abs() < 0.01, "打开后应抬到 +6 dB: {boosted}");
+        assert_eq!(shared.clock.position_us.load(Ordering::Acquire), 110_000, "11 块各 10 ms，时钟连续");
+        let snapshot = counters.snapshot();
+        assert_eq!(snapshot.underruns, 0);
+        assert_eq!(snapshot.normalization_gain_mb, 600, "指标里能看到当前增益");
+    }
+
+    #[test]
+    fn loudness_is_measured_only_on_channels_that_carry_the_source() {
+        assert_eq!(super::loudness_channels(2, 8), 2, "立体声接 7.1：多出来的零声道不算");
+        assert_eq!(super::loudness_channels(1, 2), 1, "单声道复制到两边，统计一份");
+        assert_eq!(super::loudness_channels(6, 2), 2, "5.1 缩混成立体声后两个声道都有内容");
+        assert_eq!(super::loudness_channels(8, 8), 8);
+        assert_eq!(super::loudness_channels(0, 2), 1);
     }
 }

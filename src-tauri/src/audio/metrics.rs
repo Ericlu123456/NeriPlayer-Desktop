@@ -4,7 +4,7 @@
 //! 都在控制线程或命令线程完成：回调里不加锁、不分配、不写日志。
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -46,6 +46,8 @@ pub struct OutputMetrics {
     underruns: AtomicU64,
     underrun_frames: AtomicU64,
     max_callback_ns: AtomicU64,
+    normalization_gain_mb: AtomicI64,
+    limited_frames: AtomicU64,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
@@ -58,6 +60,10 @@ pub struct OutputMetricsSnapshot {
     pub underrun_frames: u64,
     /// 自上次周期汇总以来单次回调的最长耗时
     pub max_callback_us: u64,
+    /// 最近一次回调实际施加的音量均衡增益（毫贝，关着时为 0）
+    pub normalization_gain_mb: i64,
+    /// 被限幅器压过的累计帧数
+    pub limited_frames: u64,
 }
 
 impl Default for OutputMetrics {
@@ -74,6 +80,17 @@ impl OutputMetrics {
             underruns: AtomicU64::new(0),
             underrun_frames: AtomicU64::new(0),
             max_callback_ns: AtomicU64::new(0),
+            normalization_gain_mb: AtomicI64::new(0),
+            limited_frames: AtomicU64::new(0),
+        }
+    }
+
+    /// 回调处理完音效后调用：记下当前的均衡增益，累加限幅帧数
+    pub fn record_effects(&self, normalization_gain_mb: i64, limited_frames: u64) {
+        self.normalization_gain_mb
+            .store(normalization_gain_mb, Ordering::Relaxed);
+        if limited_frames > 0 {
+            self.limited_frames.fetch_add(limited_frames, Ordering::Relaxed);
         }
     }
 
@@ -103,6 +120,8 @@ impl OutputMetrics {
             underruns: self.underruns.load(Ordering::Relaxed),
             underrun_frames: self.underrun_frames.load(Ordering::Relaxed),
             max_callback_us: self.max_callback_ns.load(Ordering::Relaxed) / 1_000,
+            normalization_gain_mb: self.normalization_gain_mb.load(Ordering::Relaxed),
+            limited_frames: self.limited_frames.load(Ordering::Relaxed),
         }
     }
 
@@ -300,13 +319,15 @@ impl MetricsReporter {
         }
         log::info!(
             target: "audio-timing",
-            "output stats window_s={} callbacks=+{} frames=+{} underruns=+{} underruns_total={} max_callback_us={}",
+            "output stats window_s={} callbacks=+{} frames=+{} underruns=+{} underruns_total={} max_callback_us={} normalization_gain_mb={} limited_frames=+{}",
             elapsed.as_secs(),
             snapshot.callbacks - self.window.callbacks,
             snapshot.rendered_frames - self.window.rendered_frames,
             snapshot.underruns - self.window.underruns,
             snapshot.underruns,
             OUTPUT_METRICS.take_max_callback_us(),
+            snapshot.normalization_gain_mb,
+            snapshot.limited_frames - self.window.limited_frames,
         );
         self.window = snapshot;
         self.window_started = Instant::now();
@@ -367,6 +388,18 @@ mod tests {
         assert_eq!(snapshot.max_callback_us, 120);
         assert_eq!(metrics.take_max_callback_us(), 120);
         assert_eq!(metrics.snapshot().max_callback_us, 0, "周期峰值取出后清零");
+    }
+
+    #[test]
+    fn effects_metrics_keep_the_latest_gain_and_accumulate_limited_frames() {
+        let metrics = OutputMetrics::new();
+        metrics.record_effects(-602, 0);
+        metrics.record_effects(300, 128);
+        metrics.record_effects(250, 0);
+
+        let snapshot = metrics.snapshot();
+        assert_eq!(snapshot.normalization_gain_mb, 250);
+        assert_eq!(snapshot.limited_frames, 128);
     }
 
     fn stamps(issued_ns: u64, received_ns: u64) -> CommandStamps {

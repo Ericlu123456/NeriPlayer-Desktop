@@ -2658,12 +2658,17 @@ export const usePlayerStore = defineStore('player', () => {
   async function setLoudnessGain(mb: number) {
     loudnessGainMb.value = Math.round(Math.max(0, Math.min(1500, mb)))
     settings.loudnessGainMb = loudnessGainMb.value
-    try { await invoke('set_loudness_gain', { gainMb: loudnessGainMb.value }) } catch {}
+    try {
+      await invoke('set_loudness_gain', { gainMb: loudnessGainMb.value })
+    } catch (error) {
+      log.warn('loudness gain not applied:', error)
+    }
   }
 
   // 音量均衡由设置页直接改 settings，这里跟随下发到音频链
   watch(() => settings.normalizeVolume, (enabled) => {
-    void invoke('set_normalize_volume', { enabled }).catch(() => {})
+    void invoke('set_normalize_volume', { enabled })
+      .catch(error => log.warn('volume normalization not applied:', error))
   })
 
   async function setEqualizer(enabled: boolean, bands: number[]) {
@@ -2671,7 +2676,11 @@ export const usePlayerStore = defineStore('player', () => {
     equalizerBands.value = bands.map(v => Math.round(Math.max(-1500, Math.min(1500, v))))
     settings.equalizerEnabled = enabled
     settings.equalizerBands = [...equalizerBands.value]
-    try { await invoke('set_equalizer', { enabled, bandLevelsMb: equalizerBands.value }) } catch {}
+    try {
+      await invoke('set_equalizer', { enabled, bandLevelsMb: equalizerBands.value })
+    } catch (error) {
+      log.warn('equalizer not applied:', error)
+    }
   }
 
   async function setEqualizerPreset(presetId: string) {
@@ -2697,7 +2706,9 @@ export const usePlayerStore = defineStore('player', () => {
     try {
       await invoke('reset_audio_effects')
       await invoke('set_speed', { speed: 1.0 })
-    } catch {}
+    } catch (error) {
+      log.warn('audio effects reset not applied:', error)
+    }
   }
 
   async function applyPersistedSettings() {
@@ -2709,15 +2720,22 @@ export const usePlayerStore = defineStore('player', () => {
     equalizerBands.value = settings.equalizerBands.map(value => Math.round(Math.max(-1500, Math.min(1500, value))))
     _interpSpeed = playbackSpeed.value
 
-    await Promise.allSettled([
-      invoke('set_volume', { level: volume.value }),
-      invoke('set_audio_output_device', { name: settings.audioOutputDevice || null })
-        .catch(() => invoke('set_audio_output_device', { name: null })),
-      invoke('set_speed', { speed: effectivePlaybackSpeed() }),
-      invoke('set_loudness_gain', { gainMb: loudnessGainMb.value }),
-      invoke('set_normalize_volume', { enabled: settings.normalizeVolume }),
-      invoke('set_equalizer', { enabled: equalizerEnabled.value, bandLevelsMb: equalizerBands.value }),
-    ])
+    const restored: Array<[string, Promise<unknown>]> = [
+      ['volume', invoke('set_volume', { level: volume.value })],
+      ['output device', invoke('set_audio_output_device', { name: settings.audioOutputDevice || null })
+        .catch((error) => {
+          log.warn('preferred output device unavailable, using the system default:', error)
+          return invoke('set_audio_output_device', { name: null })
+        })],
+      ['speed', invoke('set_speed', { speed: effectivePlaybackSpeed() })],
+      ['loudness gain', invoke('set_loudness_gain', { gainMb: loudnessGainMb.value })],
+      ['volume normalization', invoke('set_normalize_volume', { enabled: settings.normalizeVolume })],
+      ['equalizer', invoke('set_equalizer', { enabled: equalizerEnabled.value, bandLevelsMb: equalizerBands.value })],
+    ]
+    const results = await Promise.allSettled(restored.map(([, request]) => request))
+    results.forEach((result, index) => {
+      if (result.status === 'rejected') log.warn(`persisted ${restored[index][0]} not applied:`, result.reason)
+    })
   }
 
   // 批量替换队列，并且只发起一次目标曲目的播放请求
