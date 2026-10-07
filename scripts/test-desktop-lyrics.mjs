@@ -198,7 +198,12 @@ try {
     '@/stores/player': { usePlayerStore: () => player },
     '@/stores/settings': { useSettingsStore: () => settings },
     '@/stores/lyricOffset': { useLyricOffsetStore: () => ({ effectiveOffsetMs: () => 0 }) },
-    '@/modules/lyrics/lyricOffset': { offsetBucketForSource: () => 'cloud' },
+    '@/modules/lyrics/lyricOffset': { readSyncedLyricSource: () => null },
+    '@/modules/lyrics/lyricsFetch': {
+      fetchLyrics: () => new Promise(resolve => { fetchRelease = fetched => resolve({ source: 'netease', lines: fetched }) }),
+      fetchWordTimedLyrics: async () => ({ source: null, lines: [] }),
+    },
+    '@/modules/lyrics/lyricSource': { rememberLyricSource() {} },
     '@/modules/lyrics/lyricsCache': { getCachedLyrics: () => null, saveCachedLyrics: () => { cachedAfterClose++ } },
     '@/modules/lyrics/lyricsRequest': { loadLyricsSingleFlight: (_, fetch) => fetch(), hasWordTimedLyrics: () => false },
     '@/modules/lyrics/lyricsFormat': {

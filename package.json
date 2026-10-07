@@ -70,6 +70,7 @@
     "test:youtube-home-layout": "node scripts/test-youtube-home-layout.mjs",
     "test:youtube-home-feed": "node scripts/test-youtube-home-feed.mjs",
     "test:cloud-playlists": "node scripts/test-cloud-playlists.mjs",
+    "test:lyric-offset-store": "node scripts/test-lyric-offset-store.mjs",
     "test:ffmpeg-bundle": "node scripts/test-ffmpeg-bundle.mjs",
     "tauri": "node scripts/run-tauri.mjs"
   },

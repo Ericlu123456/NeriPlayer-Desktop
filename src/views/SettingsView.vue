@@ -11,6 +11,7 @@ import { writeText } from '@tauri-apps/plugin-clipboard-manager'
 import {
   COVER_BLUR_PX_PER_UNIT,
   LYRIC_DEFAULT_OFFSET_RANGE_MS,
+  LYRIC_DEFAULT_OFFSET_STEP_MS,
   LYRIC_FONT_SCALE_MAX,
   LYRIC_FONT_SCALE_MIN,
   LYRIC_FONT_SCALE_STEP,
@@ -28,6 +29,7 @@ import { useDownloadStore } from '@/stores/download'
 import { useListenTogetherStore } from '@/stores/listenTogether'
 import { isValidLtNickname, LT_NICKNAME_MAX_LENGTH } from '@/stores/listenTogether/protocol'
 import { usePlayerStore } from '@/stores/player'
+import { DEFAULT_LYRIC_OFFSET_MS, formatLyricOffsetMs } from '@/modules/lyrics/lyricOffset'
 import { useToastStore } from '@/stores/toast'
 import BilibiliCoverImage from '@/components/BilibiliCoverImage.vue'
 import { DEFAULT_DOWNLOAD_NAME_TEMPLATE } from '@/stores/settings'
@@ -66,7 +68,6 @@ const {
   crossfadeNext, crossfadeInDuration, crossfadeOutDuration,
   keepProgress, rememberLongFormProgress, keepPlaybackMode,
   showTranslation, lyricBlur, lyricBlurAmount,
-  cloudMusicOffset, qqMusicOffset,
   advancedLyrics, dynamicBackground, dynamicColor, audioReactive,
   coverBlurBg, coverBlurAmount, coverBlurDarken,
   neteaseQuality, qqMusicQuality, youtubeQuality, biliQuality,
@@ -971,6 +972,21 @@ const githubNewRepoName = ref('neriplayer-backup')
 const githubExistingRepo = ref('') // owner/repo 格式
 const githubIsSettingRepo = ref(false)
 const GITHUB_TOKEN_URL = 'https://github.com/settings/tokens/new?scopes=repo&description=NeriPlayer%20Backup'
+// 各歌词来源的默认偏移，顺序与默认值对齐 Android 设置页
+const lyricOffsetSettings = [
+  { key: 'cloudMusicOffset', label: 'settings.netease_offset', defaultMs: DEFAULT_LYRIC_OFFSET_MS.netease },
+  { key: 'qqMusicOffset', label: 'settings.qq_offset', defaultMs: DEFAULT_LYRIC_OFFSET_MS.qq },
+  { key: 'kugouOffset', label: 'settings.kugou_offset', defaultMs: DEFAULT_LYRIC_OFFSET_MS.kugou },
+  { key: 'lrclibOffset', label: 'settings.lrclib_offset', defaultMs: DEFAULT_LYRIC_OFFSET_MS.lrclib },
+  { key: 'amllTtmlOffset', label: 'settings.amll_ttml_offset', defaultMs: DEFAULT_LYRIC_OFFSET_MS.amll_ttml },
+] as const
+
+const lyricOffsetsChanged = computed(() => lyricOffsetSettings.some(item => settings[item.key] !== item.defaultMs))
+
+function resetLyricOffsets() {
+  for (const item of lyricOffsetSettings) settings[item.key] = item.defaultMs
+}
+
 const volumeBalanceLabel = computed(() => {
   const percent = Math.round(Math.abs(volumeBalance.value) * 100)
   if (percent === 0) return t('settings.volume_balance_center')
@@ -1878,40 +1894,42 @@ useEscapeClose(
         <input type="range" class="m3-slider" v-model.number="lyricBlurAmount" min="0" max="8" step="0.5" />
       </div>
 
-      <div class="setting-card">
+      <!-- 各歌词来源的默认偏移（对齐 Android）：显示的就是这类歌词实际生效的偏移 -->
+      <div v-for="item in lyricOffsetSettings" :key="item.key" class="setting-card">
         <div class="setting-icon-wrap"><span class="material-symbols-rounded">music_note</span></div>
         <div class="setting-info">
-          <div class="setting-title">{{ t('settings.netease_offset') }}</div>
+          <div class="setting-title">{{ t(item.label) }}</div>
           <EditableRangeValue
-            v-model="cloudMusicOffset"
+            :model-value="settings[item.key]"
             class="setting-desc"
             :min="-LYRIC_DEFAULT_OFFSET_RANGE_MS"
             :max="LYRIC_DEFAULT_OFFSET_RANGE_MS"
-            :step="50"
-            :display-value="`${cloudMusicOffset >= 0 ? '+' : ''}${cloudMusicOffset}ms`"
+            :step="LYRIC_DEFAULT_OFFSET_STEP_MS"
+            :display-value="formatLyricOffsetMs(settings[item.key])"
             input-suffix="ms"
-            :aria-label="t('settings.netease_offset')"
+            :aria-label="t(item.label)"
+            @update:model-value="settings[item.key] = $event"
           />
         </div>
-        <input type="range" class="m3-slider" v-model.number="cloudMusicOffset" :min="-LYRIC_DEFAULT_OFFSET_RANGE_MS" :max="LYRIC_DEFAULT_OFFSET_RANGE_MS" step="50" />
+        <button
+          v-if="settings[item.key] !== item.defaultMs"
+          class="m3-chip sm"
+          :title="t('settings.lyric_offset_reset_to', { value: formatLyricOffsetMs(item.defaultMs) })"
+          @click="settings[item.key] = item.defaultMs"
+        >{{ t('settings.lyric_offset_reset') }}</button>
+        <input
+          type="range" class="m3-slider"
+          :value="settings[item.key]"
+          :min="-LYRIC_DEFAULT_OFFSET_RANGE_MS" :max="LYRIC_DEFAULT_OFFSET_RANGE_MS" :step="LYRIC_DEFAULT_OFFSET_STEP_MS"
+          :aria-label="t(item.label)"
+          @input="settings[item.key] = Number(($event.target as HTMLInputElement).value)"
+        />
       </div>
-
-      <div class="setting-card">
-        <div class="setting-icon-wrap"><span class="material-symbols-rounded">music_note</span></div>
+      <div v-if="lyricOffsetsChanged" class="setting-card sub-card">
         <div class="setting-info">
-          <div class="setting-title">{{ t('settings.qq_offset') }}</div>
-          <EditableRangeValue
-            v-model="qqMusicOffset"
-            class="setting-desc"
-            :min="-LYRIC_DEFAULT_OFFSET_RANGE_MS"
-            :max="LYRIC_DEFAULT_OFFSET_RANGE_MS"
-            :step="50"
-            :display-value="`${qqMusicOffset >= 0 ? '+' : ''}${qqMusicOffset}ms`"
-            input-suffix="ms"
-            :aria-label="t('settings.qq_offset')"
-          />
+          <div class="setting-desc">{{ t('settings.lyric_offset_reset_all_desc') }}</div>
         </div>
-        <input type="range" class="m3-slider" v-model.number="qqMusicOffset" :min="-LYRIC_DEFAULT_OFFSET_RANGE_MS" :max="LYRIC_DEFAULT_OFFSET_RANGE_MS" step="50" />
+        <button class="m3-chip sm" @click="resetLyricOffsets">{{ t('settings.lyric_offset_reset_all') }}</button>
       </div>
     </div></Transition>
         </div>

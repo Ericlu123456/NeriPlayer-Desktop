@@ -8,6 +8,7 @@ use crate::api::youtube::client::YouTubeClient;
 use crate::api::transport::FallbackHttp;
 use crate::error::AppResult;
 use crate::lyrics::parser::{self, LyricLine};
+use crate::lyrics::{FetchedLyrics, LyricSource};
 use std::path::{Path, PathBuf};
 
 pub struct LyricsManager {
@@ -21,7 +22,7 @@ impl LyricsManager {
         track_title: &str,
         track_artist: &str,
         duration_ms: u64,
-    ) -> AppResult<Vec<LyricLine>> {
+    ) -> AppResult<FetchedLyrics> {
         Ok(
             super::external::ExternalLyricsClient::new(self.transport.clone())
                 .fetch(track_title, track_artist, duration_ms, true)
@@ -62,7 +63,7 @@ impl LyricsManager {
         netease_id: Option<u64>,
         qq_song_mid: Option<&str>,
         youtube_video_id: Option<&str>,
-    ) -> AppResult<Vec<LyricLine>> {
+    ) -> AppResult<FetchedLyrics> {
         log::info!(
             target: "lyrics",
             "fetch: title={}, artist={}, dur={}s, netease_id={:?}, qq_song_mid={:?}, yt={:?}",
@@ -77,7 +78,7 @@ impl LyricsManager {
         if let Some(path) = audio_path {
             if let Some(lines) = load_local_sidecar_lyrics(path) {
                 log::info!(target: "lyrics", "found local sidecar: {} lines", lines.len());
-                return Ok(lines);
+                return Ok(FetchedLyrics::from(LyricSource::Local, lines));
             }
         }
 
@@ -91,7 +92,7 @@ impl LyricsManager {
             match self.parse_qq_lyrics(&qq, song_mid).await {
                 Ok(Some(lines)) => {
                     if lyrics_duration_acceptable(&lines, target_duration_ms) {
-                        return Ok(lines);
+                        return Ok(FetchedLyrics::from(LyricSource::Qq, lines));
                     }
                     log::info!(
                         target: "lyrics",
@@ -114,7 +115,7 @@ impl LyricsManager {
             let client = NeteaseClient::with_transport(self.transport.clone())
                 .with_csrf(self.netease_csrf.clone());
             if let Some(lines) = self.fetch_netease_lyrics(&client, id, target_duration_ms).await {
-                return Ok(lines);
+                return Ok(FetchedLyrics::from(LyricSource::Netease, lines));
             }
         }
 
@@ -124,7 +125,7 @@ impl LyricsManager {
                 .fetch_lrclib_lyrics(track_title, track_artist, duration_secs, target_duration_ms)
                 .await
             {
-                return Ok(lines);
+                return Ok(FetchedLyrics::from(LyricSource::Lrclib, lines));
             }
         }
 
@@ -138,7 +139,7 @@ impl LyricsManager {
                 Some(song_mid) => match self.parse_qq_lyrics(&qq, &song_mid).await {
                     Ok(Some(lines)) => {
                         if lyrics_duration_acceptable(&lines, target_duration_ms) {
-                            return Ok(lines);
+                            return Ok(FetchedLyrics::from(LyricSource::Qq, lines));
                         }
                         log::info!(
                             target: "lyrics",
@@ -176,7 +177,7 @@ impl LyricsManager {
             {
                 if let Some(lines) = self.fetch_netease_lyrics(&client, id, target_duration_ms).await
                 {
-                    return Ok(lines);
+                    return Ok(FetchedLyrics::from(LyricSource::Netease, lines));
                 }
             }
         }
@@ -187,7 +188,7 @@ impl LyricsManager {
                 .fetch_youtube_lyrics(video_id, target_duration_ms)
                 .await
             {
-                return Ok(lines);
+                return Ok(FetchedLyrics::from(LyricSource::Youtube, lines));
             }
         }
 
@@ -197,14 +198,14 @@ impl LyricsManager {
                 .fetch_lrclib_lyrics(track_title, track_artist, duration_secs, target_duration_ms)
                 .await
             {
-                return Ok(lines);
+                return Ok(FetchedLyrics::from(LyricSource::Lrclib, lines));
             }
         }
 
         let external = super::external::ExternalLyricsClient::new(self.transport.clone())
             .fetch(track_title, track_artist, target_duration_ms, false)
             .await;
-        if !external.is_empty() {
+        if !external.lines.is_empty() {
             return Ok(external);
         }
 
@@ -214,7 +215,7 @@ impl LyricsManager {
             track_title,
             track_artist
         );
-        Ok(Vec::new())
+        Ok(FetchedLyrics::default())
     }
 
     async fn fetch_netease_lyrics(

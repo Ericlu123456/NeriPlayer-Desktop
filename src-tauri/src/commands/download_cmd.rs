@@ -479,7 +479,9 @@ async fn write_download_sidecars(
             youtube_video_id,
         ))
         .await
-        .unwrap_or_else(|_| Ok(Vec::new()))
+        .ok()
+        .and_then(Result::ok)
+        .map(|fetched| fetched.lines)
         .unwrap_or_default() };
     if let Some(lrc_text) = original_bundle.as_ref().map(|bundle| bundle.0.clone()).or_else(|| metadata::original_lyrics(&lyrics)) {
         let lrc_path = lyrics_dir.join(format!("{stem}.lrc"));

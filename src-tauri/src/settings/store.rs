@@ -71,6 +71,13 @@ pub struct AppSettings {
     pub cloud_music_offset: i32,
     #[serde(deserialize_with = "lenient_i32")]
     pub qq_music_offset: i32,
+    /// 酷狗、LRCLIB、AMLL TTML 歌词的默认偏移（毫秒），与 Android 一样默认 0
+    #[serde(deserialize_with = "lenient_i32")]
+    pub kugou_offset: i32,
+    #[serde(deserialize_with = "lenient_i32")]
+    pub lrclib_offset: i32,
+    #[serde(deserialize_with = "lenient_i32")]
+    pub amll_ttml_offset: i32,
     pub cover_style: String,
     pub advanced_lyrics: bool,
     pub dynamic_color: bool,
@@ -190,6 +197,9 @@ impl Default for AppSettings {
             lyric_blur_amount: 1.5,
             cloud_music_offset: 1000,
             qq_music_offset: 500,
+            kugou_offset: 0,
+            lrclib_offset: 0,
+            amll_ttml_offset: 0,
             cover_style: "card".into(),
             advanced_lyrics: true,
             dynamic_color: false,
@@ -277,8 +287,15 @@ impl AppSettings {
         self.crossfade_in_duration = self.crossfade_in_duration.clamp(0, 10_000);
         self.crossfade_out_duration = self.crossfade_out_duration.clamp(0, 10_000);
         self.lyric_blur_amount = clamp_f32(self.lyric_blur_amount, 0.0, 8.0, 1.5);
-        self.cloud_music_offset = self.cloud_music_offset.clamp(-30_000, 30_000);
-        self.qq_music_offset = self.qq_music_offset.clamp(-30_000, 30_000);
+        for offset in [
+            &mut self.cloud_music_offset,
+            &mut self.qq_music_offset,
+            &mut self.kugou_offset,
+            &mut self.lrclib_offset,
+            &mut self.amll_ttml_offset,
+        ] {
+            *offset = normalize_lyric_default_offset(*offset);
+        }
         self.cover_blur_amount = clamp_f32(self.cover_blur_amount, 0.0, 8.0, 1.5);
         self.cover_blur_darken = clamp_f32(self.cover_blur_darken, 0.0, 1.0, 0.2);
         self.background_image_blur = clamp_f32(self.background_image_blur, 0.0, 100.0, 20.0);
@@ -476,6 +493,16 @@ fn persist_settings<R: tauri::Runtime>(
         .save()
         .map_err(|error| AppError::Other(error.to_string()))?;
     Ok(())
+}
+
+/// 歌词来源的默认偏移：按 50ms 对齐并夹到 ±5000ms（Android normalizeLyricDefaultOffsetMs）
+///
+/// 半步向正无穷取整，与 Kotlin roundToLong、前端 Math.round 一致（-75 → -50）。
+fn normalize_lyric_default_offset(value: i32) -> i32 {
+    const STEP: f64 = 50.0;
+    const RANGE: i32 = 5_000;
+    let aligned = (f64::from(value) / STEP + 0.5).floor() * STEP;
+    aligned.clamp(f64::from(-RANGE), f64::from(RANGE)) as i32
 }
 
 fn clamp_f32(value: f32, min: f32, max: f32, fallback: f32) -> f32 {
@@ -774,6 +801,30 @@ mod tests {
         assert_eq!(settings.loudness_gain_mb, 11);
         assert_eq!(settings.equalizer_bands, vec![1, -3, 0, 4, 4]);
         assert!(serde_json::from_value::<AppSettings>(serde_json::json!({ "fadeInDuration": "fast" })).is_err());
+    }
+
+    #[test]
+    fn lyric_default_offsets_follow_android_step_and_range() {
+        let mut settings = AppSettings {
+            cloud_music_offset: 1_024,
+            qq_music_offset: -26,
+            kugou_offset: 9_000,
+            lrclib_offset: -7_500,
+            amll_ttml_offset: -75,
+            ..AppSettings::default()
+        };
+        settings.normalize();
+        assert_eq!(settings.cloud_music_offset, 1_000);
+        assert_eq!(settings.qq_music_offset, -50);
+        assert_eq!(settings.kugou_offset, 5_000);
+        assert_eq!(settings.lrclib_offset, -5_000);
+        assert_eq!(settings.amll_ttml_offset, -50, "半步向正无穷取整，与 Android/前端一致");
+        let missing: AppSettings = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(
+            (missing.kugou_offset, missing.lrclib_offset, missing.amll_ttml_offset),
+            (0, 0, 0),
+            "旧配置没有这些字段时按 Android 默认 0",
+        );
     }
 
     #[test]

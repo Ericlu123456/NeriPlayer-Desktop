@@ -4,7 +4,9 @@ import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { usePlayerStore, type LyricLine, type TrackInfo } from '@/stores/player'
 import { useSettingsStore } from '@/stores/settings'
 import { useLyricOffsetStore } from '@/stores/lyricOffset'
-import { offsetBucketForSource } from '@/modules/lyrics/lyricOffset'
+import { readSyncedLyricSource } from '@/modules/lyrics/lyricOffset'
+import { fetchLyrics, fetchWordTimedLyrics } from '@/modules/lyrics/lyricsFetch'
+import { rememberLyricSource } from '@/modules/lyrics/lyricSource'
 import { getCachedLyrics, saveCachedLyrics } from '@/modules/lyrics/lyricsCache'
 import { loadLyricsSingleFlight, hasWordTimedLyrics } from '@/modules/lyrics/lyricsRequest'
 import { mapBackendLyrics, mergeParsedLyricsWithTranslations, mergeWordTimedLyricsWithBaseline, resolveStoredLyricStateFromPayload, resolveStoredTranslatedLyricStateFromPayload } from '@/modules/lyrics/lyricsFormat'
@@ -21,6 +23,7 @@ async function materialize(track: TrackInfo): Promise<LyricLine[] | null> {
   if (stored.kind === 'absent') return null
   if (stored.kind === 'cleared') return []
   const parsed = mapBackendLyrics(await invoke<any[]>('parse_lrc_content', { content: stored.text }))
+  rememberLyricSource(track, readSyncedLyricSource(track.syncPayload))
   const translation = resolveStoredTranslatedLyricStateFromPayload(track.syncPayload)
   if (translation.kind !== 'present' || !translation.text.trim()) return parsed
   try {
@@ -90,7 +93,7 @@ export function installDesktopLyricsBridge(): () => void {
       track,
       lines: lines.value,
       positionMs: player.interpolatedPositionMs,
-      lyricOffsetMs: offsets.effectiveOffsetMs(track, offsetBucketForSource(source(track))),
+      lyricOffsetMs: offsets.effectiveOffsetMs(track),
       isPlaying: player.isPlaying,
     }) }
     void drain()
@@ -133,21 +136,27 @@ export function installDesktopLyricsBridge(): () => void {
       cached: getCachedLyrics,
       cache: saveCachedLyrics,
       onChange: value => { lines.value = value; publish() },
-      fetch: track => loadLyricsSingleFlight(track, async () => mapBackendLyrics(await invoke<any[]>('fetch_lyrics', {
-        title: track.title, artist: track.artist,
-        durationSecs: Math.floor((track.durationMs || 0) / 1000), audioPath: track.audioUrl || null,
-        neteaseId: source(track) === 'netease' ? Number(track.id.slice(8)) || null : null,
-        qqSongMid: source(track) === 'qq' ? track.id.slice(3) : null,
-        youtubeVideoId: source(track) === 'youtube' ? track.id.slice(8) : null,
-      }))),
+      fetch: async track => {
+        const fetched = await loadLyricsSingleFlight(track, () => fetchLyrics({
+          title: track.title, artist: track.artist,
+          durationSecs: Math.floor((track.durationMs || 0) / 1000), audioPath: track.audioUrl || null,
+          neteaseId: source(track) === 'netease' ? Number(track.id.slice(8)) || null : null,
+          qqSongMid: source(track) === 'qq' ? track.id.slice(3) : null,
+          youtubeVideoId: source(track) === 'youtube' ? track.id.slice(8) : null,
+        }))
+        if (fetched.lines.length) rememberLyricSource(track, fetched.source)
+        return fetched.lines
+      },
       canUpgrade: (track, baseline) => settings.advancedLyrics && source(track) !== 'local'
         && !hasWordTimedLyrics(baseline) && resolveStoredLyricStateFromPayload(track.syncPayload).kind === 'absent',
-      upgrade: track => loadLyricsSingleFlight(track, async () => {
-        const result = mapBackendLyrics(await invoke<any[]>('fetch_word_timed_lyrics', {
+      upgrade: async track => {
+        const fetched = await loadLyricsSingleFlight(track, () => fetchWordTimedLyrics({
           title: track.title, artist: track.artist, durationMs: track.durationMs || 0,
-        }))
-        return hasWordTimedLyrics(result) ? result : []
-      }, 'word-timed'),
+        }), 'word-timed')
+        if (!hasWordTimedLyrics(fetched.lines)) return []
+        rememberLyricSource(track, fetched.source)
+        return fetched.lines
+      },
     })
     stopTrack = watch(
       [() => player.currentTrack, () => player.lyrics, () => settings.advancedLyrics],

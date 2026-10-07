@@ -1,4 +1,5 @@
 use super::parser::{self, LyricLine, LyricWord};
+use super::{FetchedLyrics, LyricSource};
 use crate::api::transport::FallbackHttp;
 use base64::{engine::general_purpose::STANDARD, Engine};
 use regex::Regex;
@@ -32,27 +33,28 @@ impl ExternalLyricsClient {
         artist: &str,
         duration_ms: u64,
         word_only: bool,
-    ) -> Vec<LyricLine> {
+    ) -> FetchedLyrics {
         if title.trim().is_empty()
             || artist.trim().is_empty()
             || duration_ms == 0
             || duration_ms > MAX_TIME_MS
         {
-            return Vec::new();
+            return FetchedLyrics::default();
         }
         if let Ok(Some(lines)) =
             tokio::time::timeout(PROVIDER_BUDGET, self.fetch_amll(title, artist, duration_ms)).await
         {
-            return lines;
+            return FetchedLyrics::from(LyricSource::AmllTtml, lines);
         }
-        tokio::time::timeout(
+        let kugou = tokio::time::timeout(
             PROVIDER_BUDGET,
             self.fetch_kugou(title, artist, duration_ms, word_only),
         )
         .await
         .ok()
         .flatten()
-        .unwrap_or_default()
+        .unwrap_or_default();
+        FetchedLyrics::from(LyricSource::Kugou, kugou)
     }
 
     async fn read(
@@ -796,10 +798,12 @@ mod tests {
             }
             bodies.push(good);
             let (base, requests, worker) = fixture_server(bodies);
-            let lines = fixture_client(&base)
+            let fetched = fixture_client(&base)
                 .fetch("Hello", "Alice", 200_000, word_only)
                 .await;
             worker.join().unwrap();
+            assert_eq!(fetched.source, Some(LyricSource::Kugou));
+            let lines = fetched.lines;
             assert!(!lines.is_empty());
             assert_eq!(has_word_timing(&lines), word_only);
             let requests = requests.lock().unwrap();
@@ -860,11 +864,12 @@ mod tests {
             r#"<tt><body><p begin="1s" end="200s">plain</p></body></tt>"#.into(),
             r#"<tt><body><p begin="1s" end="200s"><span begin="1s" end="200s">timed</span></p></body></tt>"#.into(),
         ]);
-        let lines = fixture_client(&base)
+        let fetched = fixture_client(&base)
             .fetch("Hello", "Alice", 200_000, true)
             .await;
         worker.join().unwrap();
-        assert_eq!(lines[0].text, "timed");
+        assert_eq!(fetched.source, Some(LyricSource::AmllTtml));
+        assert_eq!(fetched.lines[0].text, "timed");
         let requests = requests.lock().unwrap();
         assert_eq!(requests.len(), 3);
         assert!(requests[1].starts_with("GET /raw-lyrics/plain.ttml "));
@@ -969,8 +974,10 @@ mod tests {
         let http = reqwest::Client::builder().no_proxy().build().unwrap();
         let mut client = ExternalLyricsClient::new(FallbackHttp::new(&http, "lyrics-test"));
         client.amll_base = base;
-        let lines = client.fetch("Hello", "Alice", 200_000, true).await;
+        let fetched = client.fetch("Hello", "Alice", 200_000, true).await;
         worker.join().unwrap();
+        assert_eq!(fetched.source, Some(LyricSource::AmllTtml));
+        let lines = fetched.lines;
         assert_eq!(lines.len(), 1);
         assert!(lines[0].words[0].duration_ms > 0);
         let requests = requests.lock().unwrap();

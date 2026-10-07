@@ -1,24 +1,25 @@
 import type { LyricLine, TrackInfo } from '@/stores/player'
 
-const inFlightLyrics = new Map<string, Promise<LyricLine[]>>()
+const inFlightLyrics = new Map<string, Promise<unknown>>()
 
 export function lyricsIdentity(track: TrackInfo): string {
   if (track.id) return track.id
   return `${track.title.trim()}::${track.artist.trim()}::${track.durationMs || 0}`
 }
 
-export function loadLyricsSingleFlight(
+/// 同一首歌同时只发一个请求；正在播放页与桌面歌词共用，因此同一 mode 的 loader 必须返回同一种结果
+export function loadLyricsSingleFlight<T>(
   track: TrackInfo,
-  loader: () => Promise<LyricLine[]>,
+  loader: () => Promise<T>,
   mode: 'baseline' | 'word-timed' = 'baseline',
-): Promise<LyricLine[]> {
+): Promise<T> {
   const key = mode === 'baseline'
     ? lyricsIdentity(track)
     : JSON.stringify([mode, lyricsIdentity(track), track.title, track.artist, track.durationMs])
   const current = inFlightLyrics.get(key)
-  if (current) return current
+  if (current) return current as Promise<T>
 
-  let request: Promise<LyricLine[]>
+  let request: Promise<T>
   try {
     request = Promise.resolve(loader())
   } catch (error) {
