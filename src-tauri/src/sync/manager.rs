@@ -857,6 +857,7 @@ fn merged_playlist_store(merged: &SyncData) -> AppResult<PlaylistStore> {
             .collect();
         let mut local_track_ids: HashSet<String> = tracks.iter().map(|track| track.id.clone()).collect();
         if let Some(current) = current_playlist {
+            restore_local_covers(&mut tracks, &current.tracks);
             for track in &current.tracks {
                 if track.source == TrackSource::Local && local_track_ids.insert(track.id.clone()) {
                     tracks.push(track.clone());
@@ -906,6 +907,45 @@ fn merged_playlist_store(merged: &SyncData) -> AppResult<PlaylistStore> {
         .collect();
     store.fix_next_id();
     Ok(store)
+}
+
+/// 上传时去掉了只在本机有效的封面，回写本地时按曲目把本机原来的补回来（对齐 Android SyncCoverMapping）
+fn restore_local_covers(tracks: &mut [TrackInfo], previous: &[TrackInfo]) {
+    use super::models::is_shareable_cover_url;
+    let previous: HashMap<&str, &TrackInfo> =
+        previous.iter().map(|track| (track.id.as_str(), track)).collect();
+    let local_only = |value: &Option<String>| {
+        value
+            .as_deref()
+            .is_some_and(|url| !url.trim().is_empty() && !is_shareable_cover_url(url))
+    };
+    for track in tracks.iter_mut() {
+        let Some(before) = previous.get(track.id.as_str()) else {
+            continue;
+        };
+        if let (Some(payload), Some(before_payload)) =
+            (track.sync_payload.as_mut(), before.sync_payload.as_ref())
+        {
+            if payload.cover_url.is_empty()
+                && !before_payload.cover_url.is_empty()
+                && !is_shareable_cover_url(&before_payload.cover_url)
+            {
+                payload.cover_url = before_payload.cover_url.clone();
+            }
+            if payload.original_cover_url.is_none() && local_only(&before_payload.original_cover_url) {
+                payload.original_cover_url = before_payload.original_cover_url.clone();
+            }
+            if payload.custom_cover_url.is_none() && local_only(&before_payload.custom_cover_url) {
+                payload.custom_cover_url = before_payload.custom_cover_url.clone();
+                // 自定义封面优先显示，与 sync_song_to_track 一致
+                track.cover_url = payload.custom_cover_url.clone();
+                continue;
+            }
+        }
+        if track.cover_url.as_deref().is_none_or(|url| url.trim().is_empty()) && local_only(&before.cover_url) {
+            track.cover_url = before.cover_url.clone();
+        }
+    }
 }
 
 /// 读取收藏歌单（供 list 命令调用，隐藏墓碑）
@@ -972,6 +1012,42 @@ mod tests {
     use crate::state::{TrackInfo, TrackSource};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
+
+    #[test]
+    fn local_covers_stripped_for_upload_come_back_on_write_back() {
+        let local_track = |cover: Option<&str>, payload: SyncSong| TrackInfo {
+            id: "netease:1".into(),
+            title: "Song".into(),
+            artist: String::new(),
+            album: String::new(),
+            duration_ms: 0,
+            source: TrackSource::Netease,
+            url: String::new(),
+            cover_url: cover.map(String::from),
+            added_at: 0,
+            sync_payload: Some(payload),
+            playlist_key: None,
+        };
+        let before = local_track(
+            Some("D:\\custom.png"),
+            SyncSong { custom_cover_url: Some("D:\\custom.png".into()), cover_url: "https://p1.music.126.net/a.jpg".into(), ..Default::default() },
+        );
+        let mut synced = vec![local_track(
+            Some("https://p1.music.126.net/a.jpg"),
+            SyncSong { cover_url: "https://p1.music.126.net/a.jpg".into(), ..Default::default() },
+        )];
+        restore_local_covers(&mut synced, std::slice::from_ref(&before));
+        assert_eq!(synced[0].cover_url.as_deref(), Some("D:\\custom.png"));
+        assert_eq!(synced[0].sync_payload.as_ref().unwrap().custom_cover_url.as_deref(), Some("D:\\custom.png"));
+
+        // 另一端换了可以分享的自定义封面时，以它为准
+        let mut replaced = vec![local_track(
+            Some("https://p1.music.126.net/new.jpg"),
+            SyncSong { custom_cover_url: Some("https://p1.music.126.net/new.jpg".into()), ..Default::default() },
+        )];
+        restore_local_covers(&mut replaced, std::slice::from_ref(&before));
+        assert_eq!(replaced[0].cover_url.as_deref(), Some("https://p1.music.126.net/new.jpg"));
+    }
 
     #[test]
     fn tombstones_keep_their_deletion_time_across_snapshots() {

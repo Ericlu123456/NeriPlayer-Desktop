@@ -641,6 +641,53 @@ impl SyncSong {
     }
 }
 
+/// 其它设备也能打开的封面地址（对齐 Android SyncCoverUrlPolicy）：本机路径、file/content 等 URI，
+/// 以及指向本机的 http 地址（含 Tauri 的 asset.localhost）都不算
+pub fn is_shareable_cover_url(value: &str) -> bool {
+    let Ok(url) = url::Url::parse(value.trim()) else {
+        return false;
+    };
+    matches!(url.scheme(), "http" | "https")
+        && url.host_str().is_some_and(|host| {
+            let host = host.to_ascii_lowercase();
+            host != "localhost" && !host.ends_with(".localhost") && host != "127.0.0.1" && host != "[::1]"
+        })
+}
+
+impl SyncSong {
+    /// 上传用的副本：去掉只在本机有效的封面
+    pub fn with_shareable_covers(&self) -> Self {
+        let keep = |value: &Option<String>| value.clone().filter(|url| is_shareable_cover_url(url));
+        Self {
+            cover_url: if is_shareable_cover_url(&self.cover_url) {
+                self.cover_url.clone()
+            } else {
+                String::new()
+            },
+            custom_cover_url: keep(&self.custom_cover_url),
+            original_cover_url: keep(&self.original_cover_url),
+            ..self.clone()
+        }
+    }
+}
+
+impl SyncData {
+    /// 上传用的副本：歌单、收藏歌单和最近播放里的歌曲都去掉只在本机有效的封面
+    pub fn with_shareable_covers(&self) -> Self {
+        let mut data = self.clone();
+        for song in data
+            .playlists
+            .iter_mut()
+            .flat_map(|playlist| playlist.songs.iter_mut())
+            .chain(data.favorite_playlists.iter_mut().flat_map(|playlist| playlist.songs.iter_mut()))
+            .chain(data.recent_plays.iter_mut().map(|play| &mut play.song))
+        {
+            *song = song.with_shareable_covers();
+        }
+        data
+    }
+}
+
 /// 空白 optional 文本 -> None (与 Android nonBlank 语义对齐)
 fn normalize_optional_text(value: Option<&str>) -> Option<String> {
     value
@@ -1093,6 +1140,36 @@ pub struct WebDavSyncConfig {
 mod legacy_json_tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn only_covers_other_devices_can_open_are_uploaded() {
+        for local in [
+            "C:\\Music\\cover.jpg",
+            "\\\\nas\\share\\cover.jpg",
+            "/storage/emulated/0/cover.jpg",
+            "file:///C:/cover.jpg",
+            "content://media/external/images/1",
+            "http://asset.localhost/C%3A%5Ccover.jpg",
+            "http://127.0.0.1:8080/cover.jpg",
+            "",
+        ] {
+            assert!(!is_shareable_cover_url(local), "{local} must stay on this device");
+        }
+        assert!(is_shareable_cover_url("https://p1.music.126.net/cover.jpg"));
+        assert!(is_shareable_cover_url(" http://i0.hdslb.com/cover.jpg "));
+
+        let song = SyncSong {
+            id: "1".into(),
+            cover_url: "C:\\Music\\cover.jpg".into(),
+            custom_cover_url: Some("D:\\custom.png".into()),
+            original_cover_url: Some("https://p1.music.126.net/original.jpg".into()),
+            ..Default::default()
+        };
+        let shared = song.with_shareable_covers();
+        assert_eq!(shared.cover_url, "");
+        assert_eq!(shared.custom_cover_url, None);
+        assert_eq!(shared.original_cover_url.as_deref(), Some("https://p1.music.126.net/original.jpg"));
+    }
 
     #[test]
     fn sync_song_json_uses_android_field_contract() {

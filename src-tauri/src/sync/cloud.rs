@@ -245,8 +245,10 @@ pub(super) async fn github(
                 merge::three_way_merge(local, &snapshot.data, config.last_sync_time, &base)
             })
             .unwrap_or_else(|| local.normalized_for_sync());
+        // 只在本机有效的封面不上传（对齐 Android），是否有变化也按上传副本判断，免得每轮都重传
+        let shareable = merged.with_shareable_covers();
         let upload = snapshot.as_ref().is_none_or(|snapshot| {
-            snapshot.protocol != 4 || merge::has_data_changed(&snapshot.data, &merged)
+            snapshot.protocol != 4 || merge::has_data_changed(&snapshot.data, &shareable)
         });
         if !upload {
             return Ok(Completed {
@@ -257,7 +259,7 @@ pub(super) async fn github(
                 uploaded: false,
             });
         }
-        let (prepared, merged) = prepare(&merged).await?;
+        let (prepared, merged) = prepare(&shareable).await?;
         manager::ensure_local_playlist_epoch(epoch)?;
         let verified = snapshot
             .as_ref()
@@ -373,8 +375,9 @@ async fn webdav_with_epoch_guard(
                     merge::three_way_merge(local, &snapshot.data, config.last_sync_time, &base)
                 })
                 .unwrap_or_else(|| local.normalized_for_sync());
+            let shareable = merged.with_shareable_covers();
             let upload = snapshot.as_ref().is_none_or(|snapshot| {
-                snapshot.protocol != 4 || merge::has_data_changed(&snapshot.data, &merged)
+                snapshot.protocol != 4 || merge::has_data_changed(&snapshot.data, &shareable)
             });
             let verified = snapshot
                 .as_ref()
@@ -394,7 +397,7 @@ async fn webdav_with_epoch_guard(
                     HashSet::new(),
                 ));
             }
-            let (prepared, merged) = prepare(&merged).await?;
+            let (prepared, merged) = prepare(&shareable).await?;
             ensure_epoch()?;
             // 旧单文件仍是迁移依据，发布前确认它没有被旧客户端改写
             if snapshot
