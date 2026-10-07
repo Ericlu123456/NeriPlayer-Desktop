@@ -50,13 +50,20 @@ let homeUnmounted = false
 let unlistenPlaylistsChanged: UnlistenFn | null = null
 const homeActive = ref(true)
 
+let continueLimitFrame = 0
 watch(continueGridRef, element => {
   continueResizeObserver?.disconnect()
+  cancelAnimationFrame(continueLimitFrame)
   if (!element) return
   const updateLimit = () => {
-    continueLimit.value = getComputedStyle(element).gridTemplateColumns.split(' ').filter(Boolean).length
+    const columns = getComputedStyle(element).gridTemplateColumns.split(' ').filter(Boolean).length
+    if (columns !== continueLimit.value) continueLimit.value = columns
   }
-  continueResizeObserver = new ResizeObserver(updateLimit)
+  // 在观察回调里直接改卡片数会改变网格高度，浏览器每次改窗口大小都会报 ResizeObserver 循环；放到下一帧
+  continueResizeObserver = new ResizeObserver(() => {
+    cancelAnimationFrame(continueLimitFrame)
+    continueLimitFrame = requestAnimationFrame(updateLimit)
+  })
   continueResizeObserver.observe(element)
   updateLimit()
 }, { flush: 'post' })
@@ -118,6 +125,7 @@ onUnmounted(() => {
   continueRequest++
   unlistenPlaylistsChanged?.()
   continueResizeObserver?.disconnect()
+  cancelAnimationFrame(continueLimitFrame)
   homeFeed.deactivate()
 })
 
