@@ -2,10 +2,10 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, FromSample, SampleFormat, SizedSample, Stream, StreamConfig};
 use std::collections::VecDeque;
 use std::io::{Cursor, Read};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc;
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, PoisonError, Weak};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -13,8 +13,8 @@ use crate::audio::analyzer::{AudioAnalyzer, SharedAudioLevel};
 use crate::audio::buffered::PcmRing;
 use crate::audio::decoder::{self, AudioDecoder};
 use crate::audio::effects::{
-    gain_to_millibels, EffectsControl, EffectsProcessor, LoudnessMeter, TrackLoudness,
-    NORMALIZE_WARMUP,
+    gain_to_millibels, EffectsControl, EffectsProcessor, LoudnessMeter, LoudnessScanner,
+    LoudnessStats, TrackLoudness, NORMALIZE_WARMUP,
 };
 use crate::audio::ffmpeg::ByteInput;
 use crate::audio::growing::GrowingAudioReader;
@@ -573,7 +573,10 @@ fn finish_decode_worker(
 
 fn matches_local_file(source: &AudioSource, target: &Path) -> bool {
     let AudioSource::File(path, _) = source else { return false };
-    let source = Path::new(path);
+    same_local_file(Path::new(path), target)
+}
+
+fn same_local_file(source: &Path, target: &Path) -> bool {
     if let (Ok(source), Ok(target)) = (source.canonicalize(), target.canonicalize()) {
         return source == target;
     }
@@ -734,6 +737,18 @@ impl FrameResampler {
 
     fn source_channels(&self) -> usize {
         self.current.len()
+    }
+
+    fn source_mut(&mut self) -> &mut dyn PcmSource {
+        self.source.as_mut()
+    }
+
+    /// 源被 seek 之后丢掉插值状态，从新位置重新开始
+    fn restart(&mut self) {
+        self.phase = 0.0;
+        self.initialized = false;
+        self.source_ended = false;
+        self.finished = false;
     }
 
     fn mixed_sample(&self, frame: &[f32], channel: usize, output_channels: usize) -> f32 {
@@ -1881,7 +1896,9 @@ fn audio_control_loop(
                     }
                     SharedAudioLevel::reset(&shared_level);
                 }
-                // 本地 worker join 完成后才允许调用方删除或改写文件
+                // 整首扫描也开着文件（可能属于刚切走的上一首），一并停下
+                stop_file_scans(Path::new(&path));
+                // 本地 worker 与扫描线程都 join 完成后才允许调用方删除或改写文件
                 let _ = reply.send(released);
             }
             AudioCmd::SetVolume(next_volume) => {
@@ -2597,9 +2614,11 @@ fn prepare_session(
     let capacity_samples = duration_to_frames(PCM_CAPACITY, sample_rate)
         .saturating_mul(channels)
         .max(channels * 2);
-    // 新曲目开着音量均衡：先分析够预热时长再出声，第一个可闻样本就是正确的响度。
-    // 同一首歌重建会话时增益已经落定，不必再等
-    let prebuffer = if effects.snapshot().normalize_volume && !loudness.is_seeded() {
+    let normalize = effects.snapshot().normalize_volume;
+    // 同一首歌重建会话时增益已经落定，不必再预热、再等估计
+    let fresh_track = !loudness.is_seeded();
+    // 新曲目开着音量均衡：先分析够预热时长再出声，第一个可闻样本就是正确的响度
+    let prebuffer = if normalize && fresh_track {
         source.prebuffer_duration().max(NORMALIZE_WARMUP)
     } else {
         source.prebuffer_duration()
@@ -2630,6 +2649,10 @@ fn prepare_session(
         effects,
         loudness,
     });
+    // 越早开始，起播前等到整首估计的机会越大；音量均衡关着时不花这份 CPU
+    if normalize && shared.loudness.begin_scan() {
+        spawn_loudness_scan(&source, &shared.loudness, sample_rate, channels, expected_generation);
+    }
 
     let worker = spawn_decode_worker(
         decoder,
@@ -2656,32 +2679,49 @@ fn prepare_session(
     };
     let output_ms = output_started.elapsed().as_millis();
     let ready_started = Instant::now();
-    if let Err(error) = wait_until_ready(
+    let mut ready_wait_ms = 0;
+    let ready = wait_until_ready(
         &shared,
         &playback_generation,
         expected_generation,
         operation_generation.as_ref(),
         &prepare_cancel,
-    ) {
+    )
+    .and_then(|()| {
+        ready_wait_ms = ready_started.elapsed().as_millis();
+        if !(normalize && fresh_track) {
+            return Ok(());
+        }
+        wait_for_loudness_estimate(
+            &shared.loudness,
+            prepare_started + QUICK_ESTIMATE_BUDGET,
+            &playback_generation,
+            expected_generation,
+            operation_generation.as_ref(),
+            &prepare_cancel,
+        )
+    });
+    if let Err(error) = ready {
         shared.cancelled.store(true, Ordering::Release);
         shared.wake.notify_all();
         let _ = stream.pause();
         finish_decode_worker(&source, &shared, worker);
         return Err(error);
     }
-    let ready_wait_ms = ready_started.elapsed().as_millis();
+    let loudness_wait_ms = ready_started.elapsed().as_millis() - ready_wait_ms;
 
     log::info!(
         target: "cpal-output",
-        "prepared {} on {}: {} Hz, {} ch, target={}ms, decoder={}ms, output={}ms, wait={}ms, total={}ms",
+        "prepared {} on {}: {} Hz, {} ch, target={}ms, decoder={}ms, output={}ms, wait={}ms, loudness_wait={}ms, total={}ms",
         source.label(),
         output.name,
         sample_rate,
         channels,
-        source.prebuffer_duration().as_millis(),
+        prebuffer.as_millis(),
         decoder_ms,
         output_ms,
         ready_wait_ms,
+        loudness_wait_ms,
         prepare_started.elapsed().as_millis()
     );
     // 会话已就绪，即将交给调用方提交：解除代际守卫。
@@ -2837,6 +2877,290 @@ fn spawn_decode_worker(
             shared.wake.notify_all();
         })
         .map_err(|error| format!("Could not start decoder worker: {error}"))
+}
+
+const LOUDNESS_SCAN_CANCELLED: &str = "loudness scan cancelled";
+/// 整首扫描每解出这么多帧检查一次取消
+const LOUDNESS_SCAN_CHECK_FRAMES: u64 = 4_096;
+/// 快速估计在整首上均匀取这么多个窗口，合计只解码几十分之一的内容
+const QUICK_ESTIMATE_WINDOWS: u32 = 12;
+const QUICK_ESTIMATE_WINDOW: Duration = Duration::from_secs(1);
+/// 新曲目起播时最多等快速估计到这个时刻（从开始准备会话算起）；本地起播目标 300 ms
+const QUICK_ESTIMATE_BUDGET: Duration = Duration::from_millis(200);
+
+/// 正在整首扫描的本地文件
+///
+/// 释放文件（删除、改写）前要等这些扫描线程关掉句柄，包括刚切走、还没来得及退出的上一首。
+static FILE_SCANS: Mutex<Vec<FileScan>> = Mutex::new(Vec::new());
+
+struct FileScan {
+    path: PathBuf,
+    cancel: Arc<AtomicBool>,
+    handle: JoinHandle<()>,
+}
+
+fn register_file_scan(path: &str, cancel: Arc<AtomicBool>, handle: JoinHandle<()>) {
+    let mut scans = FILE_SCANS.lock().unwrap_or_else(PoisonError::into_inner);
+    scans.retain(|scan| !scan.handle.is_finished());
+    scans.push(FileScan { path: PathBuf::from(path), cancel, handle });
+}
+
+/// 停下这个文件上的整首扫描，返回前扫描线程都已退出
+fn stop_file_scans(target: &Path) {
+    let stopping: Vec<FileScan> = {
+        let mut scans = FILE_SCANS.lock().unwrap_or_else(PoisonError::into_inner);
+        let (matching, rest) = std::mem::take(&mut *scans)
+            .into_iter()
+            .partition(|scan| same_local_file(&scan.path, target));
+        *scans = rest;
+        matching
+    };
+    for scan in stopping {
+        scan.cancel.store(true, Ordering::Release);
+        if scan.handle.join().is_err() {
+            log::warn!(target: "audio-loudness", "loudness scan thread panicked");
+        }
+    }
+}
+
+/// 能整首扫描响度的源：本地文件、内存音频和边下边播的流
+///
+/// 按需拉区间的在线流不扫，免得为了统计把整首重新下载一遍。
+fn loudness_scan_source(source: &AudioSource, cancel: &Arc<AtomicBool>) -> Option<AudioSource> {
+    match source {
+        AudioSource::Bytes(_, _) | AudioSource::File(_, _) => Some(source.clone()),
+        AudioSource::Growing(reader, hint, lifetime) => {
+            // 读位置和取消标志独立，与播放共享同一份下载
+            let mut reader = reader.clone();
+            reader.set_prepare_cancel(Arc::clone(cancel));
+            Some(AudioSource::Growing(reader, *hint, Arc::clone(lifetime)))
+        }
+        AudioSource::Remote(_, _) => None,
+    }
+}
+
+/// 开着音量均衡时，另开一个解码器把整首的响度算出来
+///
+/// 播放时的统计只领先 ring 里的几秒，开头几十秒目标增益会随统计收敛漂移好几 dB，
+/// 第一次分析到接近满幅的峰时还会被峰值封顶突然压低。能随机读取的本地源先在整首上
+/// 抽样做快速估计（起播会稍等它），再完整扫一遍；扫完后整首歌只用一个增益。
+/// 测量的帧格式（输出采样率、声道布局）与播放时一致。
+fn spawn_loudness_scan(
+    source: &AudioSource,
+    loudness: &Arc<TrackLoudness>,
+    output_rate: u32,
+    output_channels: usize,
+    generation: u64,
+) {
+    let cancel = loudness.scan_cancel();
+    let Some(source) = loudness_scan_source(source, &cancel) else {
+        return;
+    };
+    let (file_path, quick) = match &source {
+        AudioSource::File(path, _) => (Some(path.clone()), true),
+        AudioSource::Bytes(_, _) => (None, true),
+        // 边下边播只能顺着下载读，抽样会卡在还没到的位置上
+        AudioSource::Growing(_, _, _) | AudioSource::Remote(_, _) => (None, false),
+    };
+    loudness.set_estimate_pending(quick);
+    let track = Arc::downgrade(loudness);
+    let thread_cancel = Arc::clone(&cancel);
+    let spawned = thread::Builder::new()
+        .name("loudness-scan".into())
+        .spawn(move || {
+            run_loudness_scan(
+                &source, output_rate, output_channels, &thread_cancel, &track, generation, quick,
+            )
+        });
+    match spawned {
+        Ok(handle) => {
+            if let Some(path) = file_path {
+                register_file_scan(&path, cancel, handle);
+            }
+        }
+        Err(error) => {
+            loudness.set_estimate_pending(false);
+            log::warn!(
+                target: "audio-loudness",
+                "loudness scan not started generation={generation}, keeping the running estimate: {error}",
+            );
+        }
+    }
+}
+
+fn run_loudness_scan(
+    source: &AudioSource,
+    output_rate: u32,
+    output_channels: usize,
+    cancel: &AtomicBool,
+    track: &Weak<TrackLoudness>,
+    generation: u64,
+    quick: bool,
+) {
+    let started = Instant::now();
+    if quick {
+        let estimate = estimate_track_loudness(source, output_rate, output_channels, cancel);
+        let elapsed_ms = started.elapsed().as_millis();
+        let Some(track) = track.upgrade() else {
+            return;
+        };
+        match estimate {
+            Ok(Some(stats)) => {
+                track.estimate(stats);
+                log::info!(
+                    target: "audio-loudness",
+                    "loudness estimate ready source={} generation={} windows={} target_db={:.2} elapsed_ms={}",
+                    source.label(),
+                    generation,
+                    QUICK_ESTIMATE_WINDOWS,
+                    stats.target_gain().map_or(f64::NAN, |gain| 20.0 * gain.log10()),
+                    elapsed_ms,
+                );
+            }
+            Ok(None) => log::info!(
+                target: "audio-loudness",
+                "loudness estimate skipped generation={generation}: track too short or not seekable",
+            ),
+            Err(error) if error == LOUDNESS_SCAN_CANCELLED => {}
+            Err(error) => log::warn!(
+                target: "audio-loudness",
+                "loudness estimate failed generation={generation}, waiting for the full scan: {error}",
+            ),
+        }
+        track.set_estimate_pending(false);
+    }
+    let result = scan_track_loudness(source, output_rate, output_channels, cancel);
+    let elapsed_ms = started.elapsed().as_millis();
+    match result {
+        Ok((stats, frames)) => {
+            let Some(track) = track.upgrade() else {
+                log::info!(
+                    target: "audio-loudness",
+                    "loudness scan finished after the track was released generation={generation} elapsed_ms={elapsed_ms}",
+                );
+                return;
+            };
+            track.complete(stats);
+            log::info!(
+                target: "audio-loudness",
+                "loudness scan complete source={} generation={} decoded_s={:.1} rms_dbfs={:.1} peak_dbfs={:.1} target_db={:.2} elapsed_ms={}",
+                source.label(),
+                generation,
+                frames as f64 / f64::from(output_rate.max(1)),
+                stats.rms_dbfs(),
+                stats.peak_dbfs(),
+                stats.target_gain().map_or(f64::NAN, |gain| 20.0 * gain.log10()),
+                elapsed_ms,
+            );
+        }
+        Err(error) if error == LOUDNESS_SCAN_CANCELLED => log::info!(
+            target: "audio-loudness",
+            "loudness scan stopped generation={generation} elapsed_ms={elapsed_ms}",
+        ),
+        Err(error) => log::warn!(
+            target: "audio-loudness",
+            "loudness scan failed generation={generation}, keeping the running estimate: {error}",
+        ),
+    }
+}
+
+/// 从头解码整首，按播放时的帧格式统计响度；返回统计和解出的帧数
+fn scan_track_loudness(
+    source: &AudioSource,
+    output_rate: u32,
+    output_channels: usize,
+    cancel: &AtomicBool,
+) -> Result<(LoudnessStats, u64), String> {
+    let decoder = make_decoder_for_position(source, 0, false)?;
+    let mut converter = FrameResampler::new(decoder);
+    let channels = output_channels.max(1);
+    let measured_channels = loudness_channels(converter.source_channels(), channels);
+    let mut frame = vec![0.0; channels];
+    let mut scanner = LoudnessScanner::default();
+    let mut frames = 0u64;
+    while converter.next_frame(output_rate, &mut frame) {
+        scanner.observe(&frame[..measured_channels]);
+        frames += 1;
+        if frames % LOUDNESS_SCAN_CHECK_FRAMES == 0 && cancel.load(Ordering::Acquire) {
+            return Err(LOUDNESS_SCAN_CANCELLED.into());
+        }
+    }
+    if cancel.load(Ordering::Acquire) {
+        return Err(LOUDNESS_SCAN_CANCELLED.into());
+    }
+    // 下载中断时读取也会走到结尾，那时只统计到半首，宁可不用
+    if let AudioSource::Growing(reader, _, _) = source {
+        if reader.clone().byte_len().is_none() {
+            return Err("stream download did not complete".into());
+        }
+    }
+    Ok((scanner.finish(), frames))
+}
+
+/// 在整首上均匀取若干 1 秒窗口统计响度，作为完整扫描之前的估计
+///
+/// 时长未知、太短或不能 seek 时返回 None：短曲完整扫描本身就很快，抽样反而不准。
+fn estimate_track_loudness(
+    source: &AudioSource,
+    output_rate: u32,
+    output_channels: usize,
+    cancel: &AtomicBool,
+) -> Result<Option<LoudnessStats>, String> {
+    let decoder = make_decoder_for_position(source, 0, false)?;
+    let Some(duration) = decoder.total_duration() else {
+        return Ok(None);
+    };
+    if duration < QUICK_ESTIMATE_WINDOW * QUICK_ESTIMATE_WINDOWS * 2 {
+        return Ok(None);
+    }
+    let mut converter = FrameResampler::new(decoder);
+    let channels = output_channels.max(1);
+    let measured_channels = loudness_channels(converter.source_channels(), channels);
+    let window_frames = duration_to_frames(QUICK_ESTIMATE_WINDOW, output_rate);
+    let mut frame = vec![0.0; channels];
+    let mut scanner = LoudnessScanner::default();
+    for window in 0..QUICK_ESTIMATE_WINDOWS {
+        if cancel.load(Ordering::Acquire) {
+            return Err(LOUDNESS_SCAN_CANCELLED.into());
+        }
+        let center = duration.mul_f64((f64::from(window) + 0.5) / f64::from(QUICK_ESTIMATE_WINDOWS));
+        if converter
+            .source_mut()
+            .try_seek(center.saturating_sub(QUICK_ESTIMATE_WINDOW / 2))
+            .is_err()
+        {
+            return Ok(None);
+        }
+        converter.restart();
+        for _ in 0..window_frames {
+            if !converter.next_frame(output_rate, &mut frame) {
+                break;
+            }
+            scanner.observe(&frame[..measured_channels]);
+        }
+    }
+    Ok(Some(scanner.finish()))
+}
+
+/// 新曲目起播前稍等整首的快速估计，第一个可闻样本就用接近整首的增益
+///
+/// 最多等到 `deadline`；等不到就按播放时的统计起播，估计到了再平滑过去。
+fn wait_for_loudness_estimate(
+    loudness: &TrackLoudness,
+    deadline: Instant,
+    playback_generation: &AtomicU64,
+    expected_generation: u64,
+    operation_generation: Option<&GenerationToken>,
+    prepare_cancel: &AtomicBool,
+) -> Result<(), String> {
+    while loudness.estimate_pending() && Instant::now() < deadline {
+        ensure_preparation_current(playback_generation, expected_generation, operation_generation)?;
+        if prepare_cancel.load(Ordering::Acquire) {
+            return Err("Timed out waiting for decoded audio".into());
+        }
+        thread::sleep(Duration::from_millis(2));
+    }
+    Ok(())
 }
 
 fn wait_until_ready(
@@ -3036,8 +3360,10 @@ fn render_output<T>(
         let elapsed_us = (media_frames * 1_000_000.0 / f64::from(shared.sample_rate)) as u64;
         shared.clock.position_us.fetch_add(elapsed_us, Ordering::AcqRel);
     }
+    // 交叉淡化时两个会话都在出声，增益读数只取声音占主导的那个
+    let dominant = shared.fade_gain.load() >= 0.5;
     counters.record_effects(
-        gain_to_millibels(effects.normalization_gain()),
+        dominant.then(|| gain_to_millibels(effects.normalization_gain())),
         effects.take_limited_frames(),
     );
     let underrun = silent_frames > 0 && !draining;
@@ -3347,7 +3673,8 @@ mod tests {
         make_decoder_for_position, AudioSource, GenerationToken, PlaybackClock, SEEK_SUPERSEDED,
     };
     use std::collections::VecDeque;
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::path::Path;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::sync::mpsc;
     use std::sync::Arc;
     use std::time::Duration;
@@ -4104,5 +4431,276 @@ mod tests {
         assert_eq!(super::loudness_channels(6, 2), 2, "5.1 缩混成立体声后两个声道都有内容");
         assert_eq!(super::loudness_channels(8, 8), 8);
         assert_eq!(super::loudness_channels(0, 2), 1);
+    }
+
+    /// 16 bit 立体声 440 Hz WAV，由若干段（幅度, 秒数）拼成；同时返回解码后应得到的样本
+    fn sine_sections_wav(sample_rate: u32, sections: &[(f64, u32)]) -> (Vec<u8>, Vec<f32>) {
+        let mut samples = Vec::new();
+        let mut index = 0usize;
+        for &(amplitude, seconds) in sections {
+            for _ in 0..(sample_rate * seconds) {
+                let phase = std::f64::consts::TAU * 440.0 * index as f64 / f64::from(sample_rate);
+                let value = (amplitude * phase.sin() * 32_767.0).round() as i16;
+                samples.extend([value, value]);
+                index += 1;
+            }
+        }
+        let data_len = (samples.len() * 2) as u32;
+        let mut bytes = Vec::with_capacity(44 + data_len as usize);
+        bytes.extend_from_slice(b"RIFF");
+        bytes.extend_from_slice(&(36 + data_len).to_le_bytes());
+        bytes.extend_from_slice(b"WAVEfmt ");
+        bytes.extend_from_slice(&16u32.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&2u16.to_le_bytes());
+        bytes.extend_from_slice(&sample_rate.to_le_bytes());
+        bytes.extend_from_slice(&(sample_rate * 4).to_le_bytes());
+        bytes.extend_from_slice(&4u16.to_le_bytes());
+        bytes.extend_from_slice(&16u16.to_le_bytes());
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&data_len.to_le_bytes());
+        for sample in &samples {
+            bytes.extend_from_slice(&sample.to_le_bytes());
+        }
+        let decoded = samples.iter().map(|sample| f32::from(*sample) / 32_768.0).collect();
+        (bytes, decoded)
+    }
+
+    /// 前一半安静、后一半响
+    fn quiet_then_loud_wav(sample_rate: u32, seconds_each: u32) -> (Vec<u8>, Vec<f32>) {
+        sine_sections_wav(sample_rate, &[(0.05, seconds_each), (0.5, seconds_each)])
+    }
+
+    fn wav_file(directory: &tempfile::TempDir, name: &str, bytes: &[u8]) -> AudioSource {
+        let path = directory.path().join(name);
+        std::fs::write(&path, bytes).unwrap();
+        AudioSource::File(path.to_string_lossy().into_owned(), 0)
+    }
+
+    fn target_db(stats: &crate::audio::effects::LoudnessStats) -> f64 {
+        20.0 * stats.target_gain().unwrap().log10()
+    }
+
+    /// 安静-响-安静的 40 秒曲子：抽样估计与完整扫描相差不到 0.5 dB，
+    /// 而只看开头 10 秒的估计差了 6 dB 以上
+    #[test]
+    fn quick_estimate_lands_close_to_the_full_scan() {
+        let (wav, decoded) = sine_sections_wav(24_000, &[(0.05, 10), (0.5, 20), (0.05, 10)]);
+        let directory = tempfile::tempdir().unwrap();
+        let source = wav_file(&directory, "sections.wav", &wav);
+        let cancel = AtomicBool::new(false);
+
+        let estimate = super::estimate_track_loudness(&source, 24_000, 2, &cancel)
+            .unwrap()
+            .expect("40 秒的本地文件应给出估计");
+        let (full, _) = super::scan_track_loudness(&source, 24_000, 2, &cancel).unwrap();
+
+        assert!(
+            (target_db(&estimate) - target_db(&full)).abs() < 0.5,
+            "估计 {:.2} dB，整首 {:.2} dB",
+            target_db(&estimate),
+            target_db(&full),
+        );
+        assert!(estimate.samples() < full.samples() / 3, "估计只解码一小部分");
+        let mut opening = crate::audio::effects::LoudnessScanner::default();
+        opening.observe(&decoded[..decoded.len() / 4]);
+        assert!(target_db(&opening.finish()) - target_db(&full) > 6.0);
+    }
+
+    /// 在真实曲库上量快速估计与完整扫描的耗时和差距（发布构建才有参考价值）：
+    /// `NERI_LOUDNESS_BENCH_DIR=<目录> cargo test --release --lib -- --ignored loudness_scan_timing --nocapture`
+    #[test]
+    #[ignore = "needs NERI_LOUDNESS_BENCH_DIR pointing at a music folder"]
+    fn loudness_scan_timing_on_a_local_library() {
+        let directory = std::env::var("NERI_LOUDNESS_BENCH_DIR")
+            .expect("set NERI_LOUDNESS_BENCH_DIR to a folder with audio files");
+        const AUDIO: [&str; 9] = ["mp3", "flac", "m4a", "aac", "ogg", "opus", "wav", "ape", "wv"];
+        let mut files: Vec<_> = std::fs::read_dir(directory)
+            .unwrap()
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .filter(|path| {
+                path.extension()
+                    .and_then(|extension| extension.to_str())
+                    .is_some_and(|extension| AUDIO.contains(&extension.to_ascii_lowercase().as_str()))
+            })
+            .collect();
+        files.sort();
+        let cancel = AtomicBool::new(false);
+        for path in files.iter().take(8) {
+            let source = AudioSource::File(path.to_string_lossy().into_owned(), 0);
+            let started = std::time::Instant::now();
+            let estimate = super::estimate_track_loudness(&source, 48_000, 2, &cancel);
+            let estimate_ms = started.elapsed().as_millis();
+            let started = std::time::Instant::now();
+            let full = super::scan_track_loudness(&source, 48_000, 2, &cancel);
+            let full_ms = started.elapsed().as_millis();
+            let estimate_db = estimate.ok().flatten().map(|stats| target_db(&stats));
+            let (full_db, seconds) = match &full {
+                Ok((stats, frames)) => (Some(target_db(stats)), *frames as f64 / 48_000.0),
+                Err(_) => (None, 0.0),
+            };
+            println!(
+                "{:>6.1}s estimate={estimate_db:>8.2?} dB in {estimate_ms:>5} ms, full={full_db:>8.2?} dB in {full_ms:>6} ms  {}",
+                seconds,
+                path.file_name().unwrap_or_default().to_string_lossy(),
+            );
+        }
+    }
+
+    #[test]
+    fn short_tracks_skip_the_quick_estimate() {
+        let (wav, _) = quiet_then_loud_wav(24_000, 2);
+        let directory = tempfile::tempdir().unwrap();
+        let source = wav_file(&directory, "short.wav", &wav);
+
+        let estimate =
+            super::estimate_track_loudness(&source, 24_000, 2, &AtomicBool::new(false)).unwrap();
+
+        assert!(estimate.is_none());
+    }
+
+    /// 起播等估计：估计一到就返回，等不到就在截止时刻放弃，播放请求作废时立刻退出
+    #[test]
+    fn waiting_for_the_estimate_is_bounded() {
+        let generation = AtomicU64::new(3);
+        let not_cancelled = AtomicBool::new(false);
+        let track = crate::audio::effects::TrackLoudness::new_shared();
+        track.set_estimate_pending(true);
+        let landing = Arc::clone(&track);
+        let started = std::time::Instant::now();
+        let lander = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(30));
+            landing.set_estimate_pending(false);
+        });
+        super::wait_for_loudness_estimate(
+            &track, started + Duration::from_secs(5), &generation, 3, None, &not_cancelled,
+        )
+        .unwrap();
+        lander.join().unwrap();
+        assert!(started.elapsed() < Duration::from_secs(2), "估计到了就该返回");
+
+        track.set_estimate_pending(true);
+        let started = std::time::Instant::now();
+        super::wait_for_loudness_estimate(
+            &track, started + Duration::from_millis(40), &generation, 3, None, &not_cancelled,
+        )
+        .unwrap();
+        assert!(started.elapsed() >= Duration::from_millis(40));
+
+        generation.store(4, Ordering::Release);
+        assert!(super::wait_for_loudness_estimate(
+            &track,
+            std::time::Instant::now() + Duration::from_secs(5),
+            &generation,
+            3,
+            None,
+            &not_cancelled,
+        )
+        .is_err());
+    }
+
+    /// 整首扫描读完整个文件，结果与按播放口径统计同样的样本一致，并把目标固定下来；
+    /// 只看开头安静段的估计比整首高得多——这就是播放时统计在开头的漂移
+    #[test]
+    fn loudness_scan_measures_the_whole_file_like_playback() {
+        let (wav, decoded) = quiet_then_loud_wav(48_000, 2);
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("scan.wav");
+        std::fs::write(&path, &wav).unwrap();
+        let source = AudioSource::File(path.to_string_lossy().into_owned(), 0);
+
+        let (stats, frames) =
+            super::scan_track_loudness(&source, 48_000, 2, &AtomicBool::new(false)).unwrap();
+
+        assert_eq!(frames, 192_000);
+        let mut expected = crate::audio::effects::LoudnessScanner::default();
+        expected.observe(&decoded);
+        let target = stats.target_gain().unwrap();
+        assert!((target - expected.finish().target_gain().unwrap()).abs() < 1e-4);
+        let mut opening = crate::audio::effects::LoudnessScanner::default();
+        opening.observe(&decoded[..decoded.len() / 2]);
+        let early = opening.finish().target_gain().unwrap();
+        assert!(early / target > 2.0, "开头的估计 {early:.3} 应远高于整首 {target:.3}");
+
+        let track = crate::audio::effects::TrackLoudness::new_shared();
+        track.set_estimate_pending(true);
+        super::run_loudness_scan(
+            &source, 48_000, 2, &AtomicBool::new(false), &Arc::downgrade(&track), 1, true,
+        );
+        assert!(track.is_complete());
+        assert!(!track.estimate_pending(), "跳过估计时也要放行等待中的起播");
+        assert_eq!(track.analyzed_samples(), stats.samples());
+    }
+
+    #[test]
+    fn loudness_scan_stops_when_cancelled() {
+        let (wav, _) = quiet_then_loud_wav(48_000, 2);
+        let source = AudioSource::Bytes(Arc::from(wav), 0);
+
+        let result = super::scan_track_loudness(&source, 48_000, 2, &AtomicBool::new(true));
+
+        assert_eq!(result.unwrap_err(), super::LOUDNESS_SCAN_CANCELLED);
+    }
+
+    /// 边下边播要等下载完整才算扫完；下载中断时读到的结尾不是曲尾，不能拿半首当整首
+    #[test]
+    fn growing_scan_finishes_only_with_the_whole_download() {
+        let (wav, _) = quiet_then_loud_wav(48_000, 1);
+        let cancel = Arc::new(AtomicBool::new(false));
+        let complete = crate::audio::growing::GrowingAudioBuffer::new();
+        complete.append(&wav);
+        complete.finish();
+        let source =
+            super::loudness_scan_source(&AudioSource::growing(complete.reader(), 0), &cancel)
+                .unwrap();
+        let (_, frames) = super::scan_track_loudness(&source, 48_000, 2, &cancel).unwrap();
+        assert_eq!(frames, 96_000);
+
+        let interrupted = crate::audio::growing::GrowingAudioBuffer::new();
+        interrupted.append(&wav[..wav.len() / 2]);
+        let source =
+            super::loudness_scan_source(&AudioSource::growing(interrupted.reader(), 0), &cancel)
+                .unwrap();
+        let aborter = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(200));
+            interrupted.abort();
+        });
+        let result = super::scan_track_loudness(&source, 48_000, 2, &cancel);
+        aborter.join().unwrap();
+
+        assert!(result.is_err(), "下载中断时不能当成整首: {result:?}");
+    }
+
+    /// 释放文件要等这个文件上的扫描线程都退出，别的文件上的扫描不受影响
+    #[test]
+    fn releasing_a_file_waits_for_its_loudness_scans_only() {
+        let directory = tempfile::tempdir().unwrap();
+        let released = directory.path().join("released.flac");
+        let kept = directory.path().join("kept.flac");
+        std::fs::write(&released, b"audio").unwrap();
+        std::fs::write(&kept, b"audio").unwrap();
+        let spawn_scan = |path: &Path| {
+            let cancel = Arc::new(AtomicBool::new(false));
+            let exited = Arc::new(AtomicBool::new(false));
+            let (thread_cancel, thread_exited) = (Arc::clone(&cancel), Arc::clone(&exited));
+            let handle = std::thread::spawn(move || {
+                while !thread_cancel.load(Ordering::Acquire) {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                std::thread::sleep(Duration::from_millis(20));
+                thread_exited.store(true, Ordering::Release);
+            });
+            super::register_file_scan(&path.to_string_lossy(), Arc::clone(&cancel), handle);
+            (cancel, exited)
+        };
+        let (_, released_exited) = spawn_scan(&released);
+        let (kept_cancel, kept_exited) = spawn_scan(&kept);
+
+        super::stop_file_scans(&released);
+
+        assert!(released_exited.load(Ordering::Acquire), "返回前扫描线程必须已经退出");
+        assert!(!kept_cancel.load(Ordering::Acquire), "别的文件上的扫描不受影响");
+        super::stop_file_scans(&kept);
+        assert!(kept_exited.load(Ordering::Acquire));
     }
 }

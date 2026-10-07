@@ -85,10 +85,11 @@ impl OutputMetrics {
         }
     }
 
-    /// 回调处理完音效后调用：记下当前的均衡增益，累加限幅帧数
-    pub fn record_effects(&self, normalization_gain_mb: i64, limited_frames: u64) {
-        self.normalization_gain_mb
-            .store(normalization_gain_mb, Ordering::Relaxed);
+    /// 回调处理完音效后调用：累加限幅帧数；给了增益就更新当前均衡增益的读数
+    pub fn record_effects(&self, normalization_gain_mb: Option<i64>, limited_frames: u64) {
+        if let Some(gain) = normalization_gain_mb {
+            self.normalization_gain_mb.store(gain, Ordering::Relaxed);
+        }
         if limited_frames > 0 {
             self.limited_frames.fetch_add(limited_frames, Ordering::Relaxed);
         }
@@ -393,13 +394,15 @@ mod tests {
     #[test]
     fn effects_metrics_keep_the_latest_gain_and_accumulate_limited_frames() {
         let metrics = OutputMetrics::new();
-        metrics.record_effects(-602, 0);
-        metrics.record_effects(300, 128);
-        metrics.record_effects(250, 0);
+        metrics.record_effects(Some(-602), 0);
+        metrics.record_effects(Some(300), 128);
+        metrics.record_effects(Some(250), 0);
+        // 交叉淡化里淡出的那个会话只累加限幅帧数，不改读数
+        metrics.record_effects(None, 64);
 
         let snapshot = metrics.snapshot();
         assert_eq!(snapshot.normalization_gain_mb, 250);
-        assert_eq!(snapshot.limited_frames, 128);
+        assert_eq!(snapshot.limited_frames, 192);
     }
 
     fn stamps(issued_ns: u64, received_ns: u64) -> CommandStamps {

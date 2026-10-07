@@ -11,7 +11,7 @@
 //! 不过线。均衡器沿用 Android 的余量处理：整条曲线下移到最高频段为 0 dB，
 //! 拉高的频段不会削波。
 
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
@@ -33,6 +33,11 @@ const MAX_GAIN: f64 = 1.995_262_3;
 const PEAK_CEILING: f64 = 0.794_328_2;
 const GAIN_REDUCTION_SECONDS: f64 = 0.25;
 const GAIN_INCREASE_SECONDS: f64 = 4.0;
+/// 目标来自整首（抽样估计或完整扫描）后不再随播放变化，升降都按这个时间常数走到位
+///
+/// 慢升是为了让随统计变化的目标不至于来回「呼吸」；目标固定之后没有这个问题，
+/// 还按 4 s 慢慢抬的话，整首比开头估计更安静的曲子前十几秒都会偏小声。
+const FINAL_GAIN_SECONDS: f64 = 0.5;
 const LIMITER_ATTACK_SECONDS: f64 = 0.005;
 const LIMITER_RELEASE_SECONDS: f64 = 0.1;
 /// 解码线程每攒够这么多个样本并入一次统计（48 kHz 立体声约 43 ms）
@@ -152,36 +157,123 @@ impl EffectsControl {
     }
 }
 
+/// 正在攒的一块样本
+#[derive(Clone, Copy, Debug, Default)]
+struct Block {
+    sum_squares: f64,
+    samples: usize,
+    peak: f64,
+}
+
+impl Block {
+    /// 累加一个样本；攒满一块时返回 true
+    fn push(&mut self, sample: f32) -> bool {
+        let value = f64::from(sample);
+        self.sum_squares += value * value;
+        self.peak = self.peak.max(value.abs());
+        self.samples += 1;
+        self.samples >= ANALYSIS_BLOCK_SAMPLES
+    }
+
+    fn take(&mut self) -> Self {
+        std::mem::take(self)
+    }
+}
+
+/// 按块累计的整轨响度统计
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct LoudnessStats {
+    sum_squares: f64,
+    samples: u64,
+    peak: f64,
+}
+
+impl LoudnessStats {
+    /// 并入一块；低于静音门的块不计入（前奏留白、淡出不拉偏整首的响度）
+    fn add(&mut self, block: &Block) -> bool {
+        if block.samples == 0
+            || (block.sum_squares / block.samples as f64).sqrt() < SILENCE_GATE_RMS
+        {
+            return false;
+        }
+        self.sum_squares += block.sum_squares;
+        self.samples += block.samples as u64;
+        self.peak = self.peak.max(block.peak);
+        true
+    }
+
+    /// 已计入统计的样本数（各声道合计）
+    pub fn samples(&self) -> u64 {
+        self.samples
+    }
+
+    pub fn rms_dbfs(&self) -> f64 {
+        20.0 * (self.sum_squares / self.samples.max(1) as f64).sqrt().max(1e-9).log10()
+    }
+
+    pub fn peak_dbfs(&self) -> f64 {
+        20.0 * self.peak.max(1e-9).log10()
+    }
+
+    /// 目标增益：积分 RMS 拉向 -18 dBFS，且不把峰值推过 -2 dBFS；没有非静音样本时为 None
+    pub fn target_gain(&self) -> Option<f64> {
+        if self.samples == 0 {
+            return None;
+        }
+        let integrated_rms = (self.sum_squares / self.samples as f64).sqrt();
+        let rms_gain = (TARGET_RMS / integrated_rms).clamp(MIN_GAIN, MAX_GAIN);
+        let peak_gain = if self.peak > 0.0 {
+            (PEAK_CEILING / self.peak).min(MAX_GAIN)
+        } else {
+            MAX_GAIN
+        };
+        Some(rms_gain.min(peak_gain).clamp(MIN_GAIN, MAX_GAIN))
+    }
+}
+
+/// 统计来源：播放时的增量统计 -> 整首抽样估计 -> 整首扫描
+const SOURCE_LIVE: u8 = 0;
+const SOURCE_ESTIMATE: u8 = 1;
+const SOURCE_COMPLETE: u8 = 2;
+
 /// 一首歌的响度统计，以及回调最近施加的均衡增益
 ///
 /// 同一首歌的各个会话（seek、换设备重建）共用一份：统计接着累积，回调从上次的
 /// 增益接着走，音量不会因为重建跳一下。切歌时换新的一份。
+///
+/// 播放时的统计只领先 ring 里的几秒，开头几十秒里目标会随统计收敛而漂移；扫描线程
+/// 先用 [`TrackLoudness::estimate`] 给出整首的抽样估计，扫完后由
+/// [`TrackLoudness::complete`] 换成整首的统计，目标从此固定。
 pub struct TrackLoudness {
-    integrated: Mutex<IntegratedLoudness>,
-    /// 按整首统计算出的目标增益（f64 位）；0 表示还没有非静音的统计
+    integrated: Mutex<LoudnessStats>,
+    /// 当前统计的来源；有了整首的估计或扫描结果后，播放时的统计不再并入
+    source: AtomicU8,
+    /// 当前统计对应的目标增益（f64 位）；0 表示还没有非静音的统计
     target_gain: AtomicU64,
     analyzed_samples: AtomicU64,
     /// 回调最近施加的均衡增益（f64 位），新会话从这里接着走
     applied_gain: AtomicU64,
     /// 回调是否已经按统计落定过增益；落定之后的新会话不必再预热
     seeded: AtomicBool,
-}
-
-#[derive(Default)]
-struct IntegratedLoudness {
-    sum_squares: f64,
-    samples: u64,
-    peak: f64,
+    scan_started: AtomicBool,
+    /// 扫描线程还在算整首的抽样估计，起播可以稍等它
+    estimate_pending: AtomicBool,
+    /// 整首扫描的取消标志：曲目被放弃（最后一个会话释放）时置位
+    scan_cancel: Arc<AtomicBool>,
 }
 
 impl TrackLoudness {
     pub fn new_shared() -> Arc<Self> {
         Arc::new(Self {
-            integrated: Mutex::new(IntegratedLoudness::default()),
+            integrated: Mutex::new(LoudnessStats::default()),
+            source: AtomicU8::new(SOURCE_LIVE),
             target_gain: AtomicU64::new(0),
             analyzed_samples: AtomicU64::new(0),
             applied_gain: AtomicU64::new(1.0f64.to_bits()),
             seeded: AtomicBool::new(false),
+            scan_started: AtomicBool::new(false),
+            estimate_pending: AtomicBool::new(false),
+            scan_cancel: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -189,28 +281,77 @@ impl TrackLoudness {
         self.seeded.load(Ordering::Acquire)
     }
 
+    pub fn is_complete(&self) -> bool {
+        self.source.load(Ordering::Acquire) == SOURCE_COMPLETE
+    }
+
+    /// 目标来自整首（抽样估计或完整扫描），不再随播放进度变化
+    pub fn covers_whole_track(&self) -> bool {
+        self.source.load(Ordering::Acquire) != SOURCE_LIVE
+    }
+
     /// 已计入统计的样本数（各声道合计）
     pub fn analyzed_samples(&self) -> u64 {
         self.analyzed_samples.load(Ordering::Acquire)
     }
 
-    fn fold(&self, sum_squares: f64, samples: usize, peak: f64) {
-        if samples == 0 || (sum_squares / samples as f64).sqrt() < SILENCE_GATE_RMS {
+    /// 每首歌只扫描一次：第一次调用返回 true
+    pub fn begin_scan(&self) -> bool {
+        !self.scan_started.swap(true, Ordering::AcqRel)
+    }
+
+    pub fn set_estimate_pending(&self, pending: bool) {
+        self.estimate_pending.store(pending, Ordering::Release);
+    }
+
+    pub fn estimate_pending(&self) -> bool {
+        self.estimate_pending.load(Ordering::Acquire)
+    }
+
+    /// 换成整首的抽样估计；完整扫描的结果已经到了就不再覆盖
+    pub fn estimate(&self, stats: LoudnessStats) {
+        let mut integrated = self.lock_integrated();
+        if self.is_complete() {
             return;
         }
-        // 只有解码线程会拿这把锁（seek 时新旧两个解码线程可能短暂重叠），回调不碰。
-        // 累加的都是标量，持锁方 panic 也不会留下半截状态
-        let mut integrated = self
-            .integrated
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        integrated.sum_squares += sum_squares;
-        integrated.samples += samples as u64;
-        integrated.peak = integrated.peak.max(peak);
-        let target = resolve_target_gain(&integrated);
-        self.analyzed_samples
-            .store(integrated.samples, Ordering::Release);
-        self.target_gain.store(target.to_bits(), Ordering::Release);
+        *integrated = stats;
+        self.source.store(SOURCE_ESTIMATE, Ordering::Release);
+        self.publish(&integrated);
+    }
+
+    /// 换成整首扫描的统计；之后目标增益固定
+    pub fn complete(&self, stats: LoudnessStats) {
+        let mut integrated = self.lock_integrated();
+        *integrated = stats;
+        self.source.store(SOURCE_COMPLETE, Ordering::Release);
+        self.publish(&integrated);
+    }
+
+    pub fn scan_cancel(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.scan_cancel)
+    }
+
+    fn fold(&self, block: &Block) {
+        if self.covers_whole_track() {
+            return;
+        }
+        let mut integrated = self.lock_integrated();
+        if !self.covers_whole_track() && integrated.add(block) {
+            self.publish(&integrated);
+        }
+    }
+
+    fn publish(&self, stats: &LoudnessStats) {
+        if let Some(target) = stats.target_gain() {
+            self.analyzed_samples.store(stats.samples, Ordering::Release);
+            self.target_gain.store(target.to_bits(), Ordering::Release);
+        }
+    }
+
+    /// 只有解码线程和扫描线程会拿这把锁（seek 时新旧解码线程可能短暂重叠），回调不碰。
+    /// 里面都是标量，持锁方 panic 也不会留下半截状态
+    fn lock_integrated(&self) -> std::sync::MutexGuard<'_, LoudnessStats> {
+        self.integrated.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     fn target_gain(&self) -> Option<f64> {
@@ -223,53 +364,58 @@ impl TrackLoudness {
     }
 }
 
-fn resolve_target_gain(integrated: &IntegratedLoudness) -> f64 {
-    let integrated_rms = (integrated.sum_squares / integrated.samples.max(1) as f64).sqrt();
-    let rms_gain = (TARGET_RMS / integrated_rms).clamp(MIN_GAIN, MAX_GAIN);
-    let peak_gain = if integrated.peak > 0.0 {
-        (PEAK_CEILING / integrated.peak).min(MAX_GAIN)
-    } else {
-        MAX_GAIN
-    };
-    rms_gain.min(peak_gain).clamp(MIN_GAIN, MAX_GAIN)
+impl Drop for TrackLoudness {
+    fn drop(&mut self) {
+        // 曲目已被放弃：扫描线程不必再读下去（边下边播时它还占着下载）
+        self.scan_cancel.store(true, Ordering::Release);
+    }
 }
 
 /// 解码线程逐帧喂入，攒够一块就并入整首歌的统计
 pub struct LoudnessMeter {
     track: Arc<TrackLoudness>,
-    sum_squares: f64,
-    peak: f64,
-    samples: usize,
+    block: Block,
 }
 
 impl LoudnessMeter {
     pub fn new(track: Arc<TrackLoudness>) -> Self {
-        Self {
-            track,
-            sum_squares: 0.0,
-            peak: 0.0,
-            samples: 0,
-        }
+        Self { track, block: Block::default() }
     }
 
     pub fn observe(&mut self, samples: &[f32]) {
         for &sample in samples {
-            let value = f64::from(sample);
-            self.sum_squares += value * value;
-            self.peak = self.peak.max(value.abs());
-            self.samples += 1;
-            if self.samples >= ANALYSIS_BLOCK_SAMPLES {
-                self.flush();
+            if self.block.push(sample) {
+                self.track.fold(&self.block.take());
             }
         }
     }
 
     /// 把不足一块的残余也并入统计（曲尾）
     pub fn flush(&mut self) {
-        self.track.fold(self.sum_squares, self.samples, self.peak);
-        self.sum_squares = 0.0;
-        self.peak = 0.0;
-        self.samples = 0;
+        self.track.fold(&self.block.take());
+    }
+}
+
+/// 整首扫描的累计器，分块与静音门和播放时的统计完全一致
+#[derive(Default)]
+pub struct LoudnessScanner {
+    stats: LoudnessStats,
+    block: Block,
+}
+
+impl LoudnessScanner {
+    pub fn observe(&mut self, samples: &[f32]) {
+        for &sample in samples {
+            if self.block.push(sample) {
+                self.stats.add(&self.block.take());
+            }
+        }
+    }
+
+    pub fn finish(mut self) -> LoudnessStats {
+        let tail = self.block.take();
+        self.stats.add(&tail);
+        self.stats
     }
 }
 
@@ -613,7 +759,7 @@ impl EffectsProcessor {
     /// 推进音量均衡增益，返回本块起点与逐帧增量
     ///
     /// 与 Android 一样按块平滑、块内线性过渡；目标比当前低时 0.25 s 跟上，
-    /// 比当前高时 4 s 慢慢抬。
+    /// 比当前高时 4 s 慢慢抬。目标来自整首之后不再漂移，升降都按 0.5 s 走到位。
     fn advance_normalizer(&mut self, frames: usize) -> (f64, f64) {
         let Some(target) = self.track.target_gain() else {
             return (self.normalizer_gain, 0.0);
@@ -625,7 +771,9 @@ impl EffectsProcessor {
         }
         let start = self.normalizer_gain;
         let next = if self.normalizer_mix.may_exceed(0.0) {
-            let seconds = if target < start {
+            let seconds = if self.track.covers_whole_track() {
+                FINAL_GAIN_SECONDS
+            } else if target < start {
                 GAIN_REDUCTION_SECONDS
             } else {
                 GAIN_INCREASE_SECONDS
@@ -773,8 +921,18 @@ mod tests {
         (sum / samples.len().max(1) as f64).sqrt()
     }
 
+    fn block(rms: f64, peak: f64, samples: usize) -> Block {
+        Block { sum_squares: rms * rms * samples as f64, samples, peak }
+    }
+
     fn fold_stats(track: &TrackLoudness, rms: f64, peak: f64, samples: usize) {
-        track.fold(rms * rms * samples as f64, samples, peak);
+        track.fold(&block(rms, peak, samples));
+    }
+
+    fn stats_for_gain(gain: f64) -> LoudnessStats {
+        let mut stats = LoudnessStats::default();
+        assert!(stats.add(&block(TARGET_RMS / gain, 0.1, 96_000)));
+        stats
     }
 
     /// 目标增益的三种典型情形与 Android `VolumeNormalizationAudioProcessorTest` 逐个对齐
@@ -994,6 +1152,104 @@ mod tests {
         meter.flush();
         assert_eq!(track.analyzed_samples(), 100);
         assert!(track.target_gain().is_some());
+    }
+
+    /// 整首扫描和播放时的统计必须是同一个口径，否则扫完之后目标会跳一下
+    #[test]
+    fn scanner_and_live_meter_measure_the_same_way() {
+        let mut samples = vec![0.0005f32; ANALYSIS_BLOCK_SAMPLES * 2];
+        samples.extend(sine(440.0, 0.3, 30_000, 2));
+        samples.extend(sine(90.0, 0.05, 7_777, 2));
+        let track = TrackLoudness::new_shared();
+        let mut meter = LoudnessMeter::new(Arc::clone(&track));
+        meter.observe(&samples);
+        meter.flush();
+
+        let mut scanner = LoudnessScanner::default();
+        scanner.observe(&samples);
+        let stats = scanner.finish();
+
+        assert_eq!(track.analyzed_samples(), stats.samples());
+        assert_eq!(track.target_gain(), stats.target_gain());
+        assert!(stats.samples() < samples.len() as u64, "开头的静音块不计入");
+    }
+
+    /// 扫描完成后换成整首的统计，之后播放时的统计不再改变目标
+    #[test]
+    fn completed_scan_replaces_live_stats_and_freezes_the_target() {
+        let track = TrackLoudness::new_shared();
+        fold_stats(&track, 0.02, 0.05, 48_000);
+        let live = track.target_gain().unwrap();
+
+        let mut scanner = LoudnessScanner::default();
+        scanner.observe(&sine(440.0, 0.4, 48_000, 2));
+        let stats = scanner.finish();
+        track.complete(stats);
+        let final_target = track.target_gain().unwrap();
+
+        assert!(track.is_complete());
+        assert_eq!(Some(final_target), stats.target_gain());
+        assert!(final_target < live, "整首更响，目标应低于开头的估计");
+        fold_stats(&track, 0.02, 0.05, 480_000);
+        assert_eq!(track.target_gain(), Some(final_target), "扫描完成后目标固定");
+        assert_eq!(track.analyzed_samples(), stats.samples());
+    }
+
+    /// 抽样估计先顶上，完整扫描到了再换；之后的估计和播放时的统计都不再改目标
+    #[test]
+    fn whole_track_estimate_holds_until_the_full_scan_replaces_it() {
+        let track = TrackLoudness::new_shared();
+        assert!(track.begin_scan());
+        assert!(!track.begin_scan(), "每首歌只扫描一次");
+        fold_stats(&track, 0.02, 0.05, 48_000);
+
+        track.estimate(stats_for_gain(0.8));
+        assert!(track.covers_whole_track() && !track.is_complete());
+        assert!((track.target_gain().unwrap() - 0.8).abs() < 1e-9);
+        fold_stats(&track, 0.5, 0.9, 480_000);
+        assert!((track.target_gain().unwrap() - 0.8).abs() < 1e-9, "播放时的统计不再并入");
+
+        track.complete(stats_for_gain(0.6));
+        track.estimate(stats_for_gain(1.2));
+        assert!(track.is_complete());
+        assert!((track.target_gain().unwrap() - 0.6).abs() < 1e-9, "完整扫描之后不再被估计覆盖");
+    }
+
+    /// 目标固定后升降都在约 2 秒内到位；还按 4 s 慢升的话 2 秒只走到四成
+    #[test]
+    fn final_target_is_reached_quickly_in_both_directions() {
+        let control = control_with(|settings| settings.normalize_volume = true);
+        let quiet = sine(440.0, 0.01, 96_000, 2);
+        for (start, target) in [(0.5, 1.5), (1.5, 0.5)] {
+            let track = TrackLoudness::new_shared();
+            track.fold(&block(TARGET_RMS / start, 0.1, 96_000));
+            let mut effects = processor(2, RATE, &control, &track);
+            render(&mut effects, &quiet[..9_600], 480);
+            assert!((effects.normalization_gain() - start).abs() < 1e-6, "先按开头的估计落位");
+
+            track.complete(stats_for_gain(target));
+            render(&mut effects, &quiet, 480);
+            render(&mut effects, &quiet[..48_000], 480);
+
+            let gain = effects.normalization_gain();
+            assert!(
+                (gain - target).abs() < 0.01,
+                "{start} -> {target} 应在 2.5 秒内到位，实际 {gain:.3}",
+            );
+        }
+    }
+
+    /// 最后一个会话释放曲目时通知扫描线程停下
+    #[test]
+    fn releasing_the_last_session_cancels_the_scan() {
+        let track = TrackLoudness::new_shared();
+        let cancel = track.scan_cancel();
+        let other_session = Arc::clone(&track);
+
+        drop(track);
+        assert!(!cancel.load(Ordering::Acquire), "还有会话在用这首歌");
+        drop(other_session);
+        assert!(cancel.load(Ordering::Acquire));
     }
 
     /// 回归：重置音效曾把音量均衡一起关掉，设置页的开关却还显示开着
