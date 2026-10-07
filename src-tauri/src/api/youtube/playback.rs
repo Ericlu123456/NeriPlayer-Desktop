@@ -22,6 +22,9 @@ static AUDIO_STREAM_CACHE: LazyLock<Mutex<super::cache::AudioStreamCache>> =
 
 
 const PO_TOKEN_FAST_PATH_WAIT: Duration = Duration::from_millis(150);
+// 第一轮里已预热的签名求解只限时等待，超时同样挪到第二轮阻塞重试
+const CHALLENGE_WARMUP_WAIT: Duration = Duration::from_millis(2500);
+const CHALLENGE_WARMING: &str = "YouTube JS challenge is still warming up";
 
 struct BootstrapAttempt<T> {
     value: Option<Result<T, ()>>,
@@ -34,6 +37,14 @@ impl<T> Default for BootstrapAttempt<T> {
 }
 
 impl<T> BootstrapAttempt<T> {
+    fn is_resolved(&self) -> bool {
+        self.value.is_some()
+    }
+
+    fn set(&mut self, value: T) {
+        self.value = Some(Ok(value));
+    }
+
     async fn get_or_fetch<F, Fut>(&mut self, fetch: F) -> Option<&T>
     where
         F: FnOnce() -> Fut,
@@ -865,6 +876,7 @@ async fn resolve_response_streams(
     http: &FallbackHttp,
     response: &Value,
     bootstrap: &PlaybackBootstrap,
+    challenge_wait: Option<Duration>,
 ) -> AppResult<Vec<YtAudioStream>> {
     let (audio_formats, mut muxed_formats): (Vec<_>, Vec<_>) = collect_format_arrays(response)
         .into_iter()
@@ -876,18 +888,25 @@ async fn resolve_response_streams(
             .is_some_and(|mime| mime.starts_with("video/"))
     });
     // 成功音频不处理视频 challenge，音频不可用时保留 progressive 兜底
-    match resolve_format_streams(http, audio_formats, bootstrap).await {
+    match resolve_format_streams(http, audio_formats, bootstrap, challenge_wait).await {
         Ok(streams) if !streams.is_empty() => return Ok(streams),
-        Err(error) if muxed_formats.is_empty() => return Err(error),
+        Err(error) if muxed_formats.is_empty() || is_challenge_warming(&error) => {
+            return Err(error)
+        }
         _ => {}
     }
-    resolve_format_streams(http, muxed_formats, bootstrap).await
+    resolve_format_streams(http, muxed_formats, bootstrap, challenge_wait).await
+}
+
+fn is_challenge_warming(error: &AppError) -> bool {
+    matches!(error, AppError::Api(message) if message == CHALLENGE_WARMING)
 }
 
 async fn resolve_format_streams(
     http: &FallbackHttp,
     formats: Vec<Value>,
     bootstrap: &PlaybackBootstrap,
+    challenge_wait: Option<Duration>,
 ) -> AppResult<Vec<YtAudioStream>> {
     let mut signatures = Vec::new();
     let mut throttling = Vec::new();
@@ -918,8 +937,13 @@ async fn resolve_format_streams(
             }
         }
     }
-    let solutions =
-        super::challenge::solve(http, &bootstrap.player_js_url, signatures, throttling).await?;
+    let solving = super::challenge::solve(http, &bootstrap.player_js_url, signatures, throttling);
+    let solutions = match challenge_wait {
+        Some(wait) => tokio::time::timeout(wait, solving)
+            .await
+            .map_err(|_| AppError::Api(CHALLENGE_WARMING.into()))??,
+        None => solving.await?,
+    };
     let mut resolved = Vec::new();
     for mut format in formats {
         let cipher = format
@@ -1048,21 +1072,48 @@ pub async fn resolve_audio_streams_with_source(
     let mut hls_fallback = Vec::new();
     let mut token_acquisition: Option<PoTokenAcquisition> = None;
     let mut token_pending_streams = Vec::new();
-    for profile in ordered_profiles_with_source(logged_in, playback_source) {
+    let resolve_started = std::time::Instant::now();
+    // 第一轮只跑能立即出结果的客户端；还要等 player 预热或令牌铸造的挪到队尾，
+    // 其它客户端都失败后再按原顺序阻塞重试，需要登录的内容不受影响
+    let mut queue: Vec<(&'static PlayerClientProfile, bool)> =
+        ordered_profiles_with_source(logged_in, playback_source)
+            .into_iter()
+            .map(|profile| (profile, false))
+            .collect();
+    let mut position = 0;
+    while let Some(&(profile, deferred)) = queue.get(position) {
+        position += 1;
+        let profile_started = std::time::Instant::now();
         let bootstrap_slot = if profile.supports_authenticated_context {
             &mut authenticated_bootstrap
         } else {
             &mut anonymous_bootstrap
         };
+        let bootstrap_auth = if profile.supports_authenticated_context {
+            auth
+        } else {
+            None
+        };
+        // 第一轮不为首页配置等网络：有缓存或快照就直接用；登录态还没有时先让匿名客户端起播
+        if !deferred && !bootstrap_slot.is_resolved() {
+            if let Some(value) = super::bootstrap::cached(
+                &http,
+                bootstrap_auth,
+                profile.supports_authenticated_context,
+            ) {
+                bootstrap_slot.set(value);
+            } else if profile.supports_authenticated_context {
+                super::bootstrap::refresh_in_background(&http, bootstrap_auth, true);
+                log::info!(target: "youtube-playback", "client={} deferred: bootstrap not cached", profile.client_name);
+                queue.push((profile, true));
+                continue;
+            }
+        }
         let bootstrap = bootstrap_slot
             .get_or_fetch(|| {
                 super::bootstrap::fetch(
                     &http,
-                    if profile.supports_authenticated_context {
-                        auth
-                    } else {
-                        None
-                    },
+                    bootstrap_auth,
                     profile.supports_authenticated_context,
                     // 流级重试复用有效配置，首页过期由自身 TTL 和登录指纹判定
                     false,
@@ -1073,20 +1124,56 @@ pub async fn resolve_audio_streams_with_source(
             errors.push(format!("{}:bootstrap_failed", profile.client_name));
             continue;
         };
-        if profile.supports_authenticated_context
-            && bootstrap.signature_timestamp.is_none()
-            && !bootstrap.player_js_url.is_empty()
-        {
-            if let Ok(script) =
-                super::challenge::player_script(&http, &bootstrap.player_js_url).await
+        if profile.supports_authenticated_context && !bootstrap.player_js_url.is_empty() {
+            let player_js_url = bootstrap.player_js_url.clone();
+            if bootstrap.signature_timestamp.is_none() {
+                bootstrap.signature_timestamp =
+                    super::challenge::cached_signature_timestamp(&player_js_url);
+            }
+            if bootstrap.signature_timestamp.is_none()
+                || !super::challenge::player_ready(&player_js_url)
             {
-                bootstrap.signature_timestamp = super::bootstrap::timestamp_from_script(&script);
+                super::challenge::warm(http.clone(), player_js_url.clone());
+                if !deferred {
+                    log::info!(target: "youtube-playback", "client={} deferred: player warming", profile.client_name);
+                    queue.push((profile, true));
+                    continue;
+                }
+                if bootstrap.signature_timestamp.is_none() {
+                    bootstrap.signature_timestamp =
+                        super::challenge::signature_timestamp(&http, &player_js_url).await;
+                }
+            }
+        }
+        if profile.requires_po_token && !deferred {
+            if let Some(app) = app {
+                let session_auth = YouTubeAuth {
+                    cookies: bootstrap.cookies.clone(),
+                    nickname: None,
+                    avatar_url: None,
+                };
+                let fingerprint = super::bootstrap::auth_fingerprint(Some(&session_auth));
+                if super::web_po::cached_token(&fingerprint, &bootstrap.remote_host, video_id)
+                    .is_none()
+                {
+                    super::web_po::warm(
+                        app.clone(),
+                        session_auth,
+                        video_id.to_owned(),
+                        bootstrap.visitor_data.clone(),
+                        bootstrap.remote_host.clone(),
+                    );
+                    log::info!(target: "youtube-playback", "client={} deferred: po token not ready", profile.client_name);
+                    queue.push((profile, true));
+                    continue;
+                }
             }
         }
         if profile.requires_visitor_data && bootstrap.visitor_data.is_empty() {
             errors.push(format!("{}:missing_visitor", profile.client_name));
             continue;
         }
+        let bootstrap_ms = profile_started.elapsed().as_millis();
         let response = match player_request(&http, profile, video_id, &bootstrap).await {
             Ok(value) => value,
             Err(_) => {
@@ -1095,7 +1182,13 @@ pub async fn resolve_audio_streams_with_source(
             }
         };
         let (status, _, _) = playability_summary(&response);
+        let player_ms = profile_started.elapsed().as_millis();
         if status != "OK" {
+            log::info!(
+                target: "youtube-playback",
+                "client={} status={status} bootstrap_ms={bootstrap_ms} player_ms={player_ms}",
+                profile.client_name,
+            );
             errors.push(format!("{}:{}", profile.client_name, status));
             continue;
         }
@@ -1136,8 +1229,14 @@ pub async fn resolve_audio_streams_with_source(
         let mut streams = if avoid_direct {
             Vec::new()
         } else {
-            match resolve_response_streams(&http, &response, &bootstrap).await {
+            let challenge_wait = (!deferred).then_some(CHALLENGE_WARMUP_WAIT);
+            match resolve_response_streams(&http, &response, &bootstrap, challenge_wait).await {
                 Ok(value) => value,
+                Err(error) if is_challenge_warming(&error) => {
+                    log::info!(target: "youtube-playback", "client={} deferred: challenge still solving", profile.client_name);
+                    queue.push((profile, true));
+                    continue;
+                }
                 Err(_) => {
                     errors.push(format!("{}:challenge_failed", profile.client_name));
                     Vec::new()
@@ -1196,6 +1295,15 @@ pub async fn resolve_audio_streams_with_source(
             }
             streams.retain(|stream| super::hls::has_manifest_token(&stream.url));
         }
+        log::info!(
+            target: "youtube-playback",
+            "client={} streams={} token_required={requires_token} token={} bootstrap_ms={bootstrap_ms} player_ms={player_ms} profile_ms={} total_ms={}",
+            profile.client_name,
+            streams.len(),
+            acquired_token.is_some(),
+            profile_started.elapsed().as_millis(),
+            resolve_started.elapsed().as_millis(),
+        );
         if !avoid_direct && !streams.is_empty() {
             if let Ok(mut cache) = AUDIO_STREAM_CACHE.lock() {
                 cache.put(cache_key, streams.clone(), now_ms());
@@ -1339,7 +1447,7 @@ mod tests {
             {"mimeType":"video/mp4", "signatureCipher":"url=https%3A%2F%2Frr.googlevideo.com%2Fvideo&s=irrelevant-video-challenge"},
             {"mimeType":"audio/mp4", "url":"https://rr.googlevideo.com/audio?c=VISIONOS", "bitrate":160000}
         ]}});
-        let streams = super::resolve_response_streams(&http, &response, &bootstrap)
+        let streams = super::resolve_response_streams(&http, &response, &bootstrap, None)
             .await
             .unwrap();
         assert_eq!(streams.len(), 1);
@@ -1364,7 +1472,7 @@ mod tests {
                 "adaptiveFormats":[audio],
                 "formats":[{"mimeType":"video/mp4", "url":"https://rr.googlevideo.com/progressive?c=VISIONOS", "bitrate":128000}]
             }});
-            let streams = super::resolve_response_streams(&http, &response, &bootstrap)
+            let streams = super::resolve_response_streams(&http, &response, &bootstrap, None)
                 .await
                 .unwrap();
             assert_eq!(streams.len(), 1);

@@ -21,6 +21,11 @@ mod web_po;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::RwLock;
+use std::time::Duration;
+
+/// 后台预热（首页配置刷新、player 解析、令牌铸造）推迟到起播之后再开始，
+/// 慢网络下它们和首段音频抢带宽会让当前这首起播更慢
+const BACKGROUND_WARMUP_DELAY: Duration = Duration::from_secs(8);
 
 /// YouTube 国际化模式：开启后强制用海外 locale 访问，关闭则跟随应用语言
 static INTERNATIONAL_MODE: AtomicBool = AtomicBool::new(false);

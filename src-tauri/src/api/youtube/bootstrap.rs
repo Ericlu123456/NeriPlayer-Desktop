@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
@@ -15,6 +15,7 @@ const SNAPSHOT_TTL_MS: u64 = 12 * 60 * 60 * 1000;
 const SNAPSHOT_VERSION: u32 = 1;
 const MAX_HTML_BYTES: usize = 8 * 1024 * 1024;
 static CACHE: LazyLock<Mutex<VecDeque<Cached>>> = LazyLock::new(|| Mutex::new(VecDeque::new()));
+static REFRESHING: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
 
 #[derive(Clone, Serialize, Deserialize)]
 pub(super) struct PlaybackBootstrap {
@@ -179,27 +180,77 @@ fn parse(html: &str) -> AppResult<PlaybackBootstrap> {
     })
 }
 
+fn cache_key(auth: Option<&YouTubeAuth>, music_context: bool) -> String {
+    let locale = super::innertube_locale();
+    format!(
+        "{}|{music_context}|{}|{}",
+        auth_fingerprint(auth),
+        locale.0,
+        locale.1
+    )
+}
+
+fn fresh_in_memory(key: &str) -> Option<PlaybackBootstrap> {
+    let cache = CACHE.lock().ok()?;
+    cache
+        .iter()
+        .find(|entry| entry.key == key && entry.fetched_at.elapsed() < TTL)
+        .map(|entry| entry.value.clone())
+}
+
+/// 不发请求，只取内存或磁盘快照。快照过了新鲜期但仍在保留期内时照样先拿来起播，
+/// 同时后台刷新——这与在线获取失败时回退到快照是同一个取舍
+pub(super) fn cached(
+    http: &FallbackHttp,
+    auth: Option<&YouTubeAuth>,
+    music_context: bool,
+) -> Option<PlaybackBootstrap> {
+    let key = cache_key(auth, music_context);
+    if let Some(value) = fresh_in_memory(&key) {
+        return Some(value);
+    }
+    let (value, age) =
+        snapshot_path(music_context).and_then(|path| load_snapshot(&path, &key, auth, now_ms()))?;
+    if age >= TTL.as_millis() as u64 {
+        refresh_in_background(http, auth, music_context);
+    }
+    Some(value)
+}
+
+pub(super) fn refresh_in_background(
+    http: &FallbackHttp,
+    auth: Option<&YouTubeAuth>,
+    music_context: bool,
+) {
+    let key = cache_key(auth, music_context);
+    if !REFRESHING
+        .lock()
+        .map(|mut keys| keys.insert(key.clone()))
+        .unwrap_or(false)
+    {
+        return;
+    }
+    let http = http.clone();
+    let auth = auth.cloned();
+    tokio::spawn(async move {
+        tokio::time::sleep(super::BACKGROUND_WARMUP_DELAY).await;
+        let _ = fetch(&http, auth.as_ref(), music_context, false).await;
+        if let Ok(mut keys) = REFRESHING.lock() {
+            keys.remove(&key);
+        }
+    });
+}
+
 pub(super) async fn fetch(
     http: &FallbackHttp,
     auth: Option<&YouTubeAuth>,
     music_context: bool,
     force_refresh: bool,
 ) -> AppResult<PlaybackBootstrap> {
-    let locale = super::innertube_locale();
-    let key = format!(
-        "{}|{music_context}|{}|{}",
-        auth_fingerprint(auth),
-        locale.0,
-        locale.1
-    );
+    let key = cache_key(auth, music_context);
     if !force_refresh {
-        if let Ok(cache) = CACHE.lock() {
-            if let Some(entry) = cache
-                .iter()
-                .find(|entry| entry.key == key && entry.fetched_at.elapsed() < TTL)
-            {
-                return Ok(entry.value.clone());
-            }
+        if let Some(value) = fresh_in_memory(&key) {
+            return Ok(value);
         }
     }
     let archived = if force_refresh {
@@ -212,7 +263,16 @@ pub(super) async fn fetch(
             return Ok(value.clone());
         }
     }
-    let bootstrap = match fetch_live(http, auth, music_context).await {
+    let started = Instant::now();
+    let fetched = fetch_live(http, auth, music_context).await;
+    log::info!(
+        target: "youtube-playback",
+        "bootstrap fetched music={music_context}, ok={}, archived={}, elapsed_ms={}",
+        fetched.is_ok(),
+        archived.is_some(),
+        started.elapsed().as_millis(),
+    );
+    let bootstrap = match fetched {
         Ok(value) => value,
         Err(error) => return archived.map(|(value, _)| value).ok_or(error),
     };

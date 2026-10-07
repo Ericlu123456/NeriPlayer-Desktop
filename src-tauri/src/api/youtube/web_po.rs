@@ -1,4 +1,5 @@
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
@@ -15,6 +16,10 @@ const TOKEN_TTL: Duration = Duration::from_secs(6 * 60 * 60);
 const BRIDGE_HOST: &str = "neriplayer-youtube-bridge.invalid";
 static ACCESS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 static TOKENS: LazyLock<Mutex<VecDeque<Token>>> = LazyLock::new(|| Mutex::new(VecDeque::new()));
+static LAST_MINT_VIDEO_BOUND: AtomicBool = AtomicBool::new(false);
+static WARMING: AtomicBool = AtomicBool::new(false);
+static WARM_BACKOFF_UNTIL: Mutex<Option<Instant>> = Mutex::new(None);
+const WARM_FAILURE_BACKOFF: Duration = Duration::from_secs(30 * 60);
 
 struct Token {
     fingerprint: String,
@@ -114,6 +119,63 @@ fn mint_script(video_id: &str, visitor_data: &str, authenticated: bool, nonce: &
     )
 }
 
+/// 不等待铸造，只查已缓存且仍可用于该视频的令牌
+pub(super) fn cached_token(fingerprint: &str, remote_host: &str, video_id: &str) -> Option<String> {
+    let fingerprint = format!("{remote_host}|{fingerprint}");
+    let tokens = TOKENS.lock().ok()?;
+    tokens
+        .iter()
+        .find(|token| {
+            token.minted_at.elapsed() < TOKEN_TTL
+                && token.fingerprint == fingerprint
+                && token.video_id.as_deref().is_none_or(|id| id == video_id)
+        })
+        .map(|token| token.value.clone())
+}
+
+/// 后台铸造令牌供后续播放直接使用。令牌按视频绑定时换一首就要重铸，
+/// 为每首歌都在后台打开一次 YouTube 页面不划算，只在会话级令牌时预热；
+/// 铸造失败后退避一段时间，避免隐藏页面反复加载拖慢播放
+pub(super) fn warm(
+    app: AppHandle,
+    auth: YouTubeAuth,
+    video_id: String,
+    visitor_data: String,
+    remote_host: String,
+) {
+    let backing_off = WARM_BACKOFF_UNTIL
+        .lock()
+        .ok()
+        .and_then(|until| *until)
+        .is_some_and(|until| Instant::now() < until);
+    if backing_off
+        || LAST_MINT_VIDEO_BOUND.load(Ordering::Acquire)
+        || WARMING.swap(true, Ordering::AcqRel)
+    {
+        return;
+    }
+    tokio::spawn(async move {
+        tokio::time::sleep(super::BACKGROUND_WARMUP_DELAY).await;
+        let fingerprint = super::bootstrap::auth_fingerprint(Some(&auth));
+        let minted = mint(
+            &app,
+            Some(&auth),
+            &fingerprint,
+            &video_id,
+            &visitor_data,
+            &remote_host,
+            false,
+        )
+        .await;
+        if minted.is_err() {
+            if let Ok(mut until) = WARM_BACKOFF_UNTIL.lock() {
+                *until = Some(Instant::now() + WARM_FAILURE_BACKOFF);
+            }
+        }
+        WARMING.store(false, Ordering::Release);
+    });
+}
+
 pub(super) async fn mint(
     app: &AppHandle,
     auth: Option<&YouTubeAuth>,
@@ -144,14 +206,29 @@ pub(super) async fn mint(
         }
     }
     let mut result = None;
+    let started = Instant::now();
     // 前台按 Android 顺序回退到 Music 首页，每次尝试均独立持有窗口 guard
     for page_url in [
         "https://www.youtube.com/?themeRefresh=1",
         "https://music.youtube.com/",
     ] {
-        if let Ok(value) = mint_on_page(app, auth, video_id, visitor_data, page_url).await {
-            result = Some(value);
-            break;
+        match mint_on_page(app, auth, video_id, visitor_data, page_url).await {
+            Ok(value) => {
+                log::info!(
+                    target: "youtube-po-token",
+                    "minted page={page_url}, video_bound={}, elapsed_ms={}",
+                    value.video_bound,
+                    started.elapsed().as_millis(),
+                );
+                LAST_MINT_VIDEO_BOUND.store(value.video_bound, Ordering::Release);
+                result = Some(value);
+                break;
+            }
+            Err(error) => log::warn!(
+                target: "youtube-po-token",
+                "mint failed page={page_url}, elapsed_ms={}: {error}",
+                started.elapsed().as_millis(),
+            ),
         }
     }
     let result =
