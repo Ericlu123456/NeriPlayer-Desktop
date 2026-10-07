@@ -667,7 +667,7 @@
     "q_very_high": "最高",
     "q_smooth": "流畅",
     "q_good": "高品质",
-    "q_dolby": "杜比全景声",
+    "q_dolby": "多声道（E-AC-3）",
     "storage": "存储 & 缓存",
     "nav_storage_desc": "管理下载和缓存",
     "cache_limit": "缓存大小上限",

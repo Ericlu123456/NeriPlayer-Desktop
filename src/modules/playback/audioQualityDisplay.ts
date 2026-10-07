@@ -92,7 +92,8 @@ function actualAudioFormatLabel(value?: string): string {
   const formats: Record<string, string> = {
     flac: 'FLAC', mp3: 'MP3', mpeg: 'MPEG', aac: 'AAC', mp4a: 'AAC',
     mp4: 'MP4', m4a: 'M4A', opus: 'Opus', ogg: 'OGG', vorbis: 'Vorbis',
-    wav: 'WAV', aiff: 'AIFF', 'ec-3': 'EC-3', ac3: 'AC-3',
+    wav: 'WAV', aiff: 'AIFF', 'ec-3': 'E-AC-3', eac3: 'E-AC-3', 'e-ac-3': 'E-AC-3',
+    ac3: 'AC-3', 'ac-3': 'AC-3', alac: 'ALAC',
   }
   return formats[lower] ?? formats[lower.split('.')[0]] ?? raw
 }

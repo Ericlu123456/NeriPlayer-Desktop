@@ -24,6 +24,7 @@ import {
   playbackUrlResolver,
   resolvePlaybackResult,
   isDirectStreamUrl,
+  setDecodableCodecs,
   type PlaybackAudioSource,
   type PlaybackCacheReadCandidate,
   type PlaybackSourceSettings,
@@ -226,7 +227,7 @@ const BILI_QUALITY_I18N: Record<string, string> = {
   high: '较好',
   lossless: '无损',
   hires: 'Hi-Res',
-  dolby: '杜比全景声',
+  dolby: '多声道（E-AC-3）',
 }
 
 // 取流失败按原因给出与 Android 一致的提示；其他错误（解码、设备）保留原始信息
@@ -2711,6 +2712,20 @@ export const usePlayerStore = defineStore('player', () => {
     }
   }
 
+  // 取流按后端实际能解的编码挑选；查询失败或 FFmpeg 没加载上时只认内置解码器，
+  // Opus、E-AC-3 这类流排到后面，选出来的流一定能播
+  async function loadDecoderCapabilities() {
+    try {
+      const capabilities = await invoke<{ codecs: string[]; ffmpegError?: string | null }>('get_decoder_capabilities')
+      setDecodableCodecs(capabilities.codecs)
+      if (capabilities.ffmpegError) {
+        log.warn('FFmpeg unavailable, streams that need it will be avoided:', capabilities.ffmpegError)
+      }
+    } catch (error) {
+      log.warn('decoder capabilities unavailable, using built-in decoders only:', error)
+    }
+  }
+
   async function applyPersistedSettings() {
     volume.value = Math.max(0, Math.min(1, settings.volume))
     playbackSpeed.value = Math.max(0.25, Math.min(3, settings.playbackSpeed))
@@ -3020,6 +3035,7 @@ export const usePlayerStore = defineStore('player', () => {
   // 初始化：恢复持久化状态
   loadPlayerState()
   void applyPersistedSettings()
+  void loadDecoderCapabilities()
 
   return {
     isPlaying, currentTrack, positionMs, durationMs, queue, queueIndex,

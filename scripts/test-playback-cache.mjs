@@ -289,6 +289,8 @@ try {
     assert.deepEqual(result.audioInfo.qualityOptions.map(option => option.key), ['high', 'medium'])
   })
   await run('Bilibili quality fallback displays and caches the candidate that actually played', async () => {
+    // FFmpeg 可用时首选杜比；它播放失败后回退到候选（FFmpeg 不可用时解析阶段就会换掉首选）
+    source.setDecodableCodecs(['e-ac-3'])
     globalThis.__cacheInvoke = async () => ({
       url: 'https://a.bilivideo.com/dolby', bandwidth: 256_000, codecs: 'ec-3', quality_key: 'dolby', mime_type: 'audio/mp4',
       candidates: [{ url: 'https://b.bilivideo.com/aac', bandwidth: 128_000, codecs: 'mp4a.40.2', quality_key: 'medium', mime_type: 'audio/mp4' }],
@@ -300,6 +302,7 @@ try {
     assert.equal(selected.audioInfo.codecLabel, 'AAC')
     assert.match(source.playbackCacheWriteOptions(resolved, 1).cacheKey, /-dolby$/)
     assert.equal(resolved.audioInfo.qualityKey, 'dolby')
+    source.setDecodableCodecs([])
   })
   await run('YouTube labels the stream by its actual bitrate but keys the cache by preference', async () => {
     globalThis.__cacheInvoke = async () => [{ url: 'https://rr.googlevideo.com/aac128', bitrate: 128_000, mime_type: 'audio/mp4' }]

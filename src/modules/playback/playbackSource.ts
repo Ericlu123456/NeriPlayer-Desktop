@@ -75,6 +75,8 @@ export interface PlaybackResolveOptions {
   qualityOverride?: string
   requestGeneration?: number
   allowFallback?: boolean
+  /** YouTube 优先 m4a 容器（对齐 Android 的下载取流：WebM 写不了标签） */
+  preferM4a?: boolean
 }
 
 export interface PlaybackCacheWriteOptions {
@@ -334,6 +336,7 @@ export class PlaybackUrlResolver {
     )
     const cacheKey = playbackPrefetchCacheId(track, resolvedSettings)
       + (options.avoidDirect ? '|hls' : '') + (options.allowFallback === false ? '|original' : '')
+      + (options.preferM4a ? '|m4a' : '')
     if (options.forceRefresh) this.cache.delete(cacheKey)
 
     if (!options.forceRefresh && !options.avoidDirect && isDirectStreamUrl(track.audioUrl)) {
@@ -458,14 +461,14 @@ export async function resolvePlaybackSource(
 }
 
 export async function resolveDownloadSource(track: TrackInfo, settings: PlaybackSourceSettings): Promise<ResolvedPlaybackSource> {
-  const result = await resolvePlaybackResult(track, settings, { forceRefresh: true, allowFallback: false })
+  const result = await resolvePlaybackResult(track, settings, { forceRefresh: true, allowFallback: false, preferM4a: true })
   if (result.type !== 'success') {
     throw new Error('message' in result ? result.message || 'No downloadable stream' : 'No downloadable stream')
   }
   if (result.isPreview) throw new Error('Preview audio cannot be saved as a full download')
   const candidates = uniqueUrls([result.url, ...result.candidateUrls])
     .map((_, index) => selectPlaybackCandidate(result, index))
-  const playable = candidates.find(candidate => !unsupportedDesktopCodec(candidate.codec ?? candidate.audioInfo?.codecLabel))
+  const playable = candidates.find(candidate => !undownloadableCodec(candidate.codec ?? candidate.audioInfo?.codecLabel))
   if (!playable) throw new Error('No downloadable stream has a supported audio codec')
   return playable
 }
@@ -891,6 +894,26 @@ interface BiliAudioCandidate {
   mime_type?: string
 }
 
+interface BiliAudioResult extends BiliAudioCandidate {
+  candidates?: BiliAudioCandidate[]
+}
+
+/** 首选流解不了（FFmpeg 没加载上时的杜比 E-AC-3）就换成第一条能解的候选，不必等播放失败再回退 */
+function preferDecodableBiliStream(result: BiliAudioResult): BiliAudioResult {
+  if (!undecodableCodec(result.codecs)) return result
+  const replacement = result.candidates
+    ?.find(candidate => isDirectStreamUrl(candidate.url) && !undecodableCodec(candidate.codecs))
+  if (!replacement) return result
+  return {
+    ...result,
+    url: replacement.url,
+    bandwidth: replacement.bandwidth,
+    codecs: replacement.codecs,
+    quality_key: replacement.quality_key,
+    mime_type: replacement.mime_type,
+  }
+}
+
 function resolveBilibili(
   track: TrackInfo,
   settings: PlaybackSourceSettings,
@@ -901,20 +924,13 @@ function resolveBilibili(
   const cid = bilibiliCid(track)
   const quality = settings.biliQuality
 
-  return invoke<{
-    url: string
-    bandwidth: number
-    codecs: string
-    quality_key?: string
-    mime_type?: string
-    candidates?: BiliAudioCandidate[]
-  }>('get_bili_audio_url', {
+  return invoke<BiliAudioResult>('get_bili_audio_url', {
     bvid: isAvid ? '' : biliId,
     avid: isAvid ? Number.parseInt(biliId, 10) : null,
     cid: cid ? Number.parseInt(cid, 10) : null,
     quality,
     requestGeneration: options.requestGeneration,
-  }).then(result => {
+  }).then(preferDecodableBiliStream).then(result => {
     if (!result.url) return null
     const candidates = (result.candidates ?? [])
       .filter(candidate => isDirectStreamUrl(candidate.url))
@@ -984,7 +1000,7 @@ function resolveYoutube(
     requestGeneration: options.requestGeneration,
   })
     .then(streams => {
-      const ordered = orderYoutubeStreams(streams ?? [], quality)
+      const ordered = orderYoutubeStreams(streams ?? [], quality, options.preferM4a ?? false)
       const primary = ordered[0]
       if (!primary?.url) return null
       const mimeType = normalizeMimeType(primary.mime_type)
@@ -1022,32 +1038,93 @@ function resolveYoutube(
     })
 }
 
+type YoutubeQualityTier = 'low' | 'medium' | 'high' | 'very_high'
+
+/** 与 Android YouTubeMusicPlaybackQuality.fromSetting 一致 */
+function youtubeQualityTier(quality: string): YoutubeQualityTier {
+  switch (quality.trim().toLowerCase()) {
+    case 'low':
+    case 'standard':
+      return 'low'
+    case 'medium':
+      return 'medium'
+    case 'high':
+    case 'higher':
+      return 'high'
+    default:
+      return 'very_high'
+  }
+}
+
+/** 各档的最低码率（Android MINIMUM_BITRATE_KBPS） */
+const YOUTUBE_MINIMUM_BITRATE: Record<YoutubeQualityTier, number> = {
+  low: 0,
+  medium: 96_000,
+  high: 128_000,
+  very_high: 160_000,
+}
+
+/**
+ * 候选流排序，对齐 Android 的 YouTube 取流：
+ * 解不了的编码（FFmpeg 没加载上时的 Opus 等）排最后；`preferM4a` 时 m4a 整组在前；
+ * 组内直连优先，只有 HLS 达到所选音质的最低码率而直连达不到时才让 HLS 在前；
+ * 每一类再按音质档挑：低档从最低码率起，中/高档从刚过 96k/128k 的那条起，极高档从最高起。
+ */
 function orderYoutubeStreams(
   streams: YoutubeAudioStream[],
   quality: string,
+  preferM4a: boolean,
 ): YoutubeAudioStream[] {
-  // 首选可解码容器，再按 Android 音质阈值和候选流类型选择
-  const minimumBitrate = ({ low: 0, standard: 0, medium: 96_000, high: 128_000, higher: 128_000 } as Record<string, number>)[quality] ?? 160_000
-  const sorted = streams
-    .filter(stream => isDirectStreamUrl(stream.url))
-    .sort((a, b) => {
-      const scoreDiff = youtubeMimeScore(b.mime_type) - youtubeMimeScore(a.mime_type)
-      if (scoreDiff !== 0) return scoreDiff
-      const qualityDiff = Number(b.bitrate >= minimumBitrate) - Number(a.bitrate >= minimumBitrate)
-      if (qualityDiff !== 0) return qualityDiff
-      const directDiff = Number((b.stream_type ?? 'direct') === 'direct') - Number((a.stream_type ?? 'direct') === 'direct')
-      if (directDiff !== 0) return directDiff
-      return b.bitrate - a.bitrate
-    })
-  return sorted
+  const tier = youtubeQualityTier(quality)
+  const usable = streams.filter(stream => isDirectStreamUrl(stream.url))
+  const decodable = usable.filter(stream => !undecodableCodec(deriveCodecLabel(stream.mime_type)))
+  const undecodable = usable.filter(stream => undecodableCodec(deriveCodecLabel(stream.mime_type)))
+  const groups = preferM4a
+    ? [decodable.filter(isM4aStream), decodable.filter(stream => !isM4aStream(stream)), undecodable]
+    : [decodable, undecodable]
+  return groups.flatMap(group => {
+    const direct = orderByYoutubeQualityTier(group.filter(isDirectDelivery), tier)
+    const hls = orderByYoutubeQualityTier(group.filter(stream => !isDirectDelivery(stream)), tier)
+    const minimum = YOUTUBE_MINIMUM_BITRATE[tier]
+    const hlsFirst = direct.length > 0 && hls.length > 0
+      && direct[0].bitrate < minimum && hls[0].bitrate >= minimum
+    return hlsFirst ? [...hls, ...direct] : [...direct, ...hls]
+  })
 }
 
-function youtubeMimeScore(mimeType?: string): number {
-  if (unsupportedDesktopCodec(deriveCodecLabel(mimeType))) return 0
-  const base = mimeType?.split(';', 1)[0]?.trim().toLowerCase() ?? ''
-  if (base.startsWith('audio/mp4') || base === 'audio/m4a' || base === 'audio/aac') return 3
-  if (base.startsWith('audio/')) return 2
-  if (base.startsWith('video/')) return 1
+/** Android YouTubePlayerResponseParsers.orderCandidatesByQualityTier */
+function orderByYoutubeQualityTier(streams: YoutubeAudioStream[], tier: YoutubeQualityTier): YoutubeAudioStream[] {
+  const tieBreak = (a: YoutubeAudioStream, b: YoutubeAudioStream) =>
+    youtubeMimePreference(b.mime_type) - youtubeMimePreference(a.mime_type)
+    || (b.content_length ?? 0) - (a.content_length ?? 0)
+  const descending = [...streams].sort((a, b) => b.bitrate - a.bitrate || tieBreak(a, b))
+  const ascending = [...streams].sort((a, b) => a.bitrate - b.bitrate || tieBreak(a, b))
+  if (tier === 'low') return ascending
+  if (tier === 'very_high') return descending
+  const threshold = YOUTUBE_MINIMUM_BITRATE[tier]
+  const index = ascending.findIndex(stream => stream.bitrate >= threshold)
+  if (index < 0) return descending
+  return [...ascending.slice(index), ...ascending.slice(0, index).reverse()]
+}
+
+function isDirectDelivery(stream: YoutubeAudioStream): boolean {
+  return (stream.stream_type ?? 'direct') === 'direct'
+}
+
+function youtubeMimeBase(mimeType?: string): string {
+  return mimeType?.split(';', 1)[0]?.trim().toLowerCase() ?? ''
+}
+
+function isM4aStream(stream: YoutubeAudioStream): boolean {
+  return ['audio/mp4', 'audio/m4a', 'audio/aac'].includes(youtubeMimeBase(stream.mime_type))
+}
+
+/** Android PLAYABLE_MIME_SCORES：HLS 播放列表 > m4a > webm */
+function youtubeMimePreference(mimeType?: string): number {
+  const base = youtubeMimeBase(mimeType)
+  if (base === 'application/x-mpegurl' || base === 'application/vnd.apple.mpegurl') return 3
+  if (['audio/mp4', 'audio/m4a', 'audio/aac'].includes(base)) return 2
+  if (base === 'audio/webm') return 1
   return 0
 }
 
@@ -1108,8 +1185,35 @@ function deriveCodecLabel(mimeType?: string): string | undefined {
   return codecByMime[normalized] ?? normalized.split('/').pop()?.toUpperCase()
 }
 
-function unsupportedDesktopCodec(codec?: string): boolean {
-  return /^(opus|e-?ac-?3|ec-3|ac-?3|alac|dts)$/i.test(codec?.trim() ?? '')
+// 后端能解码的编码，名称与 get_decoder_capabilities 一致（小写）。能力查询到达前、
+// 或 FFmpeg 没加载上时只有内置解码器可用
+const BUILT_IN_DECODABLE_CODECS = ['aac', 'mp3', 'flac', 'vorbis', 'pcm']
+/** 需要 FFmpeg 才能解码的编码；两张表里都没有的编码当作未知，不拦 */
+const FFMPEG_CODECS = ['opus', 'e-ac-3', 'ac-3', 'alac', 'ape', 'wavpack', 'dsd', 'dts']
+let decodableCodecs = new Set(BUILT_IN_DECODABLE_CODECS)
+
+/** 由播放器拿到后端的解码能力后调用 */
+export function setDecodableCodecs(codecs: readonly string[]): void {
+  decodableCodecs = new Set([
+    ...BUILT_IN_DECODABLE_CODECS,
+    ...codecs.map(codec => codec.trim().toLowerCase()),
+  ])
+}
+
+function ffmpegCodec(codec?: string): string | undefined {
+  const name = normalizeCodecName(codec)?.toLowerCase()
+  return name && FFMPEG_CODECS.includes(name) ? name : undefined
+}
+
+/** 需要 FFmpeg 而当前解不了的编码 */
+function undecodableCodec(codec?: string): boolean {
+  const name = ffmpegCodec(codec)
+  return !!name && !decodableCodecs.has(name)
+}
+
+/** 下载落盘后的校验与写标签只认内置解码器能解的格式，需要 FFmpeg 的编码不选 */
+function undownloadableCodec(codec?: string): boolean {
+  return !!ffmpegCodec(codec)
 }
 
 function normalizeCodecName(codec?: string): string | undefined {
@@ -1126,7 +1230,15 @@ function normalizeCodecName(codec?: string): string | undefined {
     opus: 'OPUS',
     vorbis: 'Vorbis',
     'ec-3': 'E-AC-3',
+    'e-ac-3': 'E-AC-3',
+    eac3: 'E-AC-3',
     ac3: 'AC-3',
+    'ac-3': 'AC-3',
+    alac: 'ALAC',
+    ape: 'APE',
+    wavpack: 'WavPack',
+    dsd: 'DSD',
+    dts: 'DTS',
   }
   return codecMap[lower] ?? codecMap[family] ?? raw
 }

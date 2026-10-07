@@ -51,6 +51,7 @@ const {
   resolvePlaybackSource,
   resolveDownloadSource,
   selectPlaybackCandidate,
+  setDecodableCodecs,
 } = await import(moduleUrl)
 
 const settings = {
@@ -302,8 +303,9 @@ await run('accepts Android YouTube channel aliases and media URI fallback', asyn
   assert.equal(canonicalizePlaybackTrack(mediaUriTrack).id, 'youtube:media-uri-video-id')
 })
 
-await run('prefers youtube m4a/aac over higher-bitrate webm/opus', async () => {
-  // 桌面 symphonia 未启 opus; 即使 opus 码率更高也必须优先 mp4/AAC
+await run('without FFmpeg a higher-bitrate webm/opus stream is ordered after m4a/aac', async () => {
+  // 解码能力未知（或 FFmpeg 没加载上）时只认内置解码器，极高档也不能选 Opus
+  setDecodableCodecs([])
   globalThis.__playbackInvoke = async (command) => {
     assert.equal(command, 'get_youtube_audio_url')
     return [
@@ -331,12 +333,115 @@ await run('prefers youtube m4a/aac over higher-bitrate webm/opus', async () => {
     coverUrl: '',
     source: 'youtube',
     syncPayload: { mediaUri: 'ytmusic://video/prefer-m4a' },
-  }, settings)
+  }, { ...settings, youtubeQuality: 'very_high' })
 
   assert.ok(resolved)
   assert.equal(resolved.url, 'https://audio.example/youtube-aac')
   assert.equal(resolved.candidateUrls?.[0], 'https://audio.example/youtube-opus')
 })
+
+// YouTube 常见的几条音频流：Opus 251/250/249 与 AAC 140/139
+const youtubeLadder = [
+  { url: 'https://audio.example/yt-139', bitrate: 48_000, mime_type: 'audio/mp4; codecs="mp4a.40.5"' },
+  { url: 'https://audio.example/yt-249', bitrate: 50_000, mime_type: 'audio/webm; codecs="opus"' },
+  { url: 'https://audio.example/yt-250', bitrate: 70_000, mime_type: 'audio/webm; codecs="opus"' },
+  { url: 'https://audio.example/yt-140', bitrate: 128_000, mime_type: 'audio/mp4; codecs="mp4a.40.2"' },
+  { url: 'https://audio.example/yt-251', bitrate: 160_000, mime_type: 'audio/webm; codecs="opus"' },
+]
+
+function youtubeTrack(id) {
+  return {
+    id: `youtube:${id}`, title: id, artist: 'tester', album: '', durationMs: 180_000, coverUrl: '',
+    source: 'youtube', syncPayload: { mediaUri: `ytmusic://video/${id}` },
+  }
+}
+
+await run('with FFmpeg YouTube quality tiers follow Android', async () => {
+  setDecodableCodecs(['opus', 'e-ac-3', 'ac-3', 'alac'])
+  globalThis.__playbackInvoke = async () => youtubeLadder
+  const pick = async (quality) =>
+    (await resolvePlaybackSource(youtubeTrack(`tier-${quality}`), { ...settings, youtubeQuality: quality })).url
+
+  // 极高档取最高码率（Opus 251），高档取刚过 128k 的那条，中档取刚过 96k 的那条，低档取最低
+  assert.equal(await pick('very_high'), 'https://audio.example/yt-251')
+  assert.equal(await pick('high'), 'https://audio.example/yt-140')
+  assert.equal(await pick('medium'), 'https://audio.example/yt-140')
+  assert.equal(await pick('low'), 'https://audio.example/yt-139')
+})
+
+await run('YouTube prefers direct streams unless only HLS meets the quality', async () => {
+  setDecodableCodecs(['opus'])
+  globalThis.__playbackInvoke = async () => [
+    { url: 'https://audio.example/hls-high.m3u8', bitrate: 160_000, mime_type: 'audio/mp4', stream_type: 'hls' },
+    { url: 'https://audio.example/direct-high', bitrate: 160_000, mime_type: 'audio/webm; codecs="opus"' },
+  ]
+  assert.equal((await resolvePlaybackSource(youtubeTrack('direct-first'), { ...settings, youtubeQuality: 'very_high' })).url,
+    'https://audio.example/direct-high')
+
+  globalThis.__playbackInvoke = async () => [
+    { url: 'https://audio.example/hls-high.m3u8', bitrate: 160_000, mime_type: 'audio/mp4', stream_type: 'hls' },
+    { url: 'https://audio.example/direct-low', bitrate: 48_000, mime_type: 'audio/mp4' },
+  ]
+  assert.equal((await resolvePlaybackSource(youtubeTrack('hls-meets'), { ...settings, youtubeQuality: 'very_high' })).url,
+    'https://audio.example/hls-high.m3u8')
+})
+
+await run('YouTube downloads prefer m4a even when Opus is decodable', async () => {
+  setDecodableCodecs(['opus'])
+  globalThis.__playbackInvoke = async () => youtubeLadder
+  const download = await resolveDownloadSource(youtubeTrack('download-m4a'), { ...settings, youtubeQuality: 'very_high' })
+  // 下载落盘要写标签、要用内置解码器校验，WebM/Opus 写不了标签（对齐 Android preferM4a）
+  assert.equal(download.url, 'https://audio.example/yt-140')
+})
+
+await run('downloads skip codecs that only FFmpeg can decode', async () => {
+  setDecodableCodecs(['opus', 'e-ac-3'])
+  globalThis.__playbackInvoke = async () => ({
+    url: 'https://audio.example/bili-dolby',
+    bandwidth: 448_000,
+    codecs: 'ec-3',
+    quality_key: 'dolby',
+    mime_type: 'audio/eac3',
+    candidates: [
+      { url: 'https://audio.example/bili-dolby', bandwidth: 448_000, codecs: 'ec-3', quality_key: 'dolby', mime_type: 'audio/eac3' },
+      { url: 'https://audio.example/bili-aac', bandwidth: 320_000, codecs: 'mp4a.40.2', quality_key: 'high', mime_type: 'audio/mp4' },
+    ],
+  })
+  const biliTrack = { ...track(906), id: 'bilibili:BV1download', source: 'bilibili', album: 'Bilibili|1' }
+  const download = await resolveDownloadSource(biliTrack, { ...settings, biliQuality: 'dolby' })
+  assert.equal(download.url, 'https://audio.example/bili-aac')
+})
+
+await run('Bilibili Dolby plays directly with FFmpeg and falls back up front without it', async () => {
+  const dolby = async () => ({
+    url: 'https://audio.example/bili-dolby',
+    bandwidth: 448_000,
+    codecs: 'ec-3',
+    quality_key: 'dolby',
+    mime_type: 'audio/eac3',
+    candidates: [
+      { url: 'https://audio.example/bili-dolby', bandwidth: 448_000, codecs: 'ec-3', quality_key: 'dolby', mime_type: 'audio/eac3' },
+      { url: 'https://audio.example/bili-flac', bandwidth: 1_411_000, codecs: 'fLaC', quality_key: 'hires', mime_type: 'audio/flac' },
+    ],
+  })
+  globalThis.__playbackInvoke = dolby
+  setDecodableCodecs(['opus', 'e-ac-3', 'ac-3'])
+  const withFfmpeg = await resolvePlaybackSource(
+    { ...track(907), id: 'bilibili:BV1dolby', source: 'bilibili', album: 'Bilibili|2' },
+    { ...settings, biliQuality: 'dolby' },
+  )
+  assert.equal(withFfmpeg.url, 'https://audio.example/bili-dolby')
+  assert.equal(withFfmpeg.codec, 'E-AC-3')
+
+  setDecodableCodecs([])
+  const withoutFfmpeg = await resolvePlaybackSource(
+    { ...track(908), id: 'bilibili:BV1dolby2', source: 'bilibili', album: 'Bilibili|3' },
+    { ...settings, biliQuality: 'dolby' },
+  )
+  assert.equal(withoutFfmpeg.url, 'https://audio.example/bili-flac')
+  assert.equal(withoutFfmpeg.qualityKey, 'hires')
+})
+setDecodableCodecs([])
 
 await run('surfaces the Android-aligned login requirement', async () => {
   globalThis.__playbackInvoke = async () => ({

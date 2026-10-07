@@ -667,7 +667,7 @@
     "q_very_high": "Best",
     "q_smooth": "Fluent",
     "q_good": "High Quality",
-    "q_dolby": "Dolby Atmos",
+    "q_dolby": "Multichannel (E-AC-3)",
     "storage": "Storage & Cache",
     "nav_storage_desc": "Manage downloads and cache",
     "cache_limit": "Cache Size Limit",
