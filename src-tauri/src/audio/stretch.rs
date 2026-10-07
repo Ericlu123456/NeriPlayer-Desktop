@@ -40,6 +40,9 @@ pub struct Stretcher {
     previous: usize,
     /// 下一段分析窗的名义起点，每跳前进 hop × 倍速
     nominal: f64,
+    /// 上一跳实际选中的窗口起点减去它的名义起点（±search）。变速期间按名义位置报媒体
+    /// 时间，回到直通时实际位置差着这么多，要补进媒体时间，否则每段变速都留下一个误差
+    drift: f64,
     overlap: Vec<f32>,
     pending: Vec<f32>,
     pending_frames: usize,
@@ -77,6 +80,7 @@ impl Stretcher {
             active: false,
             previous: 0,
             nominal: 0.0,
+            drift: 0.0,
             overlap: vec![0.0; hop * channels],
             pending: vec![0.0; hop * channels],
             pending_frames: 0,
@@ -88,15 +92,6 @@ impl Stretcher {
 
     pub fn stalls(&self) -> u64 {
         self.stalls
-    }
-
-    /// 输入断流后清空状态：新数据和旧数据不连续，不能拿旧历史去拼接
-    pub fn reset(&mut self) {
-        self.filled = 0;
-        self.read = 0;
-        self.active = false;
-        self.pending_frames = 0;
-        self.pending_read = 0;
     }
 
     /// 已经从上游取出、还没交给输出的帧数（变速时含前瞻）
@@ -157,6 +152,7 @@ impl Stretcher {
                 // 上游已经结束、凑不齐一跳：从自然延续处直通剩下的输入
                 self.active = false;
                 self.read = (self.previous + self.hop).min(self.filled);
+                rendered.media_frames += std::mem::take(&mut self.drift);
                 continue;
             }
             // 激活前就要备齐第一跳的前瞻：只够半窗时激活会立刻凑不齐一跳，
@@ -208,6 +204,7 @@ impl Stretcher {
             }
         }
         self.nominal = self.previous as f64 + self.hop as f64 * f64::from(speed);
+        self.drift = 0.0;
         self.active = true;
     }
 
@@ -248,11 +245,14 @@ impl Stretcher {
         self.pending_read = 0;
         self.previous = start;
         if unity {
-            // 这一跳已经接回原始信号的自然延续，此后从 start + hop 起原样直通
-            self.pending_speed = 1.0;
+            // 这一跳已经接回原始信号的自然延续，此后从 start + hop 起原样直通；
+            // 补上最后一个变速窗与名义位置的差，直通后的媒体时间与实际读到的位置一致
+            let hop = self.hop as f64;
+            self.pending_speed = (hop + std::mem::take(&mut self.drift)) / hop;
             self.active = false;
             self.read = start + self.hop;
         } else {
+            self.drift = start as f64 - self.nominal;
             self.pending_speed = f64::from(speed);
             self.nominal += self.hop as f64 * f64::from(speed);
         }
@@ -449,6 +449,53 @@ mod tests {
         let tail = &output[output.len() - 12_000..];
         let found = source.samples.windows(tail.len()).any(|window| window == tail);
         assert!(found, "回到 1 倍速后应恢复逐样本直通");
+    }
+
+    /// 一起听的软同步会反复进出变速：每段变速选中的窗口与名义位置差着 ±search，
+    /// 回到直通时要补回来，否则媒体时间和实际读到的位置每段都多差一点
+    #[test]
+    fn media_time_matches_the_input_position_after_many_speed_episodes() {
+        let mut source = Source {
+            samples: (0..400_000).map(|index| index as f32).collect(),
+            cursor: 0,
+            channels: 1,
+        };
+        let mut stretcher = Stretcher::new(1, RATE);
+        let mut media = 0.0;
+        let mut last = 0.0f32;
+        for _ in 0..20 {
+            for (frames, speed) in [(4_800usize, 1.05f32), (9_600, 1.0)] {
+                let (output, advanced) = render(&mut stretcher, &mut source, frames, speed, 480);
+                assert_eq!(output.len(), frames);
+                media += advanced;
+                last = *output.last().unwrap();
+            }
+        }
+        // 直通时输出就是输入，斜坡信号最后一个样本的值就是它在输入里的下标
+        let position = f64::from(last) + 1.0;
+        assert!((media - position).abs() < 2.0, "媒体时间 {media} 应等于实际读到的位置 {position}");
+    }
+
+    /// 上游结束时从变速直接退出到直通：同样要把窗口偏差补进媒体时间
+    #[test]
+    fn draining_out_of_a_stretch_reports_the_exact_input_length() {
+        let mut source = Source {
+            samples: (0..48_000).map(|index| index as f32).collect(),
+            cursor: 0,
+            channels: 1,
+        };
+        let mut stretcher = Stretcher::new(1, RATE);
+        let mut block = vec![0.0f32; 480];
+        let mut media = 0.0;
+        for _ in 0..400 {
+            let rendered = stretcher.render(&mut block, 1.05, true, &mut |out| source.pull(out));
+            media += rendered.media_frames;
+            if rendered.frames < block.len() {
+                break;
+            }
+        }
+        assert_eq!(stretcher.buffered_frames(), 0);
+        assert!((media - 48_000.0).abs() < 2.0, "整段媒体时间应等于输入长度: {media}");
     }
 
     #[test]

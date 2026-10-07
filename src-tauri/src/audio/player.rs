@@ -3283,6 +3283,8 @@ struct OutputChain {
     stretcher: Stretcher,
     effects: EffectsProcessor,
     scratch: Vec<f32>,
+    /// 时钟按整微秒推进，余下的零头留到下一次回调，长时间播放不累积偏差
+    clock_remainder_us: f64,
 }
 
 impl OutputChain {
@@ -3298,6 +3300,7 @@ impl OutputChain {
                 RENDER_CHUNK_FRAMES,
             ),
             scratch: vec![0.0; RENDER_CHUNK_FRAMES * channels],
+            clock_remainder_us: 0.0,
         }
     }
 }
@@ -3315,7 +3318,7 @@ fn render_output<T>(
 ) where
     T: SizedSample + FromSample<f32>,
 {
-    let OutputChain { stretcher, effects, scratch } = chain;
+    let OutputChain { stretcher, effects, scratch, clock_remainder_us } = chain;
     let started_ns = metrics::monotonic_ns();
     let silence = T::from_sample(0.0);
     if shared.paused.load(Ordering::Acquire) || shared.buffering.load(Ordering::Acquire) {
@@ -3344,16 +3347,18 @@ fn render_output<T>(
         let filled = rendered.frames * channels;
         effects.process(&mut scratch[..filled]);
         for (target, sample) in chunk[..filled].iter_mut().zip(scratch[..filled].iter().copied()) {
-            *target = T::from_sample((sample * gain).clamp(-1.0, 1.0));
+            // 音效全关时样本原样直通；NaN 的 clamp 还是 NaN，不能交给设备
+            let value = sample * gain;
+            *target = T::from_sample(if value.is_finite() { value.clamp(-1.0, 1.0) } else { 0.0 });
         }
         chunk[filled..].fill(silence);
         rendered_frames += rendered.frames;
         media_frames += rendered.media_frames;
         if rendered.frames < frames {
+            // 欠载只是数据晚到，同一条流里 ring 的数据始终连续（seek、换歌都会重建流）：
+            // 变速器里已经取出的帧和叠加状态照常保留，恢复后接着放
             silent_frames = frames - rendered.frames;
             shared.begin_rebuffering();
-            // 断流后的新数据和断点前不连续，变速器不能拿旧历史去拼接
-            stretcher.reset();
         }
     }
     shared
@@ -3366,8 +3371,13 @@ fn render_output<T>(
             Ordering::AcqRel,
             Ordering::Acquire,
         );
-        let elapsed_us = (media_frames * 1_000_000.0 / f64::from(shared.sample_rate)) as u64;
-        shared.clock.position_us.fetch_add(elapsed_us, Ordering::AcqRel);
+    }
+    // 变速退出时的位置校正可能是负的，先并进零头，攒够正的整微秒再推进时钟
+    let elapsed_us = media_frames * 1_000_000.0 / f64::from(shared.sample_rate) + *clock_remainder_us;
+    let whole_us = elapsed_us.floor().max(0.0);
+    *clock_remainder_us = elapsed_us - whole_us;
+    if whole_us > 0.0 {
+        shared.clock.position_us.fetch_add(whole_us as u64, Ordering::AcqRel);
     }
     // 交叉淡化时两个会话都在出声，增益读数只取声音占主导的那个
     let dominant = shared.fade_gain.load() >= 0.5;
@@ -4402,6 +4412,60 @@ mod tests {
         assert!(consumed > 48_000, "倍速后每秒应消费多于 48 000 帧: {consumed}");
         assert_eq!(counters.snapshot().underruns, 0, "变速不能造成断音");
         assert!(output.iter().any(|sample| sample.abs() > 0.1), "变速后仍在出声");
+    }
+
+    /// 变速中欠载：变速器里已取出的前瞻要保留，恢复后接着放；播完时时钟与输入时长一致
+    #[test]
+    fn an_underrun_while_stretching_keeps_the_buffered_audio() {
+        let total = 48_000usize;
+        let shared = render_test_shared(1, total);
+        let sample = |index: usize| (0.5 * (std::f64::consts::TAU * 440.0 * index as f64 / 48_000.0).sin()) as f32;
+        for index in 0..9_600 {
+            assert!(shared.ring.try_push_frame(&[sample(index)]));
+        }
+        shared.speed.store(1.25);
+        let counters = crate::audio::metrics::OutputMetrics::new();
+        let mut callback = CallbackState::new(&shared);
+        let mut output = [0.0f32; 480];
+        for _ in 0..100 {
+            if shared.buffering.load(Ordering::Acquire) {
+                break;
+            }
+            callback.render(&shared, &mut output, &counters);
+        }
+        assert!(shared.buffering.load(Ordering::Acquire), "ring 取空后应进入重缓冲");
+        assert!(shared.stretch_buffered.load(Ordering::Acquire) > 0, "欠载时变速器里还留着前瞻");
+
+        for index in 9_600..total {
+            assert!(shared.ring.try_push_frame(&[sample(index)]));
+        }
+        shared.buffering.store(false, Ordering::Release);
+        shared.finished.store(true, Ordering::Release);
+        for _ in 0..200 {
+            callback.render(&shared, &mut output, &counters);
+            if shared.ring.readable_samples() == 0 && shared.stretch_buffered.load(Ordering::Acquire) == 0 {
+                break;
+            }
+        }
+        assert_eq!(shared.stretch_buffered.load(Ordering::Acquire), 0, "播完时变速器里不能有残留");
+        let position_us = shared.clock.position_us.load(Ordering::Acquire) as f64;
+        assert!((position_us - 1_000_000.0).abs() < 1_000.0, "1 秒输入播完，时钟应走到 1 秒: {position_us}");
+    }
+
+    /// 每次回调的媒体时长不是整微秒（441 帧 = 9 187.5 µs）：零头要留到下次，不能逐次截掉
+    #[test]
+    fn the_clock_keeps_sub_microsecond_remainders_across_callbacks() {
+        let shared = render_test_shared(1, 441 * 100);
+        for _ in 0..441 * 100 {
+            assert!(shared.ring.try_push_frame(&[0.25]));
+        }
+        let counters = crate::audio::metrics::OutputMetrics::new();
+        let mut callback = CallbackState::new(&shared);
+        let mut output = [0.0f32; 441];
+        for _ in 0..100 {
+            callback.render(&shared, &mut output, &counters);
+        }
+        assert_eq!(shared.clock.position_us.load(Ordering::Acquire), 918_750);
     }
 
     /// 播放中打开音量均衡：回调下一块就开始过渡，会话不重建、时钟连续、不断音
