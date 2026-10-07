@@ -82,3 +82,10 @@ opt-level = 2
 
 [profile.dev.package.symphonia-format-ogg]
 opt-level = 2
+
+# YouTube 签名求解在 QuickJS 里解析整份 player，未优化的解释器要慢一个数量级
+[profile.dev.package.rquickjs-sys]
+opt-level = 3
+
+[profile.dev.package.rquickjs-core]
+opt-level = 2
