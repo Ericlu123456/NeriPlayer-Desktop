@@ -3266,60 +3266,6 @@ useEscapeClose(
   &.selected { border-color: rgba(255,255,255,0.8); }
 }
 
-/* M3 Switch：严格对齐 M3 规范 */
-.m3-switch {
-  position: relative;
-  flex-shrink: 0;
-  cursor: pointer;
-
-  input { display: none; }
-
-  .track {
-    display: flex;
-    align-items: center;
-    width: 52px;
-    height: 32px;
-    border-radius: 16px;
-    background: var(--md-surface-container-highest);
-    border: 2px solid var(--md-outline);
-    position: relative;
-    transition: background var(--duration-medium) var(--ease-standard),
-                border-color var(--duration-medium) var(--ease-standard);
-  }
-
-  .thumb {
-    position: absolute;
-    width: 16px;
-    height: 16px;
-    border-radius: 50%;
-    background: var(--md-outline);
-    top: 50%;
-    left: 6px;
-    transform: translateY(-50%);
-    transition: left var(--duration-medium) var(--ease-standard),
-                width var(--duration-medium) var(--ease-standard),
-                height var(--duration-medium) var(--ease-standard),
-                background var(--duration-medium) var(--ease-standard);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    color: var(--md-on-primary);
-    font-size: 0;
-  }
-
-  input:checked + .track {
-    background: var(--md-primary);
-    border-color: var(--md-primary);
-
-    .thumb {
-      left: 22px;
-      width: 24px;
-      height: 24px;
-      background: var(--md-on-primary);
-      font-size: 14px;
-    }
-  }
-}
 /* 折叠区段箭头 */
 .section-label.clickable {
   cursor: pointer;
