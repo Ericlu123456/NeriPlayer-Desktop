@@ -35,7 +35,7 @@ import {
 } from './protocol'
 import { trackInfoToLtTrack, ltTrackToTrackInfo, toShareableQueueSnapshot, trustedInboundStreamUrls } from './mapper'
 import { queueReferences, applyListenTogetherQueueMutation, buildListenTogetherQueueMutationPlan, getLtQueueReference, setLtQueueReference } from './queue'
-import { acceptRoomState, resolveExpectedPosition, resolvePositionSync, resolveSoftSyncRecheckAction, SOFT_SYNC_RECHECK_INTERVAL_MS } from './playbackSync'
+import { acceptRoomState, resolveExpectedPosition, resolvePositionSync, resolveSoftSyncRecheckAction, SOFT_SYNC_RECHECK_INTERVAL_MS, updateServerClockOffset } from './playbackSync'
 import { isTerminalReconnectError, MAX_RECONNECT_ATTEMPTS, reconnectDelayMs } from './reconnect'
 import { createLogger } from '@/utils/logger'
 
@@ -157,9 +157,26 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
   // 服务器时钟偏移估计（对齐 Android estimatedServerClockOffsetMs）：
   // 期望播放位置须用服务器时钟推算，直接用本机 Date.now() 会因两端时钟差恒定偏移
   let _serverClockOffsetMs = 0
+  // np_ping 的发送时间 -> 发送时的单调时钟，用来算往返时间
+  const _pingSentElapsed = new Map<number, number>()
   let _lastRequestedLinkStableKey: string | null = null
   let _lastRequestedLinkAt = 0
   let _joinSecret: string | null = null
+  // 通过别的服务器的邀请加入时只在本次会话使用那台服务器，不改写用户自己的服务器设置
+  let _sessionBaseUrl: string | null = null
+  const activeBaseUrl = () => _sessionBaseUrl ?? baseUrl.value
+
+  /** 时钟偏移按 Android 平滑：单向样本含网络延迟，往返样本取中点，往返超过 30s 的丢弃 */
+  function sampleServerClock(serverNowMs: number | null | undefined, sentAtWallMs?: number, sentAtElapsedMs?: number) {
+    _serverClockOffsetMs = updateServerClockOffset({
+      previousOffsetMs: _serverClockOffsetMs,
+      serverNowMs,
+      sentAtWallMs,
+      sentAtElapsedMs,
+      nowWallMs: Date.now(),
+      nowElapsedMs: performance.now(),
+    })
+  }
 
   // 计算属性
   const isConnected = computed(() => connectionState.value === 'connected')
@@ -173,6 +190,7 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
     const toast = useToastStore()
     const t = (i18n.global as any).t
     const generation = _sessionGeneration
+    _sessionBaseUrl = null
 
     try {
       sessionError.value = null
@@ -250,11 +268,12 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
   }
 
   /** 加入房间 */
-  async function joinRoom(targetRoomId: string, joinSecret?: string) {
+  async function joinRoom(targetRoomId: string, joinSecret?: string, baseUrlOverride?: string) {
     const player = usePlayerStore()
     const toast = useToastStore()
     const t = (i18n.global as any).t
     const generation = _sessionGeneration
+    _sessionBaseUrl = baseUrlOverride?.trim() || null
 
     try {
       sessionError.value = null
@@ -269,7 +288,7 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
       connectionState.value = 'connecting'
 
       const resp = await invoke<ListenTogetherRoomResponse>('lt_join_room', {
-        baseUrl: baseUrl.value,
+        baseUrl: activeBaseUrl(),
         roomId: normalizedRoomId,
         userUuid: userUuid.value,
         nickname: nickname.value,
@@ -392,6 +411,8 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
     _handledForwardedEventIds.clear()
     _lastForwardedSequence.clear()
     _serverClockOffsetMs = 0
+    _pingSentElapsed.clear()
+    _sessionBaseUrl = null
     _lastRequestedLinkStableKey = null
     _lastRequestedLinkAt = 0
   }
@@ -484,13 +505,8 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
   // 消息处理
   function handleSocketMessage(envelope: ListenTogetherSocketEnvelope) {
     if (envelope.state && envelope.state.roomId !== roomId.value) return
-    // 用服务端时间戳更新时钟偏移（每条带 nowMs/t 的消息都更新，对齐 Android）
-    if (envelope.type !== 'np_pong') {
-      const serverNow = envelope.nowMs
-      if (typeof serverNow === 'number' && Number.isFinite(serverNow) && serverNow > 0) {
-        _serverClockOffsetMs = serverNow - Date.now()
-      }
-    }
+    // 用服务端时间戳更新时钟偏移（每条带 nowMs 的消息都更新并平滑，对齐 Android SocketHealthOwner）
+    if (envelope.type !== 'np_pong') sampleServerClock(envelope.nowMs)
     switch (envelope.type) {
       case 'welcome':
         handleWelcome(envelope)
@@ -525,14 +541,9 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
         // np_ping 的 t 是客户端发送时间，使用往返中点估算服务器时钟，
         // 避免把网络延迟误判成固定进度漂移
         const sentAt = envelope.t
-        const serverNow = envelope.nowMs
-        if (typeof sentAt === 'number' && typeof serverNow === 'number' && Number.isFinite(serverNow)) {
-          const receivedAt = Date.now()
-          const rtt = receivedAt - sentAt
-          if (serverNow > 0 && rtt >= 0 && rtt <= 30_000) {
-            _serverClockOffsetMs = serverNow - (sentAt + rtt / 2)
-          }
-        }
+        const sentAtElapsed = typeof sentAt === 'number' ? _pingSentElapsed.get(sentAt) : undefined
+        if (typeof sentAt === 'number') _pingSentElapsed.delete(sentAt)
+        sampleServerClock(envelope.nowMs, sentAt, sentAtElapsed)
         break
       }
       // 服务端控制应答：Android 用 control_result / ack，event_applied 仅作旧命名兼容
@@ -900,26 +911,26 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
     }
   }
 
+  /** 房主暂时离线：只记下房间状态，不动播放器；听众看到一条普通提示，房主自己不需要（对齐 Android） */
   function handleRoomSuspended(envelope: ListenTogetherSocketEnvelope) {
-    const toast = useToastStore()
-    const t = (i18n.global as any).t
     markSync('ROOM_SUSPENDED')
-    if (envelope.state) commitRoomState(envelope.state, 'ROOM_SUSPENDED', envelope.expectedPositionMs)
-    else void usePlayerStore().pause('remote_sync')
+    if (envelope.state) commitRoomState(envelope.state, 'ROOM_SUSPENDED', envelope.expectedPositionMs, false)
     setSyncRate(null)
-    toast.error(t('listen_together.controller_offline'))
+    if (!isController.value) useToastStore().show((i18n.global as any).t('listen_together.controller_offline'))
   }
 
+  /** 房主回来了：听众按恢复后的房态对齐；房主的播放器本来就是房态的来源 */
   function handleRoomResumed(envelope: ListenTogetherSocketEnvelope) {
     markSync('ROOM_RESUMED')
-    if (envelope.state) commitRoomState(envelope.state, 'ROOM_RESUMED', envelope.expectedPositionMs)
+    if (envelope.state) {
+      commitRoomState(envelope.state, 'ROOM_RESUMED', envelope.expectedPositionMs, !isController.value)
+    }
   }
 
-  function handleRoomClosed(_envelope: ListenTogetherSocketEnvelope) {
-    const toast = useToastStore()
-    const t = (i18n.global as any).t
-    toast.error(t('listen_together.room_closed'))
-    leaveRoom()
+  /** 房间已经关闭：按关闭时的状态停下再在本地收尾，不再向已关闭的房间发 /leave（对齐 Android） */
+  function handleRoomClosed(envelope: ListenTogetherSocketEnvelope) {
+    if (envelope.state?.playback?.state === 'paused') void usePlayerStore().pause('remote_sync')
+    void closeRoomLocally(envelope.state?.closedReason || envelope.message || 'room_closed')
   }
 
   function releasePlayerWatch(delay: number) {
@@ -1340,7 +1351,7 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
     if (shouldSkipControlEvent('PLAY')) return
     sendEvent({
       type: 'PLAY',
-      ...buildControlSnapshotFields(),
+      ...controlBindingFields(),
       positionMs: player.positionMs,
       state: 'playing',
     })
@@ -1351,7 +1362,7 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
     if (shouldSkipControlEvent('PAUSE')) return
     sendEvent({
       type: 'PAUSE',
-      ...buildControlSnapshotFields(),
+      ...controlBindingFields(),
       positionMs: player.positionMs,
       state: 'paused',
     })
@@ -1361,7 +1372,7 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
     if (shouldSkipSeekEvent(positionMs)) return
     sendEvent({
       type: 'SEEK',
-      ...buildControlSnapshotFields(),
+      ...controlBindingFields(),
       positionMs,
     })
   }
@@ -1448,6 +1459,17 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
       track,
       requestTrackStableKey: track?.stableKey,
     }
+  }
+
+  /**
+   * PLAY/PAUSE/SEEK 与成员请求只需要绑定当前曲目：schema 2 起服务端不看这些事件里的队列，
+   * 每次都带上整份队列（可能上千首，还含直链）只是浪费（对齐 Android EventFactory）
+   */
+  function controlBindingFields() {
+    const snap = buildControlSnapshotFields()
+    if ((roomState.value?.schemaVersion ?? 0) < 2 || !snap.track) return snap
+    const { streamUrl: _url, streamUrls: _urls, ...track } = snap.track
+    return { queue: undefined, currentIndex: snap.currentIndex, track, requestTrackStableKey: snap.requestTrackStableKey }
   }
 
   function reportSetTrackEvent(_track: any, _currentIndex: number) {
@@ -1636,7 +1658,8 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
   /// 否则桌面对 Android 房主的控制会被静默丢弃（用户实测"点了没反应"根因）。
   function sendRequestEvent(type: string, extra: Partial<ListenTogetherEvent> = {}) {
     const player = usePlayerStore()
-    const snap = buildControlSnapshotFields()
+    // REQUEST_SET_TRACK 需要的完整队列由调用方经 extra 传入
+    const snap = controlBindingFields()
     if (!snap.track) {
       log.debug('skip control event without a shareable current track:', type)
       return
@@ -1708,7 +1731,10 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
     stopListenerPing()
     _listenerPingTimer = setInterval(() => {
       if (connectionState.value !== 'connected') return
-      void invoke('lt_send_ping', { t: Date.now(), legacy: _legacyPing }).catch(() => {})
+      const sentAt = Date.now()
+      _pingSentElapsed.set(sentAt, performance.now())
+      while (_pingSentElapsed.size > 8) _pingSentElapsed.delete(_pingSentElapsed.keys().next().value!)
+      void invoke('lt_send_ping', { t: sentAt, legacy: _legacyPing }).catch(() => {})
     }, LISTENER_PING_INTERVAL_MS)
   }
 
@@ -1741,7 +1767,7 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
         // 听众每次重连前都重新入房：凭据过期或被移出成员时才能拿到新的连接地址（对齐 Android）
         if (!isController.value) {
           const resp = await invoke<ListenTogetherRoomResponse>('lt_join_room', {
-            baseUrl: baseUrl.value,
+            baseUrl: activeBaseUrl(),
             roomId: targetRoomId,
             userUuid: userUuid.value,
             nickname: nickname.value,
@@ -1756,15 +1782,13 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
         if (generation !== _sessionGeneration) return
         // 重连后拉取最新 state
         const stateResp = await invoke<ListenTogetherStateResponse>('lt_get_room_state', {
-          baseUrl: baseUrl.value,
+          baseUrl: activeBaseUrl(),
           roomId: targetRoomId,
         })
         if (generation !== _sessionGeneration) return
         if (stateResp.ok === false) throw new Error(stateResp.error || 'room closed')
         if (stateResp.ok && stateResp.state) {
-          if (stateResp.serverNowMs && Number.isFinite(stateResp.serverNowMs)) {
-            _serverClockOffsetMs = stateResp.serverNowMs - Date.now()
-          }
+          sampleServerClock(stateResp.serverNowMs)
           commitRoomState(stateResp.state, 'reconnect', stateResp.expectedPositionMs,
             !(isController.value && _hostControlledOffline))
         }
@@ -1823,7 +1847,7 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
     const params = new URLSearchParams({ roomId: roomId.value || '' })
     const inviter = nickname.value.trim()
     if (isValidLtNickname(inviter)) params.set('inviter', inviter)
-    const normalizedBaseUrl = normalizeLtHttpBaseUrl(baseUrl.value)
+    const normalizedBaseUrl = normalizeLtHttpBaseUrl(activeBaseUrl())
     if (normalizedBaseUrl && normalizedBaseUrl !== DEFAULT_BASE_URL) {
       params.set('baseUrl', normalizedBaseUrl)
     }
@@ -1884,7 +1908,7 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
     if (wsUrl && !isInternalRoomWsUrl(wsUrl)) return wsUrl
     const token = response.token?.trim()
     if (!token) throw new Error('Listen Together response did not include a WebSocket token')
-    return buildWsUrl(baseUrl.value, fallbackRoomId, token)
+    return buildWsUrl(activeBaseUrl(), fallbackRoomId, token)
   }
 
   function isInternalRoomWsUrl(value: string): boolean {

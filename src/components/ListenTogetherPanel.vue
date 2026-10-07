@@ -22,7 +22,7 @@ function handleKeydown(event: KeyboardEvent) {
 }
 
 const joinRoomId = ref('')
-const pendingInvite = ref<{ roomId: string; joinSecret?: string } | null>(null)
+const pendingInvite = ref<{ roomId: string; joinSecret?: string; baseUrl?: string } | null>(null)
 const nowTick = ref(Date.now())
 let nowTimer: ReturnType<typeof setInterval> | null = null
 const CONTROLLER_GRACE_PERIOD_MS = 10 * 60 * 1000
@@ -124,10 +124,9 @@ function handleCreate() {
 function handleJoin() {
   if (!joinRoomId.value.trim()) return
   const normalizedRoomId = joinRoomId.value.trim().toUpperCase()
-  const joinSecret = pendingInvite.value?.roomId === normalizedRoomId
-    ? pendingInvite.value.joinSecret
-    : undefined
-  lt.joinRoom(joinRoomId.value.trim(), joinSecret)
+  const invite = pendingInvite.value?.roomId === normalizedRoomId ? pendingInvite.value : null
+  // 邀请里的服务器只用于这次加入，不改写设置里的服务器地址
+  lt.joinRoom(joinRoomId.value.trim(), invite?.joinSecret, invite?.baseUrl)
 }
 
 function handleLeave() {
@@ -138,12 +137,7 @@ function handleLeave() {
 async function checkClipboard() {
   const invite = await lt.checkClipboardInvite()
   pendingInvite.value = invite
-  if (invite) {
-    joinRoomId.value = invite.roomId
-    if (invite.baseUrl) {
-      lt.baseUrl = invite.baseUrl
-    }
-  }
+  if (invite) joinRoomId.value = invite.roomId
 }
 
 function formatRelativeTime(timestamp?: number | null) {

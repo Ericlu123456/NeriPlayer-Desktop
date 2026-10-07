@@ -152,6 +152,7 @@ async function harness(options = {}) {
   const commands = []
   const playback = []
   const toasts = []
+  const notices = []
   const logs = []
   const playGates = []
   const pauseGates = []
@@ -241,7 +242,7 @@ async function harness(options = {}) {
     '@tauri-apps/plugin-clipboard-manager': { readText: async () => '', writeText: async () => {} },
     '@/stores/player': { usePlayerStore: () => player },
     '@/stores/settings': { useSettingsStore: () => settings },
-    '@/stores/toast': { useToastStore: () => ({ error: message => toasts.push(message), success() {} }) },
+    '@/stores/toast': { useToastStore: () => ({ error: message => toasts.push(message), show: message => notices.push(message), success() {} }) },
     '@/i18n': { default: { global: { t: key => key } } },
     '@/utils/logger': { createLogger: () => Object.fromEntries(['debug', 'warn', 'error'].map(level => [level, (...args) => logs.push({ level, args })])) },
     ...helperDependencies,
@@ -252,7 +253,7 @@ async function harness(options = {}) {
   const scope = vue.effectScope()
   const store = scope.run(() => module.useListenTogetherStore())
   return {
-    store, player, settings, playback, commands, timers, events, toasts, logs, playGates, pauseGates, seekGates,
+    store, player, settings, playback, commands, timers, events, toasts, notices, logs, playGates, pauseGates, seekGates,
     emit,
     async join() { await store.joinRoom('ABC234', 'test-invite-secret'); await flush() },
     async create() { await store.createRoom(); await flush() },
@@ -1012,6 +1013,52 @@ resolvedLink.options = {
   shareableUrls: () => ++resolvedLink.attempts >= 2 ? ['https://m701.music.126.net/shared.mp3'] : [],
 }
 await test('a host resolves a shareable link when it has none to hand', resolvedLink)
+
+await test('a closed room ends the session locally with its reason', async h => {
+  await h.join()
+  await h.message({ type: 'welcome', state: room(), role: 'listener' })
+  await h.message({ type: 'room_closed', state: room([wireTrack(1)], { version: 2, roomStatus: 'closed', closedReason: 'controller_left' }) })
+  assert.equal(h.store.roomId.value, null)
+  assert.equal(h.store.sessionError.value, 'controller_left')
+  assert.ok(!h.commands.some(entry => entry.command === 'lt_leave_room'), 'a closed room is not asked to let us leave')
+  assert.ok(h.playback.some(entry => entry.type === 'pause'), 'a room closed while paused pauses the listener')
+})
+
+const hostSuspended = async h => {
+  await h.create()
+  await h.message({ type: 'welcome', role: 'controller', state: room() })
+  await h.timers.advance(4000)
+  const playbackCount = h.playback.length
+  await h.message({ type: 'room_suspended', state: room([wireTrack(1)], { version: 2, roomStatus: 'controller_offline' }) })
+  assert.equal(h.playback.length, playbackCount, 'a suspension does not touch the player')
+  assert.deepEqual(h.toasts, [])
+  assert.deepEqual(h.notices, [], 'the host is not told that it is offline')
+}
+hostSuspended.options = { role: 'controller' }
+await test('a suspended room is recorded without driving the host player', hostSuspended)
+
+await test('an invite server is used for that join only', async h => {
+  await h.store.joinRoom('ABC234', 'test-invite-secret', 'https://friend.invalid')
+  await flush()
+  const join = h.commands.find(entry => entry.command === 'lt_join_room')
+  assert.equal(join.args.baseUrl, 'https://friend.invalid')
+  assert.equal(h.settings.ltServerUrl, 'https://test.invalid', 'the saved server is not rewritten by an invite')
+})
+
+const leanControls = async h => {
+  await h.create()
+  await h.message({ type: 'welcome', role: 'controller', state: room([wireTrack(1), wireTrack(2), wireTrack(3)]) })
+  await h.timers.advance(4000)
+  const baseline = h.commands.length
+  h.player.isPlaying = true
+  await flush()
+  const play = h.commands.slice(baseline).find(entry => entry.command === 'lt_send_event' && entry.args.event.type === 'PLAY')
+  assert.ok(play)
+  assert.equal(play.args.event.queue, undefined, 'schema 2 transport events bind the track without the queue')
+  assert.equal(play.args.event.track.stableKey, 'netease:1')
+}
+leanControls.options = { role: 'controller' }
+await test('transport events on schema 2 carry only the track binding', leanControls)
 
 if (failures.length) {
   console.error(`${passed} store tests passed; ${failures.length} failed: ${failures.join('; ')}`)
