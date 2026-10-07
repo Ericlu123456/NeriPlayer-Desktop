@@ -18,7 +18,7 @@
     <img alt="CI" src="https://github.com/cwuom/NeriPlayer-Desktop/actions/workflows/build.yml/badge.svg" />
   </a>
   <a href="./LICENSE">
-    <img alt="License" src="https://img.shields.io/badge/License-MIT-green" />
+    <img alt="License" src="https://img.shields.io/badge/License-GPL--3.0-blue" />
   </a>
   <a href="https://t.me/ouom_pub">
     <img alt="Telegram" src="https://img.shields.io/badge/Telegram-@ouom__pub-blue" />
@@ -636,11 +636,11 @@ NeriPlayer Desktop 支持将本地元数据同步到 **用户自己的 GitHub �
 
 ## 许可证 / License
 
-NeriPlayer Desktop 使用 **MIT** 开源许可证发布，
+NeriPlayer Desktop 使用 **GPL-3.0** 开源许可证（GPL-3.0-or-later）发布，与 Android 端一致，
 详细条款请参阅 [LICENSE](./LICENSE)。
 
-> Android 端使用 GPL-3.0，两个仓库的许可证相互独立；
-> 子模块 `vendor/applemusic-like-lyrics` 遵循其自身许可证。
+> 2026-10-07 之前的代码以 MIT 许可发布，原许可声明保留在 [LICENSES/MIT.txt](./LICENSES/MIT.txt)；
+> 子模块 `vendor/applemusic-like-lyrics` 使用 AGPL-3.0，随应用分发的部分遵循其自身许可证。
 
 ---
 

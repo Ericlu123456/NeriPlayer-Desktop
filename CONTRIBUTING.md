@@ -423,12 +423,12 @@ Commit 信息遵循 Conventional Commits，
 ### 法律与许可 / Legal & License
 
 - 项目仅供学习与研究使用，请勿用于非法用途。
-- 本项目使用 **MIT** 协议；提交贡献即表示你同意
-  以 MIT 分发你的修改。
-- 子模块 `vendor/applemusic-like-lyrics` 遵循其自身许可证。
-- Android 端仓库使用 GPL-3.0，两仓库许可证相互独立；
-  从 Android 端移植代码（Kotlin → Rust/TS 重写）时
-  请保持行为对齐即可，不要直接复制受 GPL 约束的实现文本。
+- 本项目使用 **GPL-3.0** 协议（GPL-3.0-or-later）；提交贡献即表示你同意
+  以 GPL-3.0-or-later 分发你的修改。2026-10-07 之前以 MIT 提交的代码，
+  原许可声明保留在 `LICENSES/MIT.txt`。
+- 子模块 `vendor/applemusic-like-lyrics` 使用 AGPL-3.0，遵循其自身许可证。
+- Android 端同样使用 GPL-3.0；移植 Android 端实现时请保留原有版权声明，
+  并在提交正文中注明来源。
 
 ---
 

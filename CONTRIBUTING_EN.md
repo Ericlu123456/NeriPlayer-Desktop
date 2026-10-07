@@ -427,13 +427,15 @@ Commit messages follow Conventional Commits, e.g.
 
 - The project is for learning and research only; do not use it for
   illegal purposes.
-- This project is licensed under **MIT**; by contributing you agree to
-  distribute your changes under MIT.
-- The `vendor/applemusic-like-lyrics` submodule follows its own license.
-- The Android repository is GPL-3.0; the two repos are licensed
-  independently. When porting behavior from Android (Kotlin →
-  Rust/TS rewrites), align behavior — do not copy GPL-covered
-  implementation text directly.
+- This project is licensed under **GPL-3.0** (GPL-3.0-or-later); by
+  contributing you agree to distribute your changes under
+  GPL-3.0-or-later. Code contributed under MIT before 2026-10-07 keeps its
+  original notice in `LICENSES/MIT.txt`.
+- The `vendor/applemusic-like-lyrics` submodule is AGPL-3.0 and follows its
+  own license.
+- The Android repository is GPL-3.0 as well. When porting an Android
+  implementation, keep its copyright notices and name the source in the
+  commit body.
 
 ---
 

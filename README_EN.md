@@ -18,7 +18,7 @@
     <img alt="CI" src="https://github.com/cwuom/NeriPlayer-Desktop/actions/workflows/build.yml/badge.svg" />
   </a>
   <a href="./LICENSE">
-    <img alt="License" src="https://img.shields.io/badge/License-MIT-green" />
+    <img alt="License" src="https://img.shields.io/badge/License-GPL--3.0-blue" />
   </a>
   <a href="https://t.me/ouom_pub">
     <img alt="Telegram" src="https://img.shields.io/badge/Telegram-@ouom__pub-blue" />
@@ -686,12 +686,14 @@ feedback; no fixed schedule is promised.
 
 ## License
 
-NeriPlayer Desktop is released under the **MIT** license. See
-[LICENSE](./LICENSE) for the full terms.
+NeriPlayer Desktop is released under the **GPL-3.0** license
+(GPL-3.0-or-later), the same as the Android app. See [LICENSE](./LICENSE)
+for the full terms.
 
-> The Android app is licensed under GPL-3.0; the two repositories are
-> licensed independently. The `vendor/applemusic-like-lyrics` submodule
-> follows its own license.
+> Code committed before 2026-10-07 was released under the MIT license; that
+> notice is kept in [LICENSES/MIT.txt](./LICENSES/MIT.txt). The
+> `vendor/applemusic-like-lyrics` submodule is AGPL-3.0, and the parts shipped
+> with the app follow its own license.
 
 ---
 
