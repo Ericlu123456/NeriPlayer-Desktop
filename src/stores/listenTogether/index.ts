@@ -110,6 +110,8 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
   let _trackSwitchAt = 0
   let _reconnectAttempt = 0
   let _reconnectTimer: ReturnType<typeof setTimeout> | null = null
+  // 服务端回过 "unsupported event type: np_ping" 后改发旧版 ping
+  let _legacyPing = false
   // 会话代际：leaveRoom 后递增，让在途的延迟回调失效，不再操作播放器
   let _sessionGeneration = 0
   // 出站事件排序字段：实例标识会话内生成一次，序号单调递增（对齐 Android EventFactory）
@@ -361,6 +363,7 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
     _wsUrl = null
     _activeWsConnectionId = null
     _reconnectAttempt = 0
+    _legacyPing = false
     _lastReportedTrackId = null
     _lastReportedQueueKeys = []
     _queueEventInFlight = null
@@ -557,14 +560,13 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
     if (rejected) {
       const err = result.error || envelope.message || t('listen_together.control_rejected')
       if (retryLegacyQueueSnapshot(err)) return
-      if (_queueEventInFlight && (!appliedCause?.eventId || appliedCause.eventId === _queueEventInFlight.eventId)) {
-        completeQueueEvent(_queueEventInFlight.eventId, false)
-      }
-      log.warn('control rejected by server:', err)
-      useToastStore().error(err)
+      // 拒绝结果没有 applied，事件 id 在信封的 causedBy 上；只让被点名的那个队列事件失败，
+      // 别的拒绝（例如链接请求被限流）不能连带丢掉在途和排队的队列修改（对齐 Android）
+      failRejectedQueueEvent(appliedCause?.eventId ?? envelope.causedBy?.eventId, err)
+      handleSessionRejection(err)
       // 以服务端状态为准重新对齐，优先用 applied.state，回退 envelope.state
       const rollback = applied?.state || envelope.state
-      if (rollback) {
+      if (rollback && roomId.value) {
         commitRoomState(rollback, 'EVENT_REJECTED', applied?.expectedPositionMs ?? envelope.expectedPositionMs)
       }
       return
@@ -587,9 +589,30 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
     const t = (i18n.global as any).t
     const err = envelope.result?.error || envelope.message || t('listen_together.control_rejected')
     if (retryLegacyQueueSnapshot(err)) return
-    if (_queueEventInFlight) completeQueueEvent(_queueEventInFlight.eventId, false)
-    log.warn('server error envelope:', err)
-    useToastStore().error(err)
+    failRejectedQueueEvent(envelope.causedBy?.eventId, err)
+    handleSessionRejection(err)
+  }
+
+  /**
+   * 被拒绝的控制和错误信封不弹 toast，按 Android 的顺序尝试恢复：旧服务端不认识 np_ping 时
+   * 退回普通 ping；房间已关闭等终态在本地结束会话；听众被移出成员时重新入房；其余记为会话错误
+   */
+  function handleSessionRejection(err: string) {
+    log.warn('server rejected a control:', err)
+    const lower = err.toLowerCase()
+    if (lower.includes('np_ping') && lower.includes('unsupported')) {
+      _legacyPing = true
+      return
+    }
+    if (isTerminalReconnectError(err)) {
+      void closeRoomLocally(err)
+      return
+    }
+    if (!isController.value && lower.includes('member not in room')) {
+      scheduleReconnect()
+      return
+    }
+    sessionError.value = err
   }
 
   function handleWelcome(envelope: ListenTogetherSocketEnvelope) {
@@ -1182,17 +1205,16 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
       const result = await invoke<ListenTogetherControlResponse>('lt_send_control', { event })
       if (generation !== _sessionGeneration) return
       const queueEvent = _queueEventInFlight?.eventId === event.eventId
-      handleControlResult({ type: 'control_result', result })
+      handleControlResult({ type: 'control_result', result, causedBy: { eventId: event.eventId, type: event.type } })
       if (result.ok && result.applied?.state) {
         if (!queueEvent || _queueEventInFlight?.eventId === event.eventId) {
+          // 房主自己的控制已经在本地生效，提交结果只更新房间状态，不再反过来驱动房主的播放器
           commitRoomState(result.applied.state, result.applied.causedBy?.type || event.type,
-            result.applied.expectedPositionMs, !queueEvent && !_queuedQueueEvent)
+            result.applied.expectedPositionMs, !isController.value && !queueEvent && !_queuedQueueEvent)
           if (result.applied.state.roomId === roomId.value && result.applied.state.version >= _lastAppliedRoomVersion) {
             completeQueueEvent(event.eventId)
           }
         }
-      } else if (!result.ok) {
-        completeQueueEvent(event.eventId, false)
       }
     } catch (error) {
       if (generation !== _sessionGeneration) return
@@ -1455,11 +1477,20 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
     }
   }
 
-  function retryLegacyQueueSnapshot(error: string): boolean {
+  function isQueueCompatibilityError(error: string): boolean {
     const normalized = error.trim().toLowerCase()
-    const compatibilityError = ['queue mutation is invalid', 'queue mutation base version is ahead',
+    return ['queue mutation is invalid', 'queue mutation base version is ahead',
       'queue mutation event type unsupported', 'queue update queue required'].some(message => normalized.includes(message))
-    if (!compatibilityError || !_queueEventInFlight?.queueMutation || !_queueEventSnapshot) return false
+  }
+
+  /** 被拒绝的队列事件：按 eventId 匹配；没带 id 的队列兼容性错误只可能指在途的队列事件 */
+  function failRejectedQueueEvent(ackId: string | undefined, error: string) {
+    const target = ackId ?? (isQueueCompatibilityError(error) ? _queueEventInFlight?.eventId : undefined)
+    if (target && _queueEventInFlight?.eventId === target) completeQueueEvent(target, false)
+  }
+
+  function retryLegacyQueueSnapshot(error: string): boolean {
+    if (!isQueueCompatibilityError(error) || !_queueEventInFlight?.queueMutation || !_queueEventSnapshot) return false
     const snapshot = _queueEventSnapshot
     if (_queueAckTimer) clearTimeout(_queueAckTimer)
     _queueAckTimer = null
@@ -1583,7 +1614,7 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
     stopListenerPing()
     _listenerPingTimer = setInterval(() => {
       if (connectionState.value !== 'connected') return
-      void invoke('lt_send_ping', { t: Date.now() }).catch(() => {})
+      void invoke('lt_send_ping', { t: Date.now(), legacy: _legacyPing }).catch(() => {})
     }, LISTENER_PING_INTERVAL_MS)
   }
 

@@ -194,15 +194,16 @@ impl LtWsClient {
             .map_err(|e| format!("send failed: {e}"))
     }
 
-    /// 发送 ping
-    pub fn send_ping(&self, client_time_ms: Option<i64>) -> Result<(), String> {
+    /// 发送 ping；旧版服务端不认识 np_ping 时用 legacy 退回普通 ping（对齐 Android）
+    pub fn send_ping(&self, client_time_ms: Option<i64>, legacy: bool) -> Result<(), String> {
         let timestamp = client_time_ms.unwrap_or_else(|| {
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_millis() as i64
         });
-        let payload = format!(r#"{{"type":"np_ping","t":{timestamp}}}"#);
+        let kind = if legacy { "ping" } else { "np_ping" };
+        let payload = format!(r#"{{"type":"{kind}","t":{timestamp}}}"#);
         self.send(&payload)
     }
 

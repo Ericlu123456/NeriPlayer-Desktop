@@ -838,6 +838,46 @@ exhausted.options = {
 }
 await test('reconnecting gives up after fifteen attempts', exhausted)
 
+const unrelatedRejection = async h => {
+  await h.create()
+  await h.message({ type: 'welcome', role: 'controller', state: room([wireTrack(1)]) })
+  await h.timers.advance(4000)
+  const baseline = h.commands.length
+  h.player.queue.push(mapper.ltTrackToTrackInfo(wireTrack(2)))
+  await flush()
+  const queueEvent = h.commands.slice(baseline).find(entry => entry.command === 'lt_send_event')?.args.event
+  assert.equal(queueEvent?.type, 'SET_QUEUE')
+  await h.message({
+    type: 'control_result', causedBy: { eventId: 'unrelated', type: 'REQUEST_LINK' },
+    result: { ok: false, error: 'link request throttled' },
+  })
+  await h.timers.advance(3000)
+  const fallback = h.commands.slice(baseline).find(entry => entry.command === 'lt_send_control')
+  assert.equal(fallback?.args.event.eventId, queueEvent.eventId, 'the unacknowledged queue change is still delivered')
+  assert.deepEqual(h.toasts, [], 'rejections are recorded on the session instead of toasted')
+  assert.equal(h.store.sessionError.value, 'link request throttled')
+}
+unrelatedRejection.options = { role: 'controller' }
+await test('a rejection for another event does not fail the queue change in flight', unrelatedRejection)
+
+await test('an np_ping rejection switches to the legacy ping', async h => {
+  await h.join()
+  await h.message({ type: 'welcome', state: room(), role: 'listener' })
+  await h.message({ type: 'error', message: 'unsupported event type: np_ping' })
+  await h.timers.advance(20_000)
+  const ping = h.commands.filter(entry => entry.command === 'lt_send_ping').at(-1)
+  assert.equal(ping?.args.legacy, true)
+  assert.equal(h.store.sessionError.value, null)
+})
+
+await test('a room-closed rejection ends the session locally', async h => {
+  await h.join()
+  await h.message({ type: 'welcome', state: room(), role: 'listener' })
+  await h.message({ type: 'control_result', result: { ok: false, error: 'room closed' } })
+  assert.equal(h.store.roomId.value, null)
+  assert.ok(!h.commands.some(entry => entry.command === 'lt_leave_room'))
+})
+
 if (failures.length) {
   console.error(`${passed} store tests passed; ${failures.length} failed: ${failures.join('; ')}`)
   process.exitCode = 1

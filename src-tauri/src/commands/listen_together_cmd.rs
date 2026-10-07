@@ -270,6 +270,15 @@ async fn post_room_operation<T: serde::Serialize + ?Sized>(
             .await
             .map_err(|e| format!("HTTP error: {e}"))?;
 
+        let status = resp.status();
+        if status.is_client_error() {
+            // 服务端拒绝控制时回 4xx + {ok:false,error}，这是应答而不是传输失败，
+            // 交给前端走与 WebSocket 拒绝相同的恢复路径（对齐 Android HttpControlFallbackOwner）
+            let body = resp.bytes().await.map_err(|e| format!("HTTP error: {e}"))?;
+            return serde_json::from_slice::<LtControlResponse>(&body).map_err(|_| {
+                format!("HTTP {}: listen-together {operation} rejected", status.as_u16())
+            });
+        }
         crate::api::transport::parse_json_response(resp, &format!("listen-together {operation}"))
             .await
             .map_err(|e| e.to_string())
@@ -327,12 +336,16 @@ pub async fn lt_send_event(event: LtEvent, state: State<'_, AppState>) -> Result
 }
 
 #[tauri::command]
-pub async fn lt_send_ping(t: Option<i64>, state: State<'_, AppState>) -> Result<bool, String> {
+pub async fn lt_send_ping(
+    t: Option<i64>,
+    legacy: Option<bool>,
+    state: State<'_, AppState>,
+) -> Result<bool, String> {
     let ws_arc = state.lt_session.lock().ws_client.clone();
     let ws = ws_arc.lock().await;
     match ws.as_ref() {
         Some(client) => {
-            client.send_ping(t)?;
+            client.send_ping(t, legacy.unwrap_or(false))?;
             Ok(true)
         }
         None => Ok(false),
