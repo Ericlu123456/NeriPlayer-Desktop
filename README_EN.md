@@ -228,7 +228,7 @@ Build steps:
 git clone --recursive https://github.com/cwuom/NeriPlayer-Desktop.git
 cd NeriPlayer-Desktop
 pnpm install
-pnpm tauri dev      # development run (Vite :1420 + Rust shell)
+pnpm tauri dev      # development run (Vite :1420, or the next free port if it is taken + Rust shell)
 pnpm tauri build    # production bundle -> src-tauri/target/release/bundle/
 ```
 

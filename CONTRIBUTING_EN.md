@@ -93,7 +93,7 @@ git clone --recursive https://github.com/cwuom/NeriPlayer-Desktop.git
 cd NeriPlayer-Desktop
 pnpm install
 
-pnpm tauri dev      # full app (Vite :1420 + Rust shell)
+pnpm tauri dev      # full app (Vite :1420, or the next free port if it is taken + Rust shell)
 pnpm dev            # frontend only (no Tauri backend; IPC calls fail)
 pnpm build          # vue-tsc type check + vite build -> dist/
 pnpm tauri build    # production bundle -> src-tauri/target/release/bundle/

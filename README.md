@@ -204,7 +204,7 @@ NeriPlayer Desktop 是一个 **Tauri 2** 桌面应用：**Vue 3** 前端与 **Ru
 git clone --recursive https://github.com/cwuom/NeriPlayer-Desktop.git
 cd NeriPlayer-Desktop
 pnpm install
-pnpm tauri dev      # 开发运行（Vite :1420 + Rust shell）
+pnpm tauri dev      # 开发运行（Vite :1420，被占用时自动换用下一个空闲端口 + Rust shell）
 pnpm tauri build    # 生产打包，产物在 src-tauri/target/release/bundle/
 ```
 

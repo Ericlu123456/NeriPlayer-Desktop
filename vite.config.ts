@@ -35,7 +35,8 @@ export default defineConfig({
     },
   },
   server: {
-    port: 1420,
+    // 1420 被其它程序占用时 scripts/run-tauri.mjs 会换一个空闲端口，并让 Tauri 打开同一地址
+    port: Number(process.env.NERI_DEV_PORT) || 1420,
     strictPort: true,
     watch: { ignored: ['**/src-tauri/**'] },
   },
