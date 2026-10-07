@@ -1006,6 +1006,8 @@
     "invite_detected": "检测到一起听邀请",
     "invite_join_prompt": "是否加入房间 {roomId}？",
     "room_closed": "房间已关闭",
+    "invite_unavailable": "这个房间没有邀请密钥，暂时无法生成邀请",
+    "create_requires_shareable_track": "请先播放一首在线歌曲再创建房间（本地文件和 QQ 音乐无法共享）",
     "controller_offline": "房主已离线",
     "controller_offline_detail": "房主当前离线，如果大约 {minutes} 分钟内没有重连，房间会自动关闭",
     "create_failed": "创建房间失败: {msg}",

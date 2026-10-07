@@ -30,6 +30,7 @@ import {
   normalizeLtInviteBaseUrl,
   normalizeLtJoinSecret,
   normalizeLtRoomId,
+  parseLtInvite,
   resolveLtJoinSecret,
   isValidLtRoomId,
 } from './protocol'
@@ -216,6 +217,8 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
         currentStreamUrl,
       )
       const initialTrack = ltQueue[resolvedIndex]
+      // 服务端要求初始快照里有可共享的当前曲目，否则只会回一条生硬的 HTTP 400
+      if (!initialTrack) throw new Error(t('listen_together.create_requires_shareable_track'))
 
       const snapshot: ListenTogetherInitialSnapshot = {
         queue: ltQueue,
@@ -336,6 +339,11 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
 
   /** 离开房间 */
   async function leaveRoom() {
+    // 对齐 Android pauseBeforeLeave：房间开着"成员变动时暂停"（默认开）时，离开前先停下自己的播放
+    if (roomId.value && (roomSettings.value.autoPauseOnMemberChange ?? true)) {
+      const player = usePlayerStore()
+      if (player.isPlaying) await player.pause('remote_sync')
+    }
     await endSession(true)
   }
 
@@ -1354,12 +1362,15 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
     return false
   }
 
+  // 房主在放本地文件、QQ 音乐这类无法共享的歌时不上报播放控制：服务端会把位置和状态
+  // 套到房间里上一首歌上，听众被拖着跳转或暂停（对齐 Android）
   function reportPlayEvent() {
     const player = usePlayerStore()
-    if (shouldSkipControlEvent('PLAY')) return
+    const binding = controlBindingFields()
+    if (!binding.track || shouldSkipControlEvent('PLAY')) return
     sendEvent({
       type: 'PLAY',
-      ...controlBindingFields(),
+      ...binding,
       positionMs: player.positionMs,
       state: 'playing',
     })
@@ -1367,20 +1378,22 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
 
   function reportPauseEvent() {
     const player = usePlayerStore()
-    if (shouldSkipControlEvent('PAUSE')) return
+    const binding = controlBindingFields()
+    if (!binding.track || shouldSkipControlEvent('PAUSE')) return
     sendEvent({
       type: 'PAUSE',
-      ...controlBindingFields(),
+      ...binding,
       positionMs: player.positionMs,
       state: 'paused',
     })
   }
 
   function reportSeekEvent(positionMs: number) {
-    if (shouldSkipSeekEvent(positionMs)) return
+    const binding = controlBindingFields()
+    if (!binding.track || shouldSkipSeekEvent(positionMs)) return
     sendEvent({
       type: 'SEEK',
-      ...controlBindingFields(),
+      ...binding,
       positionMs,
     })
   }
@@ -1703,6 +1716,11 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
       player.currentTrack ? player.getCurrentStreamUrl(player.currentTrack.id) || undefined : undefined,
       false, player.getCurrentStreamUrls(),
     )
+    // 当前歌无法共享时只保活：不带位置和状态的心跳不会改动房间里那首歌的进度
+    if (!queue[resolvedIndex]) {
+      void sendEvent({ type: 'HEARTBEAT' })
+      return
+    }
     void sendEvent({
       type: 'HEARTBEAT',
       positionMs: player.positionMs,
@@ -1882,11 +1900,15 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
   }
 
   async function copyInviteLink() {
-    const link = getInviteLink()
+    const toast = useToastStore()
+    const t = (i18n.global as any).t
+    // 服务端要求邀请带密钥，没有密钥的链接别人用了只会被拒绝
+    if (!_joinSecret) {
+      toast.error(t('listen_together.invite_unavailable'))
+      return
+    }
     try {
-      await writeText(link)
-      const toast = useToastStore()
-      const t = (i18n.global as any).t
+      await writeText(getInviteLink())
       toast.success(t('listen_together.invite_copied'))
     } catch {}
   }
@@ -1898,25 +1920,10 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
     joinSecret?: string
   } | null> {
     try {
-      const text = await readText()
-      if (!text) return null
-      // 定位邀请 URL 主体后按 query 解析, 参数顺序无关（对齐 Android decodeInviteQuery）;
-      // 旧实现假定 baseUrl 紧跟 roomId, Android 生成的含 inviter 参数的链接会丢失 baseUrl
-      const urlMatch = text.match(/neriplayer:\/\/listen-together\/join\?[^\s]+/i)
-      if (!urlMatch) return null
-      const queryStr = urlMatch[0].slice(urlMatch[0].indexOf('?') + 1)
-      const params = new URLSearchParams(queryStr)
-      const rawRoomId = params.get('roomId')
-      if (!rawRoomId) return null
-      const roomId = normalizeLtRoomId(rawRoomId)
-      if (!isValidLtRoomId(roomId)) return null
-      const baseUrl = normalizeLtInviteBaseUrl(params.get('baseUrl'))
-      const joinSecret = normalizeLtJoinSecret(params.get('secret'))
-      return {
-        roomId,
-        baseUrl: baseUrl || undefined,
-        joinSecret,
-      }
+      const invite = parseLtInvite(await readText())
+      if (!invite) return null
+      if (invite.hasInvalidBaseUrl) log.warn('ignored an invite server that is not https')
+      return { roomId: invite.roomId, baseUrl: invite.baseUrl, joinSecret: invite.joinSecret }
     } catch {}
     return null
   }

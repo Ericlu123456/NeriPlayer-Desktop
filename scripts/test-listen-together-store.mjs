@@ -256,7 +256,16 @@ async function harness(options = {}) {
     store, player, settings, playback, commands, timers, events, toasts, notices, logs, playGates, pauseGates, seekGates,
     emit,
     async join() { await store.joinRoom('ABC234', 'test-invite-secret'); await flush() },
-    async create() { await store.createRoom(); await flush() },
+    async create() {
+      // 服务端要求建房时已经在放一首可共享的歌
+      if (!player.currentTrack) {
+        player.queue = [mapper.ltTrackToTrackInfo(wireTrack(1))]
+        player.queueIndex = 0
+        player.currentTrack = player.queue[0]
+      }
+      await store.createRoom()
+      await flush()
+    },
     async message(message) {
       emit('lt:message', { connectionId: 'connection-current', ...message })
       await flush()
@@ -376,6 +385,7 @@ await test('soft drift correction rechecks every 500ms and resets once it conver
 
 const fallback = async h => {
   await h.join()
+  await h.message({ type: 'welcome', state: room(), role: 'listener' })
   h.store.reportSeekEvent(9000)
   await flush()
   const websocket = h.commands.find(entry => entry.command === 'lt_send_event')
@@ -409,8 +419,10 @@ await test('leaving while remote playback is loading cancels deferred room corre
 
 const lateFallback = async h => {
   await h.join()
+  await h.message({ type: 'welcome', state: room(), role: 'listener' })
   h.store.reportSeekEvent(9000)
   await flush()
+  assert.ok(h.commands.some(entry => entry.command === 'lt_send_event' && entry.args.event.type === 'SEEK'))
   await h.store.leaveRoom()
   lateFallback.gate.resolve(false)
   await flush()
@@ -423,6 +435,7 @@ await test('a delayed WebSocket failure after leaving does not start HTTP fallba
 
 const lateHttpResponse = async h => {
   await h.join()
+  await h.message({ type: 'welcome', state: room(), role: 'listener' })
   h.store.reportSeekEvent(9000)
   await flush()
   assert.ok(h.commands.some(entry => entry.command === 'lt_send_control'))
@@ -1059,6 +1072,63 @@ const leanControls = async h => {
 }
 leanControls.options = { role: 'controller' }
 await test('transport events on schema 2 carry only the track binding', leanControls)
+
+const localTrack = () => ({
+  id: 'local:C:/Music/a.flac', title: 'a', artist: '', album: '', durationMs: 60_000,
+  coverUrl: '', audioUrl: 'C:/Music/a.flac', source: 'local', addedAt: 0,
+})
+
+await test('creating a room with an unshareable track is refused before contacting the server', async h => {
+  h.player.queue = [localTrack()]
+  h.player.queueIndex = 0
+  h.player.currentTrack = h.player.queue[0]
+  await h.store.createRoom()
+  await flush()
+  assert.ok(!h.commands.some(entry => entry.command === 'lt_create_room'))
+  assert.equal(h.store.roomId.value, null)
+  assert.equal(h.store.sessionError.value, 'listen_together.create_requires_shareable_track')
+})
+
+const localHost = async h => {
+  await h.create()
+  await h.message({ type: 'welcome', role: 'controller', state: room() })
+  await h.timers.advance(4000)
+  h.player.queue = [localTrack()]
+  h.player.queueIndex = 0
+  h.player.currentTrack = h.player.queue[0]
+  await flush()
+  const baseline = h.commands.length
+  h.player.isPlaying = true
+  await flush()
+  h.player.isPlaying = false
+  await flush()
+  await h.timers.advance(26_000)
+  const sent = h.commands.slice(baseline).filter(entry => entry.command === 'lt_send_event').map(entry => entry.args.event)
+  assert.ok(!sent.some(event => event.type === 'PLAY' || event.type === 'PAUSE'), 'a local track does not drive the room')
+  const heartbeat = sent.find(event => event.type === 'HEARTBEAT')
+  assert.ok(heartbeat, 'the host still keeps the room alive')
+  assert.equal(heartbeat.positionMs, undefined)
+  assert.equal(heartbeat.state, undefined)
+}
+localHost.options = { role: 'controller' }
+await test('a host on an unshareable track only keeps the room alive', localHost)
+
+await test('leaving pauses local playback before telling the server', async h => {
+  await h.join()
+  await h.message({ type: 'welcome', state: room(), role: 'listener' })
+  await h.timers.advance(4000)
+  h.player.isPlaying = true
+  await flush()
+  const gate = deferred()
+  h.pauseGates.push(gate)
+  const leaving = h.store.leaveRoom()
+  await flush()
+  assert.ok(h.playback.some(entry => entry.type === 'pause'))
+  assert.ok(!h.commands.some(entry => entry.command === 'lt_leave_room'), 'the pause happens first')
+  gate.resolve()
+  await leaving
+  assert.ok(h.commands.some(entry => entry.command === 'lt_leave_room'))
+})
 
 const connectCount = h => h.commands.filter(entry => entry.command === 'lt_connect_ws').length
 

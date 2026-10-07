@@ -1006,6 +1006,8 @@
     "invite_detected": "一緒に聴く招待を検出",
     "invite_join_prompt": "ルーム {roomId} に参加しますか？",
     "room_closed": "ルームが閉じられました",
+    "invite_unavailable": "このルームには招待キーがないため、招待を作成できません。",
+    "create_requires_shareable_track": "ルームを作成する前にオンラインの曲を再生してください。ローカルファイルと QQ Music は共有できません。",
     "controller_offline": "ホストがオフラインです",
     "controller_offline_detail": "ホストは現在オフラインです。約 {minutes} 分以内に再接続しない場合、ルームは自動で閉じられます。",
     "create_failed": "ルーム作成に失敗: {msg}",

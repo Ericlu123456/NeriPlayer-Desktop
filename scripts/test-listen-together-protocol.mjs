@@ -7,9 +7,27 @@ const source = await readFile(new URL('../src/stores/listenTogether/protocol.ts'
 const compiled = ts.transpileModule(source, {
   compilerOptions: { module: ts.ModuleKind.ES2022, target: ts.ScriptTarget.ES2022 },
 }).outputText
-const { desktopRepeatToWire, wireRepeatToDesktop } = await import(
+const { desktopRepeatToWire, wireRepeatToDesktop, isValidLtNickname, parseLtInvite } = await import(
   `data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}`,
 )
+
+// 昵称与服务端同一规则：汉字（含 〇、々、扩展区）、ASCII 字母数字，按码点最多 24 个
+for (const valid of ['Tester', '听歌的人', '〇々', '𠀀𠀁', 'a'.repeat(24), '𠀀'.repeat(24)]) {
+  assert.equal(isValidLtNickname(valid), true, valid)
+}
+for (const invalid of ['', '   ', 'a'.repeat(25), 'with-dash', 'emoji😀', 'ｆｕｌｌ', 'カタカナ']) {
+  assert.equal(isValidLtNickname(invalid), false, invalid)
+}
+
+const invite = 'neriplayer://listen-together/join?inviter=Tom&roomId=abc234&secret=s3cret&baseUrl=https%3A%2F%2Fltw.example.com%2F'
+assert.deepEqual(parseLtInvite(`来一起听吧 ${invite} 这个房间`), {
+  roomId: 'ABC234', joinSecret: 's3cret', baseUrl: 'https://ltw.example.com', hasInvalidBaseUrl: false,
+})
+assert.equal(parseLtInvite('neriplayer-debug://listen-together/join?roomId=ABC234&secret=x')?.roomId, 'ABC234')
+assert.equal(parseLtInvite('neriplayer://listen-together/join?roomId=ABC234'), null, 'an invite without a secret cannot be used')
+assert.equal(parseLtInvite('myneriplayer://listen-together/join?roomId=ABC234&secret=x'), null, 'no match inside a longer scheme')
+assert.equal(parseLtInvite('neriplayer://listen-together/join?roomId=AB&secret=x'), null)
+assert.equal(parseLtInvite('neriplayer://listen-together/join?roomId=ABC234&secret=x&baseUrl=http%3A%2F%2Finsecure.example')?.hasInvalidBaseUrl, true)
 
 assert.equal(desktopRepeatToWire('off'), 0)
 assert.equal(desktopRepeatToWire('one'), 1)

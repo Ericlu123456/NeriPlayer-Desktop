@@ -255,26 +255,37 @@ export function wireRepeatToDesktop(mode: number | null | undefined): 'off' | 'o
 export const LT_NICKNAME_MAX_LENGTH = 24
 const ROOM_ID_REGEX = /^[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{6}$/
 
-function isAllowedNicknameChar(cp: number): boolean {
-  if (cp >= 0x30 && cp <= 0x39) return true // 0-9
-  if (cp >= 0x41 && cp <= 0x5a) return true // A-Z
-  if (cp >= 0x61 && cp <= 0x7a) return true // a-z
-  // CJK 统一表意文字（含扩展 A/B 常见区段），近似 Android HAN script 判定
-  if (cp >= 0x4e00 && cp <= 0x9fff) return true
-  if (cp >= 0x3400 && cp <= 0x4dbf) return true
-  if (cp >= 0x20000 && cp <= 0x2a6df) return true
-  return false
+// 与服务端 worker.js 相同：任意汉字（Unicode Han 文字，含 〇、々 与各扩展区）、ASCII 字母和数字，按码点计数
+const NICKNAME_REGEX = new RegExp(`^[\\p{Script=Han}A-Za-z0-9]{1,${LT_NICKNAME_MAX_LENGTH}}$`, 'u')
+
+/** 返回 true 表示昵称合法（对齐服务端，避免建房/加入被拒或云同步到 Android 端被 sanitize 丢弃） */
+export function isValidLtNickname(nickname: string): boolean {
+  return NICKNAME_REGEX.test(nickname.trim())
 }
 
-/** 返回 true 表示昵称合法（对齐 Android，避免云同步到 Android 端被 sanitize 丢弃） */
-export function isValidLtNickname(nickname: string): boolean {
-  const normalized = nickname.trim()
-  if (normalized.length < 1 || normalized.length > LT_NICKNAME_MAX_LENGTH) return false
-  for (const ch of normalized) {
-    const cp = ch.codePointAt(0)
-    if (cp === undefined || !isAllowedNicknameChar(cp)) return false
-  }
-  return true
+// 不匹配更长单词中间的片段；调试版客户端生成 neriplayer-debug:// 邀请（对齐 Android ListenTogetherInviteParser）
+const INVITE_REGEX = /(?<![a-z0-9+.-])neriplayer(?:-debug)?:\/\/listen-together\/join\?[^\s]+/i
+
+export interface LtInvite {
+  roomId: string
+  joinSecret: string
+  baseUrl?: string
+  /** 邀请带了服务器地址但不是合法的 https 地址，已被忽略 */
+  hasInvalidBaseUrl: boolean
+}
+
+/** 从任意文本里解析邀请链接；参数顺序无关。没有密钥的邀请服务端会拒绝，直接视为无效 */
+export function parseLtInvite(text: string | null | undefined): LtInvite | null {
+  const match = text?.match(INVITE_REGEX)
+  if (!match) return null
+  const params = new URLSearchParams(match[0].slice(match[0].indexOf('?') + 1))
+  const roomId = normalizeLtRoomId(params.get('roomId') ?? '')
+  if (!isValidLtRoomId(roomId)) return null
+  const joinSecret = normalizeLtJoinSecret(params.get('secret'))
+  if (!joinSecret) return null
+  const rawBaseUrl = params.get('baseUrl')?.trim()
+  const baseUrl = normalizeLtInviteBaseUrl(rawBaseUrl)
+  return { roomId, joinSecret, baseUrl: baseUrl ?? undefined, hasInvalidBaseUrl: !!rawBaseUrl && !baseUrl }
 }
 
 /** roomId 归一化：去空白并大写（对齐 Android normalizeListenTogetherRoomId） */

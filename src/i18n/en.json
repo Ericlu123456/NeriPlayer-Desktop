@@ -1006,6 +1006,8 @@
     "invite_detected": "Listen Together invite detected",
     "invite_join_prompt": "Join room {roomId}?",
     "room_closed": "Room closed",
+    "invite_unavailable": "This room has no invite secret, so an invite can't be created.",
+    "create_requires_shareable_track": "Play an online song before creating a room. Local files and QQ Music can't be shared.",
     "controller_offline": "Host is offline",
     "controller_offline_detail": "Host is offline. The room will close automatically in about {minutes} minute(s) if not reconnected.",
     "create_failed": "Create room failed: {msg}",

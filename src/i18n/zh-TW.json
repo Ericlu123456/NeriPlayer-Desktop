@@ -1006,6 +1006,8 @@
     "invite_detected": "偵測到一起聽邀請",
     "invite_join_prompt": "是否加入房間 {roomId}？",
     "room_closed": "房間已關閉",
+    "invite_unavailable": "這個房間沒有邀請金鑰，暫時無法產生邀請",
+    "create_requires_shareable_track": "請先播放一首線上歌曲再建立房間（本機檔案與 QQ 音樂無法分享）",
     "controller_offline": "房主已離線",
     "controller_offline_detail": "房主目前離線，如果大約 {minutes} 分鐘內沒有重連，房間會自動關閉",
     "create_failed": "建立房間失敗: {msg}",
