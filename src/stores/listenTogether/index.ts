@@ -22,6 +22,7 @@ import type {
   ListenTogetherRoomResponse,
   ListenTogetherStateResponse,
   ListenTogetherControlResponse,
+  LtInvite,
 } from './protocol'
 import {
   desktopRepeatToWire,
@@ -2062,23 +2063,25 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
       toast.error(t('listen_together.invite_unavailable'))
       return
     }
+    // 与 Android 相同：一句说明加链接，两端都能从整段文字里识别出链接
+    const inviter = nickname.value.trim()
+    const text = t('listen_together.invite_share_text', {
+      inviter: isValidLtNickname(inviter) ? inviter : t('listen_together.title'),
+      roomId: roomId.value || '',
+    })
     try {
-      await writeText(getInviteLink())
+      await writeText(`${text}\n${getInviteLink()}`)
       toast.success(t('listen_together.invite_copied'))
     } catch {}
   }
 
   /** 检测剪贴板中的邀请链接 */
-  async function checkClipboardInvite(): Promise<{
-    roomId: string
-    baseUrl?: string
-    joinSecret?: string
-  } | null> {
+  async function checkClipboardInvite(): Promise<LtInvite | null> {
     try {
       const invite = parseLtInvite(await readText())
       if (!invite) return null
       if (invite.hasInvalidBaseUrl) log.warn('ignored an invite server that is not https')
-      return { roomId: invite.roomId, baseUrl: invite.baseUrl, joinSecret: invite.joinSecret }
+      return invite
     } catch {}
     return null
   }

@@ -285,6 +285,10 @@ export interface LtInvite {
   roomId: string
   joinSecret: string
   baseUrl?: string
+  /** 邀请人昵称，只用于展示；不合法的昵称直接丢弃 */
+  inviter?: string
+  /** 文本里匹配到的邀请链接原文 */
+  link: string
   /** 邀请带了服务器地址但不是合法的 https 地址，已被忽略 */
   hasInvalidBaseUrl: boolean
 }
@@ -300,7 +304,15 @@ export function parseLtInvite(text: string | null | undefined): LtInvite | null 
   if (!joinSecret) return null
   const rawBaseUrl = params.get('baseUrl')?.trim()
   const baseUrl = normalizeLtInviteBaseUrl(rawBaseUrl)
-  return { roomId, joinSecret, baseUrl: baseUrl ?? undefined, hasInvalidBaseUrl: !!rawBaseUrl && !baseUrl }
+  const inviter = params.get('inviter')?.trim() ?? ''
+  return {
+    roomId,
+    joinSecret,
+    baseUrl: baseUrl ?? undefined,
+    ...(isValidLtNickname(inviter) ? { inviter } : {}),
+    link: match[0],
+    hasInvalidBaseUrl: !!rawBaseUrl && !baseUrl,
+  }
 }
 
 /** roomId 归一化：去空白并大写（对齐 Android normalizeListenTogetherRoomId） */

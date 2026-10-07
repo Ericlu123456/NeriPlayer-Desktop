@@ -28,8 +28,13 @@ for (const invalid of ['', '   ', 'a'.repeat(25), 'with-dash', 'emoji😀', 'ｆ
 
 const invite = 'neriplayer://listen-together/join?inviter=Tom&roomId=abc234&secret=s3cret&baseUrl=https%3A%2F%2Fltw.example.com%2F'
 assert.deepEqual(parseLtInvite(`来一起听吧 ${invite} 这个房间`), {
-  roomId: 'ABC234', joinSecret: 's3cret', baseUrl: 'https://ltw.example.com', hasInvalidBaseUrl: false,
+  roomId: 'ABC234', joinSecret: 's3cret', baseUrl: 'https://ltw.example.com', inviter: 'Tom', link: invite, hasInvalidBaseUrl: false,
 })
+assert.equal(
+  'inviter' in parseLtInvite('neriplayer://listen-together/join?inviter=bad-name&roomId=ABC234&secret=x'),
+  false,
+  'an inviter that is not a valid nickname is dropped',
+)
 assert.equal(parseLtInvite('neriplayer-debug://listen-together/join?roomId=ABC234&secret=x')?.roomId, 'ABC234')
 assert.equal(parseLtInvite('neriplayer://listen-together/join?roomId=ABC234'), null, 'an invite without a secret cannot be used')
 assert.equal(parseLtInvite('myneriplayer://listen-together/join?roomId=ABC234&secret=x'), null, 'no match inside a longer scheme')
