@@ -193,8 +193,10 @@ fn read_track_info(
         return Err(crate::error::AppError::Metadata("下载尚未完成".into()));
     }
 
+    // 按文件内容认格式：旧版下载把 FLAC 存成了 .mp3，按扩展名当 MP3 解析会跳过或算出几小时的时长
     let tagged = Probe::open(path)
         .map_err(|e| crate::error::AppError::Metadata(e.to_string()))?
+        .guess_file_type()?
         .read()
         .map_err(|e| crate::error::AppError::Metadata(e.to_string()))?;
     let properties = tagged.properties();
@@ -628,6 +630,18 @@ fn normalize_metadata_value(value: &str) -> String {
 mod tests {
     use super::{find_nearby_cover, scan_directory, CoverLookupCache};
     use std::path::PathBuf;
+
+    /// 回归：旧版下载把 FLAC 存成 .mp3，按扩展名解析时 30/35 首被跳过，其余算出 12 小时这类时长
+    #[test]
+    fn a_flac_saved_with_an_mp3_name_is_read_as_flac() {
+        let root = tempfile::tempdir().unwrap();
+        let audio = root.path().join("Song.mp3");
+        std::fs::write(&audio, include_bytes!("../audio/fixtures/ffmpeg/flac-s16-stereo-0.5s.flac")).unwrap();
+        let result = scan_directory(root.path().to_str().unwrap(), None).unwrap();
+        assert!(result.skipped.is_empty(), "{:?}", result.skipped.iter().map(|s| &s.reason).collect::<Vec<_>>());
+        assert_eq!(result.tracks.len(), 1);
+        assert!((450..=550).contains(&result.tracks[0].duration_ms), "{}", result.tracks[0].duration_ms);
+    }
 
     #[test]
     fn managed_android_metadata_restores_display_cover_and_identity_without_audio_tags() {
