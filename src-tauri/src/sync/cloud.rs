@@ -716,7 +716,7 @@ mod tests {
                 Ok(_) => panic!("a rewritten legacy source must not be migrated"),
                 Err(error) => error,
             };
-        assert!(error.to_string().contains("Legacy WebDAV source changed"));
+        assert!(error.to_string().contains("Legacy WebDAV source changed"), "{error}");
         let served = server.finish().await;
         assert!(served.requests.iter().all(|request| !request.starts_with(b"PUT ")));
         assert!(!served.files.contains_key(archive::MANIFEST_FILE));
