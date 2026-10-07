@@ -197,6 +197,11 @@ enum AudioCmd {
         transition_generation: u64,
         reply: mpsc::Sender<Result<(), String>>,
     },
+    /// 设备监视线程每轮枚举的结果；控制线程只比较名字，需要时才切换设备
+    OutputDevicesListed {
+        available: Vec<String>,
+        default: Option<String>,
+    },
     /// 输出设备失效（拔掉耳机/蓝牙断连等，由 cpal 流错误回调上报）。
     /// 控制线程收到后丢弃缓存的设备档案并以当前默认设备原地重建会话
     DeviceLost {
@@ -431,6 +436,63 @@ fn effective_output_name<'a>(
     default: Option<&'a str>,
 ) -> Option<&'a str> {
     preferred.filter(|name| available.contains(name)).or(default)
+}
+
+/// 设备列表更新后要切到的输出设备；已经在用目标设备时返回 None
+fn output_device_to_switch(
+    preferred: Option<&str>,
+    available: &[String],
+    default: Option<&str>,
+    current: Option<&str>,
+) -> Option<String> {
+    let names: Vec<&str> = available.iter().map(String::as_str).collect();
+    let target = effective_output_name(preferred, &names, default)?;
+    (current != Some(target)).then(|| target.to_string())
+}
+
+/// 在独立线程里定期枚举输出设备，把结果交给控制线程
+///
+/// Windows 上一次枚举要 250–300 ms。放在控制线程里时，这段时间到达的
+/// 播放、seek、暂停命令都得排队等它。控制线程断开后发送失败，线程随之退出。
+fn spawn_output_device_watch(commands: mpsc::Sender<AudioCmd>) {
+    let spawned = thread::Builder::new()
+        .name("audio-device-watch".into())
+        .spawn(move || {
+            let mut last_error: Option<String> = None;
+            loop {
+                thread::sleep(OUTPUT_DEVICE_POLL_INTERVAL);
+                let devices = match list_audio_output_devices() {
+                    Ok(devices) => {
+                        if last_error.take().is_some() {
+                            log::info!(target: "cpal-output", "output device enumeration recovered");
+                        }
+                        devices
+                    }
+                    Err(error) => {
+                        let message = error.to_string();
+                        if last_error.as_deref() != Some(message.as_str()) {
+                            log::warn!(target: "cpal-output", "output device enumeration failed: {message}");
+                        }
+                        last_error = Some(message);
+                        continue;
+                    }
+                };
+                let default = devices
+                    .iter()
+                    .find(|device| device.is_default)
+                    .map(|device| device.name.clone());
+                let available = devices.into_iter().map(|device| device.name).collect();
+                if commands
+                    .send(AudioCmd::OutputDevicesListed { available, default })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+    if let Err(error) = spawned {
+        log::error!(target: "cpal-output", "could not start the output device watcher: {error}");
+    }
 }
 
 fn matches_output_session(
@@ -1427,6 +1489,7 @@ fn spawn_audio_thread(
     let alive_for_thread = Arc::clone(&alive);
     // 回传句柄：cpal 错误回调用它向控制线程上报 DeviceLost
     let loopback_tx = cmd_tx.clone();
+    spawn_output_device_watch(cmd_tx.clone());
     thread::Builder::new()
         .name("cpal-playback-control".into())
         .spawn(move || {
@@ -1483,7 +1546,6 @@ fn audio_control_loop(
     };
 
     let mut output_profile = OutputDeviceState { preferred_name: None, profile };
-    let mut last_output_poll = Instant::now();
     let mut reporter = MetricsReporter::new();
     loop {
         let idle_wait = if reporter.has_pending_probes() {
@@ -1505,39 +1567,28 @@ fn audio_control_loop(
                 .as_ref()
                 .is_some_and(|session| !session.shared.paused.load(Ordering::Acquire)),
         );
-        if last_output_poll.elapsed() >= OUTPUT_DEVICE_POLL_INTERVAL {
-            last_output_poll = Instant::now();
-            let enumerate_started = Instant::now();
-            let listed = list_audio_output_devices();
-            let enumerate_ms = enumerate_started.elapsed().as_millis();
-            if enumerate_ms >= 50 {
-                log::info!(
-                    target: "audio-timing",
-                    "output device enumeration held the control thread for {enumerate_ms} ms",
-                );
-            }
-            if let Ok(devices) = listed {
-                let available: Vec<&str> = devices.iter().map(|device| device.name.as_str()).collect();
-                let default = devices.iter().find(|device| device.is_default).map(|device| device.name.as_str());
-                let target = effective_output_name(output_profile.preferred_name.as_deref(), &available, default).map(str::to_string);
-                if let Some(name) = target {
-                    if output_profile.profile.as_ref().is_none_or(|profile| profile.name != name) {
-                        let result = OutputDeviceProfile::open_named(&name).and_then(|candidate| {
-                            switch_output_device_in_place(
-                                &mut current, candidate, &mut output_profile, volume, speed,
-                                &shared_level, &effects_params, &playback_generation, &loopback_tx,
-                                Arc::new(AtomicBool::new(false)),
-                            )
-                        });
-                        if let Err(error) = result {
-                            log::warn!(target: "cpal-output", "output device change deferred: {error}");
-                        }
-                    }
-                }
-            }
-        }
         let Some(command) = command else { continue };
         match command {
+            AudioCmd::OutputDevicesListed { available, default } => {
+                let Some(name) = output_device_to_switch(
+                    output_profile.preferred_name.as_deref(),
+                    &available,
+                    default.as_deref(),
+                    output_profile.profile.as_ref().map(|profile| profile.name.as_str()),
+                ) else {
+                    continue;
+                };
+                let result = OutputDeviceProfile::open_named(&name).and_then(|candidate| {
+                    switch_output_device_in_place(
+                        &mut current, candidate, &mut output_profile, volume, speed,
+                        &shared_level, &effects_params, &playback_generation, &loopback_tx,
+                        Arc::new(AtomicBool::new(false)),
+                    )
+                });
+                if let Err(error) = result {
+                    log::warn!(target: "cpal-output", "output device change deferred: {error}");
+                }
+            }
             AudioCmd::Play {
                 source,
                 start_position_ms,
@@ -3100,6 +3151,23 @@ mod tests {
     #[test]
     fn android_alignment_output_selection_preserves_an_available_preference() {
         assert_eq!(super::effective_output_name(Some("speaker"), &["speaker", "headphones"], Some("headphones")), Some("speaker"));
+    }
+
+    #[test]
+    fn listed_devices_switch_output_only_when_the_target_changes() {
+        let available = vec!["speaker".to_string(), "headphones".to_string()];
+        assert_eq!(super::output_device_to_switch(None, &available, Some("headphones"), Some("headphones")), None);
+        assert_eq!(
+            super::output_device_to_switch(None, &available, Some("headphones"), Some("speaker")).as_deref(),
+            Some("headphones"),
+        );
+        assert_eq!(super::output_device_to_switch(Some("speaker"), &available, Some("headphones"), Some("speaker")), None);
+        assert_eq!(
+            super::output_device_to_switch(None, &available, Some("speaker"), None).as_deref(),
+            Some("speaker"),
+            "还没有设备档案时直接打开目标设备",
+        );
+        assert_eq!(super::output_device_to_switch(None, &[], None, Some("speaker")), None);
     }
 
     #[test]
