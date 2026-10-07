@@ -1,6 +1,7 @@
 pub mod analyzer;
 pub mod buffered;
 pub mod effects;
+pub mod ffmpeg;
 pub mod growing;
 pub mod hls;
 pub mod media_session;
