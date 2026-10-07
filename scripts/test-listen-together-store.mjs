@@ -1130,6 +1130,69 @@ await test('leaving pauses local playback before telling the server', async h =>
   assert.ok(h.commands.some(entry => entry.command === 'lt_leave_room'))
 })
 
+// 房间从 100_000 起以位置 5000 播放；harness 的播放器不会自己走进度，要按预期位置手动设好
+const playingRoom = (extra = {}) => room([wireTrack(1)], { playback: { ...room().playback, state: 'playing' }, ...extra })
+const expectedAt = h => 5000 + (h.timers.Date.now() - 100_000)
+
+await test('the listener watchdog leaves a synced player alone and corrects a drifted one', async h => {
+  await h.join()
+  await h.message({ type: 'welcome', state: playingRoom(), role: 'listener' })
+  await h.timers.advance(7_000)
+  h.player.positionMs = expectedAt(h) + 1_000
+  const synced = h.playback.length
+  await h.timers.advance(1_000)
+  assert.deepEqual(h.playback.slice(synced), [], 'a player that matches the room is not touched')
+  await h.timers.advance(7_000)
+  h.player.positionMs = expectedAt(h) + 1_000 + 10_000
+  const drifted = h.playback.length
+  await h.timers.advance(1_000)
+  const seek = h.playback.slice(drifted).find(entry => entry.type === 'seek')
+  assert.ok(seek, 'a 10 second drift is corrected without waiting for the host heartbeat')
+  assert.ok(Math.abs(seek.positionMs - expectedAt(h)) <= 1_000)
+})
+
+await test('a room that has gone silent is refreshed over HTTP', async h => {
+  await h.join()
+  await h.message({ type: 'welcome', state: room(), role: 'listener' })
+  await h.timers.advance(40_000)
+  assert.ok(!h.commands.some(entry => entry.command === 'lt_get_room_state'))
+  await h.timers.advance(8_000)
+  assert.ok(h.commands.some(entry => entry.command === 'lt_get_room_state'), 'more than 45 seconds of silence triggers a refresh')
+})
+
+await test('a pending member request is retried and not undone by the watchdog', async h => {
+  await h.join()
+  await h.message({ type: 'welcome', state: playingRoom(), role: 'listener' })
+  await h.timers.advance(4_000)
+  h.player.positionMs = expectedAt(h)
+  h.player.isPlaying = false
+  await flush()
+  const requests = () => h.commands.filter(entry => entry.command === 'lt_send_event' && entry.args.event.type === 'REQUEST_PAUSE')
+  assert.equal(requests().length, 1)
+  const playbackCount = h.playback.length
+  await h.timers.advance(4_000)
+  assert.equal(requests().length, 2, 'an unanswered request is sent again')
+  assert.equal(requests()[1].args.event.eventId, requests()[0].args.event.eventId)
+  assert.ok(!h.playback.slice(playbackCount).some(entry => entry.type === 'resume' || entry.type === 'play'),
+    'the user pause is not undone while the host has not answered')
+  await h.message({ type: 'room_state_updated', state: room([wireTrack(1)], { version: 2 }) })
+  await h.timers.advance(16_000)
+  assert.equal(requests().length, 2, 'a request the room already reflects is not retried')
+})
+
+await test('a listener stuck loading the room track is reloaded', async h => {
+  await h.join()
+  const stuck = deferred()
+  h.playGates.push(stuck)
+  await h.message({ type: 'welcome', state: playingRoom(), role: 'listener' })
+  await h.timers.advance(8_000)
+  assert.equal(h.playback.filter(entry => entry.type === 'play').length, 1, 'the first tick only starts the stall clock')
+  await h.timers.advance(8_000)
+  assert.equal(h.playback.filter(entry => entry.type === 'play').length, 2, 'a load stuck for 8 seconds is replaced')
+  stuck.resolve()
+  await flush()
+})
+
 const connectCount = h => h.commands.filter(entry => entry.command === 'lt_connect_ws').length
 
 await test('a socket that stops answering pings is reconnected', async h => {

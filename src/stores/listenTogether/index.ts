@@ -38,6 +38,16 @@ import { trackInfoToLtTrack, ltTrackToTrackInfo, toShareableQueueSnapshot, trust
 import { queueReferences, applyListenTogetherQueueMutation, buildListenTogetherQueueMutationPlan, getLtQueueReference, setLtQueueReference } from './queue'
 import { acceptRoomState, resolveExpectedPosition, resolvePositionSync, resolveSoftSyncRecheckAction, SOFT_SYNC_RECHECK_INTERVAL_MS, updateServerClockOffset } from './playbackSync'
 import { isTerminalReconnectError, MAX_RECONNECT_ATTEMPTS, reconnectDelayMs } from './reconnect'
+import {
+  isMemberRequestSatisfied,
+  pendingMemberRequestAction,
+  roomCurrentStableKey,
+  shouldRefreshListenerState,
+  StallDetector,
+  TRACKED_MEMBER_REQUESTS,
+  WATCHDOG_INTERVAL_MS,
+  type PendingMemberRequest,
+} from './watchdog'
 import { createLogger } from '@/utils/logger'
 
 const log = createLogger('listen-together')
@@ -125,6 +135,11 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
   // 半开连接检测（对齐 Android SocketHealthOwner）：最后一次收到任何消息、最后一次发 ping 的时间
   let _lastSocketMessageAt = 0
   let _pingSentAt = 0
+  // 听众端自检：定时对齐、卡住恢复、静默时拉房态；以及还没被房主处理的成员请求
+  let _watchdogTimer: ReturnType<typeof setInterval> | null = null
+  let _lastWatchdogRefreshAt = 0
+  let _pendingMemberRequest: PendingMemberRequest | null = null
+  const _stallDetector = new StallDetector()
   // 会话代际：leaveRoom 后递增，让在途的延迟回调失效，不再操作播放器
   let _sessionGeneration = 0
   // 出站事件排序字段：实例标识会话内生成一次，序号单调递增（对齐 Android EventFactory）
@@ -264,6 +279,8 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
 
       startHeartbeat()
       setupPlayerWatch()
+      // 自检只对听众生效；房主身份可能在会话中转交，所以建房时也启动
+      startWatchdog()
 
     } catch (e) {
       if (generation !== _sessionGeneration) return
@@ -326,6 +343,7 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
 
       startListenerPing()
       setupPlayerWatch()
+      startWatchdog()
 
     } catch (e) {
       if (generation !== _sessionGeneration) return
@@ -428,6 +446,8 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
     _sessionBaseUrl = null
     _lastSocketMessageAt = 0
     _pingSentAt = 0
+    stopWatchdog()
+    _pendingMemberRequest = null
     _lastRequestedLinkStableKey = null
     _lastRequestedLinkAt = 0
   }
@@ -669,6 +689,10 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
     if (!accepted) return
     roomState.value = accepted
     _lastAppliedRoomVersion = accepted.version
+    if (_pendingMemberRequest
+      && isMemberRequestSatisfied(_pendingMemberRequest.event, accepted, Date.now() + _serverClockOffsetMs)) {
+      _pendingMemberRequest = null
+    }
     if (accepted.settings) liveRoomSettings.value = { ...accepted.settings }
     markSync(causeType, accepted.updatedAt || Date.now())
     if (apply) applyRoomStateToPlayer(accepted, causeType, expectedPositionMs)
@@ -785,13 +809,15 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
     }
   }
 
-  function requestLinkForTrack(track: import('./protocol').ListenTogetherTrack, currentIndex: number) {
+  /** force 用于卡住恢复：同一首歌的上一次请求可能已经丢了，不受 4 秒节流限制 */
+  function requestLinkForTrack(track: import('./protocol').ListenTogetherTrack, currentIndex: number, force = false) {
     if (isController.value || !roomSettings.value.shareAudioLinks || currentIndex < 0) return
     // 房主离线时服务端只会回 "controller offline"，没必要发（对齐 Android）
     if (connectionState.value !== 'connected' || (roomState.value?.roomStatus ?? 'active') !== 'active') return
     const now = Date.now()
     if (
-      _lastRequestedLinkStableKey === track.stableKey
+      !force
+      && _lastRequestedLinkStableKey === track.stableKey
       && now - _lastRequestedLinkAt < LINK_REQUEST_THROTTLE_MS
     ) return
     _lastRequestedLinkStableKey = track.stableKey
@@ -1030,8 +1056,8 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
     }, SOFT_SYNC_RECHECK_INTERVAL_MS)
   }
 
-  // 播放器同步
-  function applyRoomStateToPlayer(state: ListenTogetherRoomState, causeType: string, expectedPositionMs?: number) {
+  // 播放器同步；forceReload 用于卡在加载的同一首歌，换掉那次卡住的加载
+  function applyRoomStateToPlayer(state: ListenTogetherRoomState, causeType: string, expectedPositionMs?: number, forceReload = false) {
     if (state.roomId !== roomId.value || state.version < _lastAppliedRoomVersion) return
     const player = usePlayerStore()
     const queue = [...state.queue]
@@ -1068,7 +1094,7 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
         && !trustedInboundStreamUrls(effectiveLtTrack.channelId, effectiveLtTrack.streamUrls, effectiveLtTrack.streamUrl)
           .includes(player.getCurrentStreamUrl(remoteTrack.id) || '')
       replacePlayerQueue(queue, targetIndex)
-      if (playbackContextChanged || streamChanged) {
+      if (playbackContextChanged || streamChanged || forceReload) {
         _trackSwitchAt = Date.now()
         setSyncRate(null)
         const generation = _sessionGeneration
@@ -1703,8 +1729,106 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
       shuffleEnabled: !!player.shuffleEnabled,
       ...extra,
     }
-    if (type === 'REQUEST_SET_TRACK' || type === 'REQUEST_SET_QUEUE') sendQueueEvent(event)
-    else void sendEvent(event)
+    if (type === 'REQUEST_SET_TRACK' || type === 'REQUEST_SET_QUEUE') {
+      sendQueueEvent(event)
+      return
+    }
+    if (TRACKED_MEMBER_REQUESTS.has(type)) {
+      const now = Date.now()
+      _pendingMemberRequest = { event, createdAt: now, lastSentAt: now, attempts: 1 }
+    }
+    void sendEvent(event)
+  }
+
+  function startWatchdog() {
+    stopWatchdog()
+    _lastWatchdogRefreshAt = 0
+    _stallDetector.reset()
+    const generation = _sessionGeneration
+    _watchdogTimer = setInterval(() => {
+      if (generation === _sessionGeneration) void runWatchdogTick(generation)
+    }, WATCHDOG_INTERVAL_MS)
+  }
+
+  function stopWatchdog() {
+    if (_watchdogTimer) clearInterval(_watchdogTimer)
+    _watchdogTimer = null
+  }
+
+  /**
+   * 听众端每 8 秒自检一次（对齐 Android ListenTogetherListenerWatchdogOwner）。
+   * 漏掉的房态、丢掉的请求和卡住的加载不用等 22–25 秒后的下一次心跳才纠正
+   */
+  async function runWatchdogTick(generation: number) {
+    if (isController.value || connectionState.value !== 'connected' || !roomId.value) return
+    const now = Date.now()
+    const serverNow = now + _serverClockOffsetMs
+    const state = roomState.value
+    let requestPending = false
+    if (_pendingMemberRequest) {
+      const action = pendingMemberRequestAction(_pendingMemberRequest, state, now, serverNow)
+      if (action === 'satisfied' || action === 'expired') {
+        _pendingMemberRequest = null
+      } else {
+        requestPending = true
+        if (action === 'retry') {
+          _pendingMemberRequest = { ..._pendingMemberRequest, lastSentAt: now, attempts: _pendingMemberRequest.attempts + 1 }
+          void sendEvent(_pendingMemberRequest.event)
+        }
+      }
+    }
+    // 自己的请求还在等房主处理时不按房态回放，否则会把用户刚做的操作撤回去
+    if (state && !requestPending && state.roomStatus === 'active') syncListenerToRoom(state, now, serverNow)
+
+    if (!shouldRefreshListenerState(now, _lastSocketMessageAt, _lastWatchdogRefreshAt)) return
+    _lastWatchdogRefreshAt = now
+    const targetRoomId = roomId.value
+    try {
+      const resp = await invoke<ListenTogetherStateResponse>('lt_get_room_state', { baseUrl: activeBaseUrl(), roomId: targetRoomId })
+      if (generation !== _sessionGeneration || !resp.ok || !resp.state) return
+      sampleServerClock(resp.serverNowMs)
+      commitRoomState(resp.state, 'WATCHDOG_REFRESH', resp.expectedPositionMs, !_pendingMemberRequest)
+    } catch (error) {
+      if (generation !== _sessionGeneration) return
+      const message = error instanceof Error ? error.message : String(error)
+      if (isTerminalReconnectError(message)) void closeRoomLocally(message)
+      else log.warn('listener state refresh failed:', message)
+    }
+  }
+
+  function syncListenerToRoom(state: ListenTogetherRoomState, now: number, serverNow: number) {
+    const player = usePlayerStore()
+    const roomKey = roomCurrentStableKey(state) ?? null
+    const currentKey = player.currentTrack ? trackInfoToLtTrack(player.currentTrack).stableKey : null
+    const roomPlaying = state.playback.state === 'playing'
+    const expectedPositionMs = resolveExpectedPosition(state, serverNow)
+    // 房间在播、本地同一首歌却一直在加载：重新加载并强制要一次链接（对齐 Android ListenerStallRecovery）
+    const stalled = roomPlaying && !player.isPlaying && player.isLoadingAudio && !!roomKey && currentKey === roomKey
+    if (_stallDetector.shouldRecover(stalled, roomKey, now)) {
+      log.warn('listener playback stalled, reloading the room track:', roomKey)
+      applyRoomStateToPlayer(state, 'WATCHDOG_STALL', expectedPositionMs, true)
+      const index = state.currentIndex
+      const track = state.track ?? state.queue[index]
+      if (track) requestLinkForTrack(track, index, true)
+      return
+    }
+    if (player.isLoadingAudio || _pendingRemotePlaybackLoads.size > 0) return
+    // 只在确实不一致时回放，免得每次自检都替换队列、打断用户操作的上报
+    const sync = resolvePositionSync({
+      expectedPositionMs,
+      localPositionMs: player.positionMs,
+      desiredPlaying: roomPlaying,
+      isController: false,
+      causeType: 'WATCHDOG',
+    })
+    if (
+      currentKey !== roomKey
+      || player.isPlaying !== roomPlaying
+      || sync.seekTo !== undefined
+      || (sync.rate !== null && _softSyncRate === null)
+    ) {
+      applyRoomStateToPlayer(state, 'WATCHDOG', expectedPositionMs)
+    }
   }
 
   // 心跳
