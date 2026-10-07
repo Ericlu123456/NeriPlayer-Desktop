@@ -200,9 +200,12 @@ const bgImageStyle = computed(() => {
 
 // 对齐 Android：数据变更后短暂延迟，给连续操作留出合并时间
 const DEBOUNCE_SYNC_MS = 5_000
+// 长音频进度播放时每 15 秒写一次：比写入间隔长，连续播放时不同步，暂停或停下后再同步
+const HISTORY_PROGRESS_SETTLE_MS = 30_000
 const PERIODIC_SYNC_MS = 60 * 60 * 1000
 let debounceSyncTimer: ReturnType<typeof setTimeout> | null = null
 let historyBatchedTimer: ReturnType<typeof setTimeout> | null = null
+let historyProgressTimer: ReturnType<typeof setTimeout> | null = null
 let periodicSyncTimer: ReturnType<typeof setInterval> | null = null
 let unlistenPlaylistChanged: UnlistenFn | null = null
 let unlistenCloseRequested: UnlistenFn | null = null
@@ -259,8 +262,9 @@ function triggerSilentSync() {
 }
 
 function scheduleHistorySync(event: Event) {
+  const type = (event as CustomEvent<{ type?: string }>).detail?.type
   // 同步自己写回的历史不需要再同步一次
-  if ((event as CustomEvent<{ type?: string }>).detail?.type === 'sync') return
+  if (type === 'sync') return
   const syncStore = useSyncStore()
 
   if (!(
@@ -270,6 +274,18 @@ function scheduleHistorySync(event: Event) {
 
   const delay = syncFrequencyDelayMs(syncStore.syncFrequency)
   if (delay === 0) {
+    if (type === 'progress') {
+      if (historyProgressTimer) clearTimeout(historyProgressTimer)
+      historyProgressTimer = setTimeout(() => {
+        historyProgressTimer = null
+        triggerSilentSync()
+      }, HISTORY_PROGRESS_SETTLE_MS)
+      return
+    }
+    if (historyProgressTimer) {
+      clearTimeout(historyProgressTimer)
+      historyProgressTimer = null
+    }
     triggerSilentSync()
     return
   }
@@ -451,6 +467,7 @@ onUnmounted(() => {
   if (nowPlayingMotionTimer) clearTimeout(nowPlayingMotionTimer)
   if (debounceSyncTimer) clearTimeout(debounceSyncTimer)
   if (historyBatchedTimer) clearTimeout(historyBatchedTimer)
+  if (historyProgressTimer) clearTimeout(historyProgressTimer)
   if (periodicSyncTimer) clearInterval(periodicSyncTimer)
   likedSongs.stop()
   window.removeEventListener(HISTORY_CHANGED_EVENT, scheduleHistorySync)

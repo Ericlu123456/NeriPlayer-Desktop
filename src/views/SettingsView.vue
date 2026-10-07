@@ -64,7 +64,7 @@ const {
   normalizeVolume, audioOutputDevice,
   fadeIn, fadeInDuration, fadeOutDuration,
   crossfadeNext, crossfadeInDuration, crossfadeOutDuration,
-  keepProgress, keepPlaybackMode,
+  keepProgress, rememberLongFormProgress, keepPlaybackMode,
   showTranslation, lyricBlur, lyricBlurAmount,
   cloudMusicOffset, qqMusicOffset,
   advancedLyrics, dynamicBackground, dynamicColor, audioReactive,
@@ -1581,6 +1581,15 @@ useEscapeClose(
           <div class="setting-desc">{{ t('settings.keep_progress_desc') }}</div>
         </div>
         <label class="m3-switch"><input type="checkbox" v-model="keepProgress" /><span class="track"><span class="thumb"><span v-if="keepProgress" class="material-symbols-rounded" style="font-size: 14px">check</span></span></span></label>
+      </div>
+
+      <div class="setting-card">
+        <div class="setting-icon-wrap"><span class="material-symbols-rounded">bookmark</span></div>
+        <div class="setting-info">
+          <div class="setting-title">{{ t('settings.remember_long_form_progress') }}</div>
+          <div class="setting-desc">{{ t('settings.remember_long_form_progress_desc') }}</div>
+        </div>
+        <label class="m3-switch"><input type="checkbox" v-model="rememberLongFormProgress" /><span class="track"><span class="thumb"><span v-if="rememberLongFormProgress" class="material-symbols-rounded" style="font-size: 14px">check</span></span></span></label>
       </div>
 
       <div class="setting-card">

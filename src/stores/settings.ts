@@ -39,6 +39,7 @@ export interface AppSettings {
   crossfadeInDuration: number
   crossfadeOutDuration: number
   keepProgress: boolean
+  rememberLongFormProgress: boolean
   keepPlaybackMode: boolean
   showTranslation: boolean
   lyricBlur: boolean
@@ -150,6 +151,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   crossfadeInDuration: 500,
   crossfadeOutDuration: 500,
   keepProgress: true,
+  rememberLongFormProgress: true,
   keepPlaybackMode: true,
   showTranslation: true,
   lyricBlur: true,
@@ -489,6 +491,7 @@ export const useSettingsStore = defineStore('settings', () => {
   const crossfadeInDuration = ref(initial.crossfadeInDuration)
   const crossfadeOutDuration = ref(initial.crossfadeOutDuration)
   const keepProgress = ref(initial.keepProgress)
+  const rememberLongFormProgress = ref(initial.rememberLongFormProgress)
   const keepPlaybackMode = ref(initial.keepPlaybackMode)
   const showTranslation = ref(initial.showTranslation)
   const lyricBlur = ref(initial.lyricBlur)
@@ -548,7 +551,7 @@ export const useSettingsStore = defineStore('settings', () => {
     showAudioSpec, lyricFontScale, crossfade, normalizeVolume, fadeIn,
     showAudioBitrate, showAudioFormat, showAudioChannels, showAudioSampleRate, showAudioBitDepth,
     fadeInDuration, fadeOutDuration, crossfadeNext, crossfadeInDuration,
-    crossfadeOutDuration, keepProgress, keepPlaybackMode, showTranslation,
+    crossfadeOutDuration, keepProgress, rememberLongFormProgress, keepPlaybackMode, showTranslation,
     lyricBlur, lyricBlurAmount, cloudMusicOffset, qqMusicOffset, coverStyle,
     advancedLyrics, dynamicBackground, dynamicColor, audioReactive, coverBlurBg,
     coverBlurAmount, coverBlurDarken, neteaseQuality, qqMusicQuality,
@@ -644,7 +647,7 @@ export const useSettingsStore = defineStore('settings', () => {
     showAudioBitrate, showAudioFormat, showAudioChannels, showAudioSampleRate, showAudioBitDepth,
     crossfade, normalizeVolume, fadeIn, fadeInDuration, fadeOutDuration,
     crossfadeNext, crossfadeInDuration, crossfadeOutDuration,
-    keepProgress, keepPlaybackMode, showTranslation, lyricBlur, lyricBlurAmount,
+    keepProgress, rememberLongFormProgress, keepPlaybackMode, showTranslation, lyricBlur, lyricBlurAmount,
     cloudMusicOffset, qqMusicOffset, advancedLyrics, dynamicBackground,
     dynamicColor, audioReactive, coverBlurBg, coverBlurAmount, coverBlurDarken,
     neteaseQuality, qqMusicQuality, youtubeQuality, biliQuality, bypassProxy,

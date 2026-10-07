@@ -49,6 +49,7 @@ const display = await load(await readFile(new URL('modules/playback/audioQuality
 const metadataText = await readFile(new URL('modules/playback/playbackAudioInfo.ts', root), 'utf8')
 const localInfoText = await readFile(new URL('modules/playback/localAudioInfo.ts', root), 'utf8')
 const failure = await load(await readFile(new URL('modules/playback/playbackFailure.ts', root), 'utf8'))
+const longForm = await load(await readFile(new URL('modules/playback/longFormProgress.ts', root), 'utf8'))
 const deferred = () => {
   let resolve, reject
   const promise = new Promise((yes, no) => { resolve = yes; reject = no })
@@ -78,7 +79,7 @@ async function runtime(options = {}) {
     if (command === 'find_netease_local_sources') return [{ id: 'local:fallback', title: 'Fallback', artist: 'Artist', album: '', duration_ms: 180000, url: 'C:/Music/fallback.flac' }]
     if (command === 'play_cached_audio_candidates') return options.cached ? { durationMs: 180000, source: 'netease', qualityKey: 'hires' } : null
     if (command === 'play_url_streaming' && options.streamingError) throw new Error('streaming unavailable')
-    if (['play_url_streaming', 'play_url_fast', 'crossfade_url_streaming', 'play_file', 'crossfade_file'].includes(command)) return 180000
+    if (['play_url_streaming', 'play_url_fast', 'crossfade_url_streaming', 'play_file', 'crossfade_file'].includes(command)) return options.durationMs ?? 180000
     if (command === 'release_audio_file') return true
     return undefined
   }
@@ -96,11 +97,12 @@ async function runtime(options = {}) {
     crossfadeInDuration: 100, crossfadeOutDuration: 100, fadeInDuration: 100, fadeOutDuration: 100,
     neteaseQuality: 'hires', qqMusicQuality: 'high', biliQuality: 'high', youtubeQuality: 'high',
     neteaseAutoSourceSwitch: false, neteaseLocalSourceFallback: !!options.localFallback,
+    rememberLongFormProgress: options.rememberLongForm !== false,
   })
   const loaded = await load(source, {
     vue, pinia, '@tauri-apps/api/core': core,
     '@tauri-apps/api/event': { listen: async (name, callback) => { events.set(name, callback); return () => events.delete(name) } },
-    './history': { useHistoryStore: () => ({ record: () => {} }) },
+    './history': { useHistoryStore: () => options.history ?? { record: () => {}, rememberedPosition: () => 0, updateResumePosition() {} } },
     './toast': { useToastStore: () => ({ error: message => options.toasts?.push(message) }) },
     './settings': { useSettingsStore: () => settings, MIN_MEDIA_CACHE_SIZE_MB: 128, MAX_MEDIA_CACHE_SIZE_MB: 16384 },
     './download': { useDownloadStore: () => ({ getDownloadedTrack: () => options.downloaded ? { filePath: 'C:/Music/download.flac', durationMs: 180000 } : null }) },
@@ -110,9 +112,13 @@ async function runtime(options = {}) {
     '@/modules/playback/playbackFailure': failure,
     '@/modules/playback/playedQualityMemory': { rememberPlayedQuality() {}, recallPlayedQuality: async () => null },
     '@/modules/playback/youtubeSeekRefreshPolicy': { shouldRefreshUrlBeforeSeek: () => false, shouldRefreshUrlBeforeResume: () => false },
-    '@/modules/playback/playbackPrefetch': { playbackPrefetchManager: { replacePlaybackDemand() {}, take: () => null, prefetchWindow() {} } },
+    '@/modules/playback/playbackPrefetch': {
+      playbackPrefetchManager: { replacePlaybackDemand() {}, take: () => null, prefetchWindow() {} },
+      genericUrlPrefetchTtlMs: () => 90_000,
+    },
     '@/modules/playback/playbackPolicy': { ...policy, PlaybackStartupWatchdog: class { cancel() {} schedule() {} } },
     '@/modules/playback/playbackQueue': queue,
+    '@/modules/playback/longFormProgress': longForm,
     '@/modules/playback/playbackRequest': request,
     '@/modules/playback/playerState': state,
     '@/utils/logger': { createLogger: () => ({ info() {}, warn() {}, error() {} }) },
@@ -337,6 +343,37 @@ await run('native property loader accepts fractional kbps and trimmed codec with
   await module.loadPlaybackAudioInfo(42, () => true, info => updates.push(info))
   assert.deepEqual(calls, [{ command: 'get_playback_audio_info', args: { requestGeneration: 42 } }])
   assert.deepEqual(updates, [{ bitrate: 193.5, codec: 'Opus' }])
+})
+
+await run('a picked long-form track resumes where it was left and navigation starts over', async () => {
+  const writes = []
+  const history = { record() {}, rememberedPosition: () => 600_000, updateResumePosition: (item, position) => writes.push([item.id, position]) }
+  const toasts = []
+  const r = await runtime({
+    history,
+    toasts,
+    durationMs: 3_600_000,
+    resolve: args => ({ url: `https://audio.example/${args.songId}.mp3`, bitrate: 320000, format: 'mp3', level: 'exhigh', duration_ms: 3_600_000 }),
+  })
+  const episode = id => ({ ...track(id), durationMs: 3_600_000 })
+  const starts = () => r.calls.filter(call => call.command === 'play_url_streaming').map(call => call.args.startPositionMs)
+  r.store.playAll([episode('301'), episode('302')]); await flush()
+  assert.deepEqual(toasts, [])
+  assert.deepEqual(starts(), [600_000])
+  await r.store.next(); await flush()
+  assert.deepEqual(starts(), [600_000, 0], 'next must not jump into a remembered position')
+  assert.deepEqual(writes, [['netease:301', 600_000]], 'switching away remembers where the previous episode was left')
+})
+
+await run('the remembered position is ignored when the setting is off or the track is short', async () => {
+  const history = { record() {}, rememberedPosition: () => 600_000, updateResumePosition() {} }
+  const off = await runtime({ history, rememberLongForm: false })
+  await off.store.play({ ...track('311'), durationMs: 3_600_000 }); await flush()
+  const short = await runtime({ history })
+  await short.store.play({ ...track('312'), durationMs: 14 * 60_000 }); await flush()
+  for (const r of [off, short]) {
+    assert.equal(r.calls.find(call => call.command === 'play_url_streaming').args.startPositionMs, 0)
+  }
 })
 
 if (failures) process.exitCode = 1

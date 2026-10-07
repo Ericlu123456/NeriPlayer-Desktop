@@ -597,6 +597,8 @@
     "crossfade_out_duration": "交叉淡出时长",
     "keep_progress": "记住播放进度",
     "keep_progress_desc": "下次打开时恢复上次播放位置",
+    "remember_long_form_progress": "记忆长视频播放进度",
+    "remember_long_form_progress_desc": "同步 15 分钟及以上内容的播放位置，并在其他设备续播",
     "keep_mode": "记住播放模式",
     "keep_mode_desc": "保持循环/随机等播放模式",
     "lyrics": "歌词",

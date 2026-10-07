@@ -14,6 +14,8 @@ const log = createLogger('history')
 export interface PlayedEntry {
   track: TrackInfo
   playedAt: number
+  /** 长音频续播位置；undefined 表示本机还不知道（升级前的条目），同步时沿用存档里的值 */
+  resumePositionMs?: number
 }
 
 export interface HistoryDeletion {
@@ -25,6 +27,13 @@ interface BackendHistoryEntry {
   track?: Record<string, unknown>
   playedAt?: number
   played_at?: number
+  resumePositionMs?: number | null
+  resume_position_ms?: number | null
+}
+
+function resumePosition(raw: any): number | undefined {
+  const value = raw?.resumePositionMs ?? raw?.resume_position_ms
+  return typeof value === 'number' && Number.isFinite(value) ? Math.max(0, Math.round(value)) : undefined
 }
 
 interface BackendHistoryDeletion {
@@ -154,7 +163,7 @@ function toBackendTrack(track: TrackInfo) {
   }
 }
 
-function emitHistoryChanged(type: 'record' | 'remove' | 'clear' | 'sync') {
+function emitHistoryChanged(type: 'record' | 'progress' | 'remove' | 'clear' | 'sync') {
   if (typeof window === 'undefined') return
   window.dispatchEvent(new CustomEvent(HISTORY_CHANGED_EVENT, {
     detail: { type, at: Date.now() },
@@ -208,6 +217,7 @@ export const useHistoryStore = defineStore('history', () => {
           .map((entry: any) => ({
             track: normalizeTrack(entry?.track),
             playedAt: Number(entry?.playedAt ?? entry?.played_at ?? 0),
+            resumePositionMs: resumePosition(entry),
           }))
           .filter((entry: PlayedEntry) => entry.track.id && entry.playedAt > 0))
         : []
@@ -230,16 +240,41 @@ export const useHistoryStore = defineStore('history', () => {
     localMutationEpoch++
   }
 
+  /** 记一次播放；已记住的续播位置保留（对齐 Android record 只合并曲目信息） */
   function record(track: TrackInfo) {
     markLocalMutation()
     const playedAt = Date.now()
     const key = historyEntryKey(track)
     const idx = entries.value.findIndex(entry => historyEntryKey(entry.track) === key)
+    const resumePositionMs = idx >= 0 ? entries.value[idx].resumePositionMs : undefined
     if (idx >= 0) entries.value.splice(idx, 1)
     deletions.value = deletions.value.filter(deletion => historyEntryKey(deletion.track) !== key)
-    entries.value.unshift({ track, playedAt })
+    entries.value.unshift({ track, playedAt, resumePositionMs })
     persist('record_play_history', { track, playedAt })
     emitHistoryChanged('record')
+  }
+
+  function rememberedPosition(track: TrackInfo): number {
+    const key = historyEntryKey(track)
+    return entries.value.find(entry => historyEntryKey(entry.track) === key)?.resumePositionMs ?? 0
+  }
+
+  /** 记下长音频的续播位置，条目移到最前（对齐 Android updateRememberedPlaybackPosition） */
+  function updateResumePosition(track: TrackInfo, positionMs: number) {
+    const resumePositionMs = Math.max(0, Math.round(positionMs))
+    const now = Date.now()
+    const key = historyEntryKey(track)
+    const idx = entries.value.findIndex(entry => historyEntryKey(entry.track) === key)
+    const existing = idx >= 0 ? entries.value[idx] : undefined
+    if (existing && existing.playedAt > now) return
+    if (!existing && resumePositionMs === 0) return
+    if (existing?.resumePositionMs === resumePositionMs) return
+    markLocalMutation()
+    if (idx >= 0) entries.value.splice(idx, 1)
+    deletions.value = deletions.value.filter(deletion => historyEntryKey(deletion.track) !== key)
+    entries.value.unshift({ track, playedAt: now, resumePositionMs })
+    persist('record_play_history', { track, playedAt: now, resumePositionMs })
+    emitHistoryChanged('progress')
   }
 
   /** 按 historyEntryKey 删除单条 */
@@ -277,6 +312,7 @@ export const useHistoryStore = defineStore('history', () => {
       entries: entries.value.map(entry => ({
         track: toBackendTrack(entry.track),
         playedAt: entry.playedAt,
+        resumePositionMs: entry.resumePositionMs ?? null,
       })),
       deletions: deletions.value.map(deletion => ({
         track: toBackendTrack(deletion.track),
@@ -329,6 +365,7 @@ export const useHistoryStore = defineStore('history', () => {
       .map(entry => ({
         track: normalizeTrack(entry.track),
         playedAt: Number(entry.playedAt ?? entry.played_at ?? 0),
+        resumePositionMs: resumePosition(entry),
       }))
       .filter(entry => entry.track.id && entry.playedAt > 0)
       .sort((left, right) => right.playedAt - left.playedAt)
@@ -343,7 +380,11 @@ export const useHistoryStore = defineStore('history', () => {
       .sort((left, right) => right.deletedAt - left.deletedAt))
     persist('replace_play_history', {
       history: {
-        entries: entries.value.map(entry => ({ track: entry.track, playedAt: Math.round(entry.playedAt) })),
+        entries: entries.value.map(entry => ({
+          track: entry.track,
+          playedAt: Math.round(entry.playedAt),
+          resumePositionMs: entry.resumePositionMs ?? null,
+        })),
         deletions: deletions.value.map(deletion => ({
           track: deletion.track,
           deletedAt: Math.round(deletion.deletedAt),
@@ -380,6 +421,8 @@ export const useHistoryStore = defineStore('history', () => {
     entries,
     deletions,
     record,
+    rememberedPosition,
+    updateResumePosition,
     remove,
     clear,
     getSyncSnapshot,

@@ -57,6 +57,8 @@ pub struct AppSettings {
     #[serde(deserialize_with = "lenient_i32")]
     pub crossfade_out_duration: i32,
     pub keep_progress: bool,
+    /// 15 分钟以上内容记住播放位置并随同步续播（对齐 Android remember_long_form_playback_progress）
+    pub remember_long_form_progress: bool,
     pub keep_playback_mode: bool,
     pub show_translation: bool,
     pub lyric_blur: bool,
@@ -173,6 +175,7 @@ impl Default for AppSettings {
             crossfade_in_duration: 500,
             crossfade_out_duration: 500,
             keep_progress: true,
+            remember_long_form_progress: true,
             keep_playback_mode: true,
             show_translation: true,
             lyric_blur: true,

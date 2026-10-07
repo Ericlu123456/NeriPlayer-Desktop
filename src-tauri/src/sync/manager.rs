@@ -29,6 +29,9 @@ async fn acquire_sync_lock() -> MutexGuard<'static, ()> {
 pub struct SyncHistoryEntry {
     pub track: TrackInfo,
     pub played_at: i64,
+    /// 长音频续播位置；None 表示本机还不知道
+    #[serde(default)]
+    pub resume_position_ms: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -230,12 +233,11 @@ pub fn build_local_sync_data(
         ))
     })?;
     let mut recent_plays = history_entries
-        .map(|entries| history_entries_to_sync(entries, &device_id))
+        .map(|entries| history_entries_to_sync(entries, &device_id, &stored.recent_plays))
         .unwrap_or_else(|| stored.recent_plays.clone());
     let mut recent_play_deletions = history_deletions
         .map(|deletions| history_deletions_to_sync(deletions, &device_id))
         .unwrap_or_else(|| stored.recent_play_deletions.clone());
-    preserve_recent_progress(&mut recent_plays, &stored.recent_plays);
     recent_play_deletions = merge::merge_recent_play_deletions(&recent_play_deletions, &stored.recent_play_deletions);
     recent_plays = merge::merge_recent_plays(&recent_plays, &stored.recent_plays, &recent_play_deletions);
     let stats = stats.unwrap_or_default();
@@ -261,30 +263,41 @@ pub fn build_local_sync_data(
     })
 }
 
-fn history_entries_to_sync(entries: &[SyncHistoryEntry], device_id: &str) -> Vec<SyncRecentPlay> {
+/// 前端历史转成同步条目
+///
+/// 与存档里同一次播放（同曲目同时间）对应的条目沿用存档的进度和设备；本机还不知道进度的
+/// 条目（升级前留下的）沿用存档里该曲目最新的进度，不能当成 0 盖掉其它设备记住的位置
+fn history_entries_to_sync(
+    entries: &[SyncHistoryEntry],
+    device_id: &str,
+    stored: &[SyncRecentPlay],
+) -> Vec<SyncRecentPlay> {
     entries
         .iter()
         .filter(|entry| entry.track.source != TrackSource::Local && !entry.track.id.is_empty())
         .map(|entry| {
             let song = track_to_sync_song(&entry.track);
+            let key = song.identity().stable_key();
+            let same_song = |previous: &&SyncRecentPlay| previous.song.identity().stable_key() == key;
+            let same_play = stored.iter().filter(same_song).find(|previous| previous.played_at == entry.played_at);
+            let resume_position_ms = match (same_play, entry.resume_position_ms) {
+                (Some(previous), _) => previous.resume_position_ms,
+                (None, Some(position)) => position.max(0),
+                (None, None) => stored
+                    .iter()
+                    .filter(same_song)
+                    .max_by_key(|previous| previous.played_at)
+                    .map_or(0, |previous| previous.resume_position_ms),
+            };
             SyncRecentPlay {
                 song_id: song.id.clone(),
                 song,
                 played_at: entry.played_at.max(0),
-                device_id: device_id.to_string(),
-                resume_position_ms: 0,
+                device_id: same_play.map_or_else(|| device_id.to_string(), |previous| previous.device_id.clone()),
+                resume_position_ms,
             }
         })
         .collect()
-}
-
-fn preserve_recent_progress(entries: &mut [SyncRecentPlay], stored: &[SyncRecentPlay]) {
-    for entry in entries {
-        if let Some(previous) = stored.iter().find(|previous| previous.played_at == entry.played_at && previous.song.identity().stable_key() == entry.song.identity().stable_key()) {
-            entry.resume_position_ms = previous.resume_position_ms;
-            entry.device_id = previous.device_id.clone();
-        }
-    }
 }
 
 fn history_deletions_to_sync(
@@ -314,6 +327,7 @@ fn with_history(mut result: SyncResult, data: &SyncData) -> SyncResult {
         .map(|entry| SyncHistoryEntry {
             track: sync_song_to_track(&entry.song),
             played_at: entry.played_at,
+            resume_position_ms: Some(entry.resume_position_ms.max(0)),
         })
         .collect();
     result.history = Some(serde_json::json!({
@@ -1078,12 +1092,43 @@ mod tests {
     }
 
     #[test]
-    fn rebuilding_frontend_history_preserves_remote_resume_and_device_for_same_play() {
-        let remote=SyncRecentPlay{song_id:"1".into(),song:SyncSong{id:"1".into(),..Default::default()},played_at:100,device_id:"android".into(),resume_position_ms:2345};
-        let mut entries=vec![SyncRecentPlay{device_id:"desktop".into(),resume_position_ms:0,..remote.clone()}];
-        preserve_recent_progress(&mut entries,std::slice::from_ref(&remote));
-        assert_eq!(entries[0].resume_position_ms,2345);assert_eq!(entries[0].device_id,"android");
-        entries[0].played_at=101;entries[0].resume_position_ms=0;preserve_recent_progress(&mut entries,&[remote]);assert_eq!(entries[0].resume_position_ms,0);
+    fn rebuilding_frontend_history_keeps_remote_resume_until_the_desktop_knows_it() {
+        let track = TrackInfo {
+            id: "netease:1".into(),
+            title: "Episode".into(),
+            artist: String::new(),
+            album: String::new(),
+            duration_ms: 1_800_000,
+            source: TrackSource::Netease,
+            url: String::new(),
+            cover_url: None,
+            added_at: 0,
+            sync_payload: None,
+            playlist_key: None,
+        };
+        let song = track_to_sync_song(&track);
+        let remote = SyncRecentPlay {
+            song_id: song.id.clone(),
+            song,
+            played_at: 100,
+            device_id: "android".into(),
+            resume_position_ms: 600_000,
+        };
+        let stored = std::slice::from_ref(&remote);
+        let entry = |played_at, resume_position_ms| SyncHistoryEntry { track: track.clone(), played_at, resume_position_ms };
+
+        let same_play = history_entries_to_sync(&[entry(100, Some(0))], "desktop", stored);
+        assert_eq!((same_play[0].resume_position_ms, same_play[0].device_id.as_str()), (600_000, "android"));
+
+        let unknown = history_entries_to_sync(&[entry(200, None)], "desktop", stored);
+        assert_eq!(
+            (unknown[0].resume_position_ms, unknown[0].device_id.as_str()),
+            (600_000, "desktop"),
+            "a replay recorded before the desktop knew the position must not erase it"
+        );
+
+        let reset = history_entries_to_sync(&[entry(200, Some(0))], "desktop", stored);
+        assert_eq!(reset[0].resume_position_ms, 0, "a position the desktop reset wins on recency");
     }
 
     async fn mock_github_server(

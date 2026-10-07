@@ -107,9 +107,11 @@ pub async fn save_playback_state(state: playback_queue::PlaybackStateInput) -> A
 }
 
 #[tauri::command]
-pub async fn record_play_history(track: Value, played_at: i64) -> AppResult<()> {
+pub async fn record_play_history(track: Value, played_at: i64, resume_position_ms: Option<i64>) -> AppResult<()> {
     blocking(move |database| {
-        database.write(|transaction| play_history::record(transaction, &track, played_at).map(|_| ()))
+        database.write(|transaction| {
+            play_history::record(transaction, &track, played_at, resume_position_ms).map(|_| ())
+        })
     })
     .await
 }

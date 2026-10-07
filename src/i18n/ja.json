@@ -597,6 +597,8 @@
     "crossfade_out_duration": "クロスフェードアウト時間",
     "keep_progress": "進行状況を記憶",
     "keep_progress_desc": "再起動時に前回の位置を復元",
+    "remember_long_form_progress": "長い動画の再生位置を記憶",
+    "remember_long_form_progress_desc": "15 分以上のコンテンツの再生位置を同期し、他のデバイスで続きから再生",
     "keep_mode": "再生モードを記憶",
     "keep_mode_desc": "リピート/シャッフルモードを保持",
     "lyrics": "歌詞",

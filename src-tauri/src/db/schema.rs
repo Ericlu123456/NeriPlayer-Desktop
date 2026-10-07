@@ -7,9 +7,9 @@ use rusqlite::Connection;
 
 use crate::error::{AppError, AppResult};
 
-pub const SCHEMA_VERSION: i32 = 2;
+pub const SCHEMA_VERSION: i32 = 3;
 
-const MIGRATIONS: &[&str] = &[V1, V2];
+const MIGRATIONS: &[&str] = &[V1, V2, V3];
 
 const V1: &str = r#"
 CREATE TABLE migration_metadata (
@@ -258,6 +258,11 @@ CREATE INDEX index_cache_entry_saved_at ON cache_entry(bucket, saved_at_ms);
 const V2: &str = r#"
 ALTER TABLE play_history RENAME COLUMN track_id TO identity_key;
 ALTER TABLE play_history_deletion RENAME COLUMN track_id TO identity_key;
+"#;
+
+// 长音频续播位置（对齐 Android resume_position_ms）；NULL 表示本机还不知道，同步时沿用存档里的值
+const V3: &str = r#"
+ALTER TABLE play_history ADD COLUMN resume_position_ms INTEGER;
 "#;
 
 pub fn migrate(connection: &Connection) -> AppResult<()> {

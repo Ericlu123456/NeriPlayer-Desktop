@@ -18,6 +18,9 @@ pub(crate) const IDENTITY_KEY_MIGRATION: &str = "migration.play_history_identity
 pub struct HistoryEntry {
     pub track: Value,
     pub played_at: i64,
+    /// 长音频续播位置；None 表示本机还不知道（升级前的条目）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume_position_ms: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -39,13 +42,14 @@ pub struct PlayHistory {
 pub fn load_from(connection: &Connection) -> AppResult<PlayHistory> {
     let entries = connection
         .prepare(
-            "SELECT track_payload_json, played_at FROM play_history
+            "SELECT track_payload_json, played_at, resume_position_ms FROM play_history
              ORDER BY played_at DESC, rowid DESC",
         )?
         .query_and_then([], |row| -> AppResult<HistoryEntry> {
             Ok(HistoryEntry {
                 track: serde_json::from_str(&row.get::<_, String>(0)?)?,
                 played_at: row.get(1)?,
+                resume_position_ms: row.get(2)?,
             })
         })?
         .collect::<AppResult<Vec<_>>>()?;
@@ -76,13 +80,33 @@ pub fn identity_key(track: &Value) -> Option<String> {
 }
 
 /// 记录一次播放：同一曲目只保留最新一条，并撤销它的删除记录
-pub fn record(transaction: &Transaction<'_>, track: &Value, played_at: i64) -> AppResult<bool> {
+///
+/// 没给续播位置时保留原条目的位置（对齐 Android record 只合并曲目信息）
+pub fn record(
+    transaction: &Transaction<'_>,
+    track: &Value,
+    played_at: i64,
+    resume_position_ms: Option<i64>,
+) -> AppResult<bool> {
     let Some(key) = identity_key(track) else { return Ok(false) };
     if played_at <= 0 {
         return Ok(false);
     }
+    let resume_position_ms = match resume_position_ms {
+        Some(position) => Some(position.max(0)),
+        None => transaction
+            .query_row(
+                "SELECT resume_position_ms FROM play_history WHERE identity_key = ?1",
+                [&key],
+                |row| row.get::<_, Option<i64>>(0),
+            )
+            .or_else(|error| match error {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                error => Err(error),
+            })?,
+    };
     transaction.execute("DELETE FROM play_history_deletion WHERE identity_key = ?1", [&key])?;
-    insert_entry(transaction, &key, track, played_at)?;
+    insert_entry(transaction, &key, track, played_at, resume_position_ms)?;
     Ok(true)
 }
 
@@ -128,7 +152,7 @@ pub fn replace(transaction: &Transaction<'_>, history: &PlayHistory) -> AppResul
     for entry in history.entries.iter().rev() {
         if let Some(key) = identity_key(&entry.track) {
             if entry.played_at > 0 {
-                insert_entry(transaction, &key, &entry.track, entry.played_at)?;
+                insert_entry(transaction, &key, &entry.track, entry.played_at, entry.resume_position_ms)?;
             }
         }
     }
@@ -170,15 +194,22 @@ pub(crate) fn adopt_identity_keys_once(transaction: &Transaction<'_>, _directory
     Ok(Vec::new())
 }
 
-fn insert_entry(transaction: &Transaction<'_>, key: &str, track: &Value, played_at: i64) -> AppResult<()> {
+fn insert_entry(
+    transaction: &Transaction<'_>,
+    key: &str,
+    track: &Value,
+    played_at: i64,
+    resume_position_ms: Option<i64>,
+) -> AppResult<()> {
     transaction.execute("DELETE FROM play_history WHERE identity_key = ?1", [key])?;
     transaction.execute(
-        "INSERT INTO play_history (identity_key, played_at, name, artist, album, duration_ms,
-             cover_url, source, track_payload_json)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        "INSERT INTO play_history (identity_key, played_at, resume_position_ms, name, artist, album,
+             duration_ms, cover_url, source, track_payload_json)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         params![
             key,
             played_at,
+            resume_position_ms.map(|position| position.max(0)),
             text(track, &["title"]).unwrap_or_default(),
             text(track, &["artist"]).unwrap_or_default(),
             text(track, &["album"]).unwrap_or_default(),
@@ -252,9 +283,9 @@ mod tests {
         let database = UserDatabase::open_in_memory().unwrap();
         database
             .write(|transaction| {
-                record(transaction, &track("netease:1"), 10)?;
-                record(transaction, &track("netease:2"), 20)?;
-                record(transaction, &track("netease:1"), 30)?;
+                record(transaction, &track("netease:1"), 10, None)?;
+                record(transaction, &track("netease:2"), 20, None)?;
+                record(transaction, &track("netease:1"), 30, None)?;
                 Ok(())
             })
             .unwrap();
@@ -273,10 +304,10 @@ mod tests {
         payload_page["syncPayload"] = json!({"subAudioId": 3});
         database
             .write(|transaction| {
-                record(transaction, &page("1"), 10)?;
-                record(transaction, &page("2"), 20)?;
-                record(transaction, &payload_page, 30)?;
-                record(transaction, &page("1"), 40)?;
+                record(transaction, &page("1"), 10, None)?;
+                record(transaction, &page("2"), 20, None)?;
+                record(transaction, &payload_page, 30, None)?;
+                record(transaction, &page("1"), 40, None)?;
                 assert!(remove(transaction, "bilibili:BV1xx#2", 50)?);
                 Ok(())
             })
@@ -296,12 +327,12 @@ mod tests {
         let database = UserDatabase::open_in_memory().unwrap();
         database
             .write(|transaction| {
-                record(transaction, &track("a"), 10)?;
-                record(transaction, &track("b"), 20)?;
+                record(transaction, &track("a"), 10, None)?;
+                record(transaction, &track("b"), 20, None)?;
                 assert!(remove(transaction, "a", 30)?);
                 assert!(!remove(transaction, "missing", 31)?);
                 assert!(clear(transaction, 40)?);
-                record(transaction, &track("b"), 50)?;
+                record(transaction, &track("b"), 50, None)?;
                 Ok(())
             })
             .unwrap();
@@ -317,7 +348,7 @@ mod tests {
     fn history_and_deletions_are_not_capped() {
         let database = UserDatabase::open_in_memory().unwrap();
         let entries: Vec<HistoryEntry> = (0..1502)
-            .map(|index| HistoryEntry { track: track(&format!("t{index}")), played_at: 5000 - index })
+            .map(|index| HistoryEntry { track: track(&format!("t{index}")), played_at: 5000 - index, resume_position_ms: None })
             .collect();
         let history = PlayHistory {
             entries,
@@ -342,10 +373,10 @@ mod tests {
         older["title"] = json!("old");
         let history = PlayHistory {
             entries: vec![
-                HistoryEntry { track: track("netease:1"), played_at: 30 },
-                HistoryEntry { track: page("1"), played_at: 20 },
-                HistoryEntry { track: older, played_at: 10 },
-                HistoryEntry { track: page("2"), played_at: 5 },
+                HistoryEntry { track: track("netease:1"), played_at: 30, resume_position_ms: None },
+                HistoryEntry { track: page("1"), played_at: 20, resume_position_ms: Some(7) },
+                HistoryEntry { track: older, played_at: 10, resume_position_ms: None },
+                HistoryEntry { track: page("2"), played_at: 5, resume_position_ms: None },
             ],
             deletions: Vec::new(),
         };
@@ -353,6 +384,27 @@ mod tests {
         let restored = database.read(load_from).unwrap();
         let titles: Vec<&str> = restored.entries.iter().map(|entry| entry.track["title"].as_str().unwrap()).collect();
         assert_eq!(titles, ["Song netease:1", "P 1", "P 2"]);
+        assert_eq!(restored.entries[1].resume_position_ms, Some(7));
+        assert_eq!(restored.entries[0].resume_position_ms, None);
+    }
+
+    #[test]
+    fn record_keeps_the_resume_position_unless_given_one() {
+        let database = UserDatabase::open_in_memory().unwrap();
+        database
+            .write(|transaction| {
+                record(transaction, &track("netease:1"), 10, None)?;
+                record(transaction, &track("netease:2"), 15, Some(1_000))?;
+                record(transaction, &track("netease:2"), 20, None)?;
+                Ok(())
+            })
+            .unwrap();
+        let history = database.read(load_from).unwrap();
+        assert_eq!(history.entries[0].resume_position_ms, Some(1_000), "replaying keeps the remembered position");
+        assert_eq!(history.entries[1].resume_position_ms, None, "an entry without a known position stays unknown");
+
+        database.write(|transaction| record(transaction, &track("netease:2"), 30, Some(0)).map(|_| ())).unwrap();
+        assert_eq!(database.read(load_from).unwrap().entries[0].resume_position_ms, Some(0));
     }
 
     #[test]
@@ -378,7 +430,7 @@ mod tests {
         assert!(crate::db::legacy::run_once(&database, directory.path(), IDENTITY_KEY_MIGRATION, adopt_identity_keys_once).unwrap());
         database
             .write(|transaction| {
-                record(transaction, &page("7"), 40)?;
+                record(transaction, &page("7"), 40, None)?;
                 assert!(remove(transaction, "netease:1", 50)?);
                 Ok(())
             })

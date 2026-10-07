@@ -356,5 +356,42 @@ await databaseRegression('database mode replaces history only for the current sy
   assert.deepEqual(args.history.entries.map(item => [item.track.id, item.playedAt]), [['netease:cloud', 1_500]])
 })
 
+await databaseRegression('long-form positions survive replays and only change when they move', async store => {
+  const episode = track('netease:episode')
+  now = 2_000
+  store.updateResumePosition(episode, 600_000)
+  assert.equal(store.rememberedPosition(episode), 600_000)
+  assert.equal(store.entries[0].track.id, 'netease:episode')
+  assert.ok(events.includes('progress'))
+  now = 3_000
+  store.record(track('netease:other'))
+  now = 4_000
+  store.record(episode)
+  assert.equal(store.rememberedPosition(episode), 600_000, 'replaying keeps the remembered position')
+  assert.equal(store.entries[0].playedAt, 4_000)
+  persisted.length = 0
+  store.updateResumePosition(episode, 600_000)
+  assert.equal(persisted.length, 0, 'an unchanged position is not rewritten')
+  now = 5_000
+  store.updateResumePosition(episode, 0)
+  assert.deepEqual(persisted, [['record_play_history', { track: episode, playedAt: 5_000, resumePositionMs: 0 }]])
+  store.updateResumePosition(track('netease:never-played'), 0)
+  assert.ok(!store.entries.some(item => item.track.id === 'netease:never-played'), 'clearing a position never adds an entry')
+  const snapshot = store.getSyncSnapshot()
+  assert.equal(snapshot.entries.find(item => item.track.id === 'netease:stored').resumePositionMs, null,
+    'an entry from before the upgrade stays unknown so sync keeps the archived position')
+  assert.equal(snapshot.entries.find(item => item.track.id === 'netease:episode').resumePositionMs, 0)
+})
+
+await databaseRegression('sync results carry the merged resume position', async store => {
+  await store.applySyncPayload({
+    entries: [{ track: track('netease:episode'), playedAt: 1_500, resumePositionMs: 1_234 }],
+    deletions: [],
+  })
+  assert.equal(store.rememberedPosition(track('netease:episode')), 1_234)
+  const [, args] = persisted.at(-1)
+  assert.equal(args.history.entries[0].resumePositionMs, 1_234)
+})
+
 console.log(`History sync regressions: ${cases - failures.length}/${cases} passed`)
 assert.equal(failures.length, 0, failures.join(', '))

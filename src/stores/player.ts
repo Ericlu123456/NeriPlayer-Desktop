@@ -47,6 +47,11 @@ import {
 } from '@/modules/playback/playbackPolicy'
 import { resolvePlaybackQueueStartIndex } from '@/modules/playback/playbackQueue'
 import {
+  LONG_FORM_MIN_DURATION_MS,
+  longFormPositionForPersistence,
+  resolveLongFormResumePosition,
+} from '@/modules/playback/longFormProgress'
+import {
   isPlaybackSeekCompletionCurrent,
   resolvePlaybackLoadStart,
   shouldDeferPlaybackSeek,
@@ -694,7 +699,27 @@ export const usePlayerStore = defineStore('player', () => {
     if (now - _progressPersistTime >= PROGRESS_PERSIST_INTERVAL_MS) {
       _progressPersistTime = now
       savePlayerState()
+      persistCurrentLongFormProgress()
     }
+  }
+
+  /** 长音频进度写进播放历史，随同步在其它设备续播（对齐 Android PlaybackProgressOwner） */
+  function persistLongFormProgress(track: TrackInfo | null, trackPositionMs: number) {
+    if (!track) return
+    const settings = useSettingsStore()
+    const trackDurationMs = Math.max(track.durationMs || 0, currentTrack.value === track ? durationMs.value : 0)
+    const remembered = longFormPositionForPersistence(settings.rememberLongFormProgress, trackDurationMs, trackPositionMs)
+    if (remembered !== null) useHistoryStore().updateResumePosition(track, remembered)
+  }
+
+  function persistCurrentLongFormProgress() {
+    persistLongFormProgress(currentTrack.value, currentRenderedPosition())
+  }
+
+  function rememberedLongFormStart(track: TrackInfo): number {
+    const settings = useSettingsStore()
+    if (!settings.rememberLongFormProgress || track.durationMs < LONG_FORM_MIN_DURATION_MS) return 0
+    return resolveLongFormResumePosition(true, track.durationMs, 0, useHistoryStore().rememberedPosition(track))
   }
 
   // Shuffle 三栈辅助函数
@@ -1208,11 +1233,16 @@ export const usePlayerStore = defineStore('player', () => {
     ).catch(error => log.warn('decoded audio properties unavailable:', error))
   }
 
+  /**
+   * @param allowRememberedPosition 用户点播时长音频从记住的位置继续；上一首/下一首、
+   *   恢复会话等调用方传 false（对齐 Android allowRememberedLongFormPosition）
+   */
   async function play(
     track: TrackInfo,
     commandSource: PlaybackCommandSource = 'local',
     startPositionMs = 0,
     forceResolve = false,
+    allowRememberedPosition = true,
   ) {
     if (blockedByListenTogether(commandSource) || blocksLocalSongInRoom(track, commandSource)) return
     const fileMutation = !isRemotePlaybackTrack(track) && audioFileMutations.get(audioFilePathKey(track.audioUrl))
@@ -1225,9 +1255,12 @@ export const usePlayerStore = defineStore('player', () => {
       playbackStartupWatchdog.cancel()
       await fileMutation.finished
       if (waitingToken === playbackRequestToken && fileMutation.shouldResume) {
-        await play(track, commandSource, fileMutation.positionMs, forceResolve)
+        await play(track, commandSource, fileMutation.positionMs, forceResolve, allowRememberedPosition)
       }
       return
+    }
+    if (startPositionMs <= 0 && allowRememberedPosition && !forceResolve && commandSource === 'local') {
+      startPositionMs = rememberedLongFormStart(track)
     }
     initEvents()
     markCommandSource(commandSource)
@@ -1263,6 +1296,9 @@ export const usePlayerStore = defineStore('player', () => {
     replacePlaybackDemand(track)
     playbackStartupWatchdog.cancel()
     const previousTrack = currentTrack.value
+    if (previousTrack && (previousTrack.id !== track.id || previousTrack.album !== track.album)) {
+      persistLongFormProgress(previousTrack, currentRenderedPosition())
+    }
     // 直链只在本次请求确认有效时共享，切歌或强制刷新先清掉旧 URL
     currentStreamUrl.value = !forceResolve && isDirectStreamUrl(track.audioUrl)
       ? track.audioUrl.trim()
@@ -1915,7 +1951,7 @@ export const usePlayerStore = defineStore('player', () => {
     if (!isPlaying.value && currentTrack.value && _needsReload) {
       _needsReload = false
       const savedPos = positionMs.value
-      await play(currentTrack.value, commandSource, savedPos)
+      await play(currentTrack.value, commandSource, savedPos, false, false)
       return
     }
 
@@ -1928,6 +1964,7 @@ export const usePlayerStore = defineStore('player', () => {
     } else {
       _interpIsPlaying = false
       freezeRenderedPosition()
+      persistCurrentLongFormProgress()
     }
 
     try {
@@ -1978,6 +2015,7 @@ export const usePlayerStore = defineStore('player', () => {
     isPlaying.value = false
     _interpIsPlaying = false
     freezeRenderedPosition()
+    persistCurrentLongFormProgress()
     if (isLoadingAudio.value && shouldDeferPlaybackSeek(
       playbackRequestToken,
       loadedPlaybackRequestToken,
@@ -2035,7 +2073,7 @@ export const usePlayerStore = defineStore('player', () => {
     if (_needsReload) {
       _needsReload = false
       const savedPos = positionMs.value
-      await play(currentTrack.value, commandSource, savedPos)
+      await play(currentTrack.value, commandSource, savedPos, false, false)
       return
     }
 
@@ -2078,6 +2116,7 @@ export const usePlayerStore = defineStore('player', () => {
       mutation.positionMs = safePosMs
       return
     }
+    persistLongFormProgress(currentTrack.value, safePosMs)
     const seekSeq = lastSeekCommand.value.seq
     const requestGeneration = playbackRequestToken
 
@@ -2172,6 +2211,9 @@ export const usePlayerStore = defineStore('player', () => {
     }
     lastTrackEndedId = trackId
     lastTrackEndedTime = Date.now()
+    // 播完即清掉记住的位置
+    const finishedTrack = currentTrack.value
+    if (finishedTrack) persistLongFormProgress(finishedTrack, Math.max(finishedTrack.durationMs || 0, durationMs.value))
 
     // 一起听会话激活时听众不本地推进: 暂停并上报 TRACK_FINISHED, 由房主/服务端决定切歌,
     // 避免因流时长差异先于房主播完而反向拖动整个房间（LB-02/LT-08）。
@@ -2276,7 +2318,7 @@ export const usePlayerStore = defineStore('player', () => {
         }
       }
     }
-    await play(queue.value[nextIdx], commandSource)
+    await play(queue.value[nextIdx], commandSource, 0, false, false)
   }
 
   /**
@@ -2304,7 +2346,7 @@ export const usePlayerStore = defineStore('player', () => {
       if (shuffleHistory.length > 0) {
         shuffleFuture.push(queueIndex.value)
         const prevIdx = shuffleHistory.pop()!
-        await play(queue.value[prevIdx], commandSource)
+        await play(queue.value[prevIdx], commandSource, 0, false, false)
       } else {
         seekTo(0, commandSource) // 无历史，重新开始当前曲目
       }
@@ -2313,9 +2355,9 @@ export const usePlayerStore = defineStore('player', () => {
 
     // 非 shuffle 模式
     if (queueIndex.value > 0) {
-      await play(queue.value[queueIndex.value - 1], commandSource)
+      await play(queue.value[queueIndex.value - 1], commandSource, 0, false, false)
     } else if (repeatMode.value === 'all') {
-      await play(queue.value[queue.value.length - 1], commandSource)
+      await play(queue.value[queue.value.length - 1], commandSource, 0, false, false)
     }
     // else: 已在开头且非列表循环，不动
   }

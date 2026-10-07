@@ -597,6 +597,8 @@
     "crossfade_out_duration": "Crossfade Out Duration",
     "keep_progress": "Remember Progress",
     "keep_progress_desc": "Resume last position on restart",
+    "remember_long_form_progress": "Remember Long Video Progress",
+    "remember_long_form_progress_desc": "Sync positions for content 15 minutes or longer and resume on other devices",
     "keep_mode": "Remember Play Mode",
     "keep_mode_desc": "Keep repeat/shuffle mode",
     "lyrics": "Lyrics",
