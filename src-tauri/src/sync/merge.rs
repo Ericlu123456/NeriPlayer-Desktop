@@ -204,38 +204,9 @@ pub(crate) fn record_playlist_open(
     entry["playlistId"] = serde_json::json!(open.playlist_id);
     entry["subtype"] = serde_json::json!(open.subtype);
 
-    let shards: Vec<SyncPlaybackCounterShard> =
-        serde_json::from_value(entry["counterShards"].clone()).unwrap_or_default();
-    let mut shards = merge_counter_shards(&shards, &[]);
-    let shard_total = |shards: &[SyncPlaybackCounterShard]| {
-        shards.iter().fold(0_i64, |total, shard| total.saturating_add(i64::from(shard.play_count.max(0))))
-    };
-    let open_count = json_i64(&entry, "openCount").max(0);
-    let base = if shards.is_empty() {
-        open_count
-    } else {
-        json_i64(&entry, "counterBaseOpenCount").max(0).max(open_count.saturating_sub(shard_total(&shards)))
-    };
-    match shards.iter_mut().find(|shard| shard.device_id == device_id && shard.epoch_started_at == 0) {
-        Some(shard) => {
-            shard.play_count = shard.play_count.saturating_add(1);
-            shard.first_played_at = min_positive(shard.first_played_at, now);
-            shard.last_played_at = shard.last_played_at.max(now);
-        }
-        None => shards.push(SyncPlaybackCounterShard {
-            device_id: device_id.to_string(),
-            play_count: 1,
-            first_played_at: now,
-            last_played_at: now,
-            ..Default::default()
-        }),
-    }
-    let shards = merge_counter_shards(&shards, &[]);
+    count_on_device_shard(&mut entry, ("openCount", "counterBaseOpenCount"), device_id, now, i64::from(i32::MAX));
     entry["firstOpenedAt"] = min_positive(json_i64(&entry, "firstOpenedAt"), now).into();
     entry["lastOpenedAt"] = json_i64(&entry, "lastOpenedAt").max(now).into();
-    entry["openCount"] = open_count.max(base.saturating_add(shard_total(&shards))).min(i64::from(i32::MAX)).into();
-    entry["counterBaseOpenCount"] = base.into();
-    entry["counterShards"] = serde_json::json!(shards);
 
     match index {
         Some(index) => stats[index] = entry,
@@ -243,6 +214,90 @@ pub(crate) fn record_playlist_open(
     }
     extensions.insert("playlistUsageStats".into(), serde_json::Value::Array(stats));
     true
+}
+
+/// 记一次本地歌单播放（对齐 Android LocalPlaylistPlaybackStatsRepository.recordPlayNow）：
+/// 歌单总数和当天分桶各在本机分片上加一
+pub(crate) fn record_local_playlist_play(
+    extensions: &mut serde_json::Map<String, serde_json::Value>,
+    playlist_id: i64,
+    day_start_at: i64,
+    device_id: &str,
+    played_at: i64,
+) -> bool {
+    if playlist_id == 0 {
+        return false;
+    }
+    let record = |section: &str, matches: &dyn Fn(&serde_json::Value) -> bool, empty: serde_json::Value, count_key: &str| {
+        let mut items = extensions.get(section).and_then(serde_json::Value::as_array).cloned().unwrap_or_default();
+        let index = items.iter().position(matches);
+        let mut item = index.map_or(empty, |index| items[index].clone());
+        count_on_device_shard(&mut item, (count_key, "counterBasePlayCount"), device_id, played_at, i64::MAX);
+        item["firstPlayedAt"] = min_positive(json_i64(&item, "firstPlayedAt"), played_at).into();
+        item["lastPlayedAt"] = json_i64(&item, "lastPlayedAt").max(played_at).into();
+        match index {
+            Some(index) => items[index] = item,
+            None => items.push(item),
+        }
+        (section.to_string(), serde_json::Value::Array(items))
+    };
+    let stats = record(
+        "localPlaylistPlaybackStats",
+        &|stat| json_i64(stat, "playlistId") == playlist_id,
+        serde_json::json!({"playlistId": playlist_id, "totalPlayCount": 0, "lastPlayedAt": 0, "firstPlayedAt": 0, "counterBasePlayCount": 0, "counterShards": []}),
+        "totalPlayCount",
+    );
+    let buckets = record(
+        "localPlaylistPlaybackBuckets",
+        &|bucket| json_i64(bucket, "playlistId") == playlist_id && json_i64(bucket, "dayStartAt") == day_start_at,
+        serde_json::json!({"dayStartAt": day_start_at, "playlistId": playlist_id, "playCount": 0, "lastPlayedAt": 0, "firstPlayedAt": 0, "counterBasePlayCount": 0, "counterShards": []}),
+        "playCount",
+    );
+    for (section, items) in [stats, buckets] {
+        extensions.insert(section, items);
+    }
+    true
+}
+
+/// 本机分片（epoch 0）加一，总数取原值与「基数 + 各分片之和」的较大者，其它设备的分片原样保留
+/// （对齐 Android UsageEntry.recordOpen / updateLocalPlaylistCounter）
+fn count_on_device_shard(
+    record: &mut serde_json::Value,
+    (count_key, base_key): (&str, &str),
+    device_id: &str,
+    at: i64,
+    count_limit: i64,
+) {
+    let shards: Vec<SyncPlaybackCounterShard> =
+        serde_json::from_value(record["counterShards"].clone()).unwrap_or_default();
+    let mut shards = merge_counter_shards(&shards, &[]);
+    let shard_total = |shards: &[SyncPlaybackCounterShard]| {
+        shards.iter().fold(0_i64, |total, shard| total.saturating_add(i64::from(shard.play_count.max(0))))
+    };
+    let count = json_i64(record, count_key).max(0);
+    let base = if shards.is_empty() {
+        count
+    } else {
+        json_i64(record, base_key).max(0).max(count.saturating_sub(shard_total(&shards)))
+    };
+    match shards.iter_mut().find(|shard| shard.device_id == device_id && shard.epoch_started_at == 0) {
+        Some(shard) => {
+            shard.play_count = shard.play_count.saturating_add(1);
+            shard.first_played_at = min_positive(shard.first_played_at, at);
+            shard.last_played_at = shard.last_played_at.max(at);
+        }
+        None => shards.push(SyncPlaybackCounterShard {
+            device_id: device_id.to_string(),
+            play_count: 1,
+            first_played_at: at,
+            last_played_at: at,
+            ..Default::default()
+        }),
+    }
+    let shards = merge_counter_shards(&shards, &[]);
+    record[count_key] = count.max(base.saturating_add(shard_total(&shards))).min(count_limit).into();
+    record[base_key] = base.into();
+    record["counterShards"] = serde_json::json!(shards);
 }
 
 fn normalize_lyric_state(song: &SyncSong) -> SyncSong {
@@ -2142,6 +2197,37 @@ mod tests {
         assert!(record_playlist_open(&mut extensions, &usage_open(0), "desktop", 300), "an emptied playlist is removed");
         assert!(extensions["playlistUsageStats"].as_array().unwrap().is_empty());
         assert!(!record_playlist_open(&mut extensions, &usage_open(0), "desktop", 400));
+    }
+
+    #[test]
+    fn local_playlist_plays_count_the_total_and_the_day_on_this_device() {
+        let day = 86_400_000;
+        let mut extensions = serde_json::Map::new();
+        assert!(record_local_playlist_play(&mut extensions, 7, day, "desktop", day + 100));
+        assert!(record_local_playlist_play(&mut extensions, 7, day, "desktop", day + 200));
+        assert!(record_local_playlist_play(&mut extensions, 7, 2 * day, "desktop", 2 * day + 100));
+        assert!(!record_local_playlist_play(&mut extensions, 0, day, "desktop", day));
+        let stat = extensions["localPlaylistPlaybackStats"][0].clone();
+        assert_eq!(
+            [json_i64(&stat, "totalPlayCount"), json_i64(&stat, "firstPlayedAt"), json_i64(&stat, "lastPlayedAt")],
+            [3, day + 100, 2 * day + 100]
+        );
+        let buckets: Vec<(i64, i64)> = extensions["localPlaylistPlaybackBuckets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|bucket| (json_i64(bucket, "dayStartAt"), json_i64(bucket, "playCount")))
+            .collect();
+        assert_eq!(buckets, [(day, 2), (2 * day, 1)]);
+        crate::sync::archive::prepare(&SyncData { extensions: extensions.clone(), ..Default::default() }, None)
+            .expect("the records must satisfy the strict archive schema");
+
+        let mut android = stat.clone();
+        android["counterShards"] = serde_json::json!([{"deviceId": "android", "epochStartedAt": 0, "totalListenMs": 0, "playCount": 4, "firstPlayedAt": 10, "lastPlayedAt": 20}]);
+        android["totalPlayCount"] = 4.into();
+        let remote = serde_json::Map::from_iter([("localPlaylistPlaybackStats".to_string(), serde_json::json!([android]))]);
+        let merged = merge_extensions(&extensions, &remote);
+        assert_eq!(json_i64(&merged["localPlaylistPlaybackStats"][0], "totalPlayCount"), 7, "plays on both devices add up");
     }
 
     #[test]

@@ -773,7 +773,7 @@ async function onTrackDragPointerUp(e: PointerEvent) {
 
 function playSelected() {
   if (selectedTracks.value.length === 0) return
-  player.playAll(selectedTracks.value)
+  player.playAll(selectedTracks.value, undefined, undefined, String(route.params.id))
 }
 
 function addSelectedToQueueEnd() {
@@ -789,12 +789,12 @@ function downloadSelected() {
 
 function playAll() {
   if (tracks.value.length === 0) return
-  player.playAll(tracks.value)
+  player.playAll(tracks.value, undefined, undefined, String(route.params.id))
 }
 
 function shufflePlay() {
   if (tracks.value.length === 0) return
-  player.shufflePlay(tracks.value)
+  player.shufflePlay(tracks.value, String(route.params.id))
 }
 
 function playTrack(track: TrackInfo) {
@@ -807,7 +807,7 @@ function playTrack(track: TrackInfo) {
     toggleSelected(trackSelectionKey(track))
     return
   }
-  player.playAll(filteredTracks.value, track.id, trackSelectionKey(track))
+  player.playAll(filteredTracks.value, track.id, trackSelectionKey(track), String(route.params.id))
 }
 
 function prefetchTrack(track: TrackInfo) {

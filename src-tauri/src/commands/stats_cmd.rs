@@ -22,6 +22,46 @@ pub struct PlaybackSessionInput {
     pub listened_ms: i64,
     #[serde(default)]
     pub play_count_increment: i32,
+    /// 这首歌是从哪个本地歌单开始的队列里播的
+    #[serde(default)]
+    pub local_playlist_id: Option<String>,
+}
+
+/// 计入播放的本地歌单 id（对齐 Android countedLocalPlaylistId：只有算一次播放时才计歌单）
+fn counted_local_playlist_id(input: &PlaybackSessionInput) -> Option<i64> {
+    if input.play_count_increment <= 0 {
+        return None;
+    }
+    input.local_playlist_id.as_deref()?.trim().parse().ok().filter(|id| *id != 0)
+}
+
+/// 本地歌单播放计数写进同步扩展段（对齐 Android LocalPlaylistPlaybackStatsRepository.recordPlayNow）
+async fn record_local_playlist_plays(device_id: String, playlist_ids: Vec<i64>, played_at: i64) {
+    if playlist_ids.is_empty() {
+        return;
+    }
+    let result = tokio::task::spawn_blocking(move || -> AppResult<()> {
+        // 与同步回写共用歌单锁并推进写入版本：进行中的同步会推迟，而不是用旧快照的扩展段覆盖这次计数
+        let _guard = crate::library::playlist::lock_io();
+        let day_start_at = stats::day_start_at(played_at);
+        crate::db::user_db()?.write(|transaction| {
+            crate::sync::storage::update_archive_extensions(transaction, |extensions| {
+                for &playlist_id in &playlist_ids {
+                    crate::sync::merge::record_local_playlist_play(extensions, playlist_id, day_start_at, &device_id, played_at);
+                }
+                Ok(())
+            })
+        })?;
+        crate::library::playlist::mark_io_changed();
+        Ok(())
+    })
+    .await;
+    // 统计失败不能影响播放
+    match result {
+        Ok(Err(error)) => log::warn!("record local playlist play failed: {error}"),
+        Err(error) => log::warn!("record local playlist play task failed: {error}"),
+        Ok(Ok(())) => {}
+    }
 }
 
 fn to_session(input: &PlaybackSessionInput) -> PlaybackSession {
@@ -52,9 +92,14 @@ pub async fn record_playback_session(
     state: State<'_, AppState>,
 ) -> AppResult<()> {
     let device_id = manager::get_or_create_device_id_pub(&app);
-    let mut store = state.stats.lock();
-    store.record(&to_session(&session), &device_id, now_ms());
-    stats::save(&store);
+    let played_at = now_ms();
+    {
+        let mut store = state.stats.lock();
+        store.record(&to_session(&session), &device_id, played_at);
+        stats::save(&store);
+    }
+    let playlists = counted_local_playlist_id(&session).into_iter().collect();
+    record_local_playlist_plays(device_id, playlists, played_at).await;
     Ok(())
 }
 
@@ -70,11 +115,15 @@ pub async fn record_playback_sessions(
     }
     let device_id = manager::get_or_create_device_id_pub(&app);
     let played_at = now_ms();
-    let mut store = state.stats.lock();
-    for session in &sessions {
-        store.record(&to_session(session), &device_id, played_at);
+    {
+        let mut store = state.stats.lock();
+        for session in &sessions {
+            store.record(&to_session(session), &device_id, played_at);
+        }
+        stats::save(&store);
     }
-    stats::save(&store);
+    let playlists = sessions.iter().filter_map(counted_local_playlist_id).collect();
+    record_local_playlist_plays(device_id, playlists, played_at).await;
     Ok(())
 }
 

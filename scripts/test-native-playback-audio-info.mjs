@@ -411,5 +411,19 @@ await run('a link received from the room keeps the host tag and an untagged one 
   assert.equal(r.store.getCurrentStreamUrl('netease:403'), untagged, 'the quality of a direct link is unknown')
 })
 
+await run('plays count toward the local playlist the queue was started from', async () => {
+  const r = await runtime()
+  const member = { ...track('501'), playlistKey: 'netease:501|Album' }
+  const other = track('502')
+  r.store.playAll([member], member.id, member.playlistKey, '42'); await flush()
+  assert.equal(r.store.localPlaylistIdFor(member), '42')
+  r.store.addToQueueEnd(other)
+  assert.equal(r.store.localPlaylistIdFor(other), null, 'a song queued from elsewhere is not a playlist play')
+  r.store.playAll([member]); await flush()
+  assert.equal(r.store.localPlaylistIdFor(member), null, 'another queue clears the source')
+  r.store.shufflePlay([member], '43'); await flush()
+  assert.equal(r.store.localPlaylistIdFor(member), '43')
+})
+
 if (failures) process.exitCode = 1
 else console.log('native playback audio info store regressions passed')

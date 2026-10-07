@@ -2719,10 +2719,30 @@ export const usePlayerStore = defineStore('player', () => {
   }
 
   // 批量替换队列，并且只发起一次目标曲目的播放请求
+  // 队列从哪个本地歌单开始播：其中的歌计入一次播放时，歌单也计一次（对齐 Android localPlaylistPlaybackSource）
+  let localPlaylistSource: { id: string; members: Set<string> } | null = null
+
+  function localPlaylistMemberKey(track: TrackInfo): string {
+    return track.playlistKey || track.id
+  }
+
+  function setLocalPlaylistSource(tracks: TrackInfo[], localPlaylistId?: string) {
+    localPlaylistSource = localPlaylistId
+      ? { id: localPlaylistId, members: new Set(tracks.map(localPlaylistMemberKey)) }
+      : null
+  }
+
+  /** 这首歌属于当前队列的来源本地歌单时返回歌单 id；之后加进队列的别处歌曲不算 */
+  function localPlaylistIdFor(track: TrackInfo): string | null {
+    return localPlaylistSource?.members.has(localPlaylistMemberKey(track)) ? localPlaylistSource.id : null
+  }
+
+  /** @param localPlaylistId 从本地歌单开始播放时传入，用于歌单播放统计 */
   function playAll(
     tracks: TrackInfo[],
     requestedTrackId?: string,
     requestedPlaylistKey?: string,
+    localPlaylistId?: string,
   ) {
     const startIndex = resolvePlaybackQueueStartIndex(
       tracks,
@@ -2747,12 +2767,14 @@ export const usePlayerStore = defineStore('player', () => {
     shuffleBag = []
     shuffleHistory = []
     shuffleFuture = []
+    setLocalPlaylistSource(tracks, localPlaylistId)
     void play(queue.value[startIndex])
   }
 
   // 洗牌后替换队列并播放
-  function shufflePlay(tracks: TrackInfo[]) {
+  function shufflePlay(tracks: TrackInfo[], localPlaylistId?: string) {
     if (tracks.length === 0) return
+    setLocalPlaylistSource(tracks, localPlaylistId)
     const shuffled = [...tracks]
     for (let i = shuffled.length - 1; i > 0; i--) {
       const j = Math.floor(Math.random() * (i + 1));
@@ -2994,6 +3016,7 @@ export const usePlayerStore = defineStore('player', () => {
     toggleRepeatMode, toggleShuffle, cyclePlayMode, applyListenTogetherPlaybackMode,
     playMode, setVolume, setSpeed, setListenTogetherSyncPlaybackRate, getCurrentStreamUrl, getCurrentStreamUrls,
     resolveShareableStreamUrls,
+    localPlaylistIdFor,
     setLoudnessGain, setEqualizer, setEqualizerPreset, resetAudioEffects,
     applyPersistedSettings,
     startSleepTimer, startSleepTimerEndOfTrack, startSleepTimerEndOfQueue, cancelSleepTimer,
