@@ -9,6 +9,7 @@ import { usePlayerStore } from '@/stores/player'
 import { useAuthStore } from '@/stores/auth'
 import { useRecommendStore, type PlaylistInfo } from '@/stores/recommend'
 import { useSettingsStore } from '@/stores/settings'
+import { useSearchHistoryStore } from '@/stores/searchHistory'
 import { invoke } from '@tauri-apps/api/core'
 import BilibiliCoverImage from '@/components/BilibiliCoverImage.vue'
 import { formatTrackDuration as formatDuration } from '@/utils/timeFormat'
@@ -21,6 +22,7 @@ const player = usePlayerStore()
 const auth = useAuthStore()
 const recommend = useRecommendStore()
 const settings = useSettingsStore()
+const searchHistory = useSearchHistoryStore()
 
 // 搜索
 const searchQuery = ref('')
@@ -192,6 +194,16 @@ function retrySearch() {
   if (searchQuery.value.trim()) void searchStore.search(searchQuery.value, activeTab.value)
 }
 
+// 边输入边搜，只在确认时（回车、播放结果、点历史）记历史，免得记下半截关键词
+function rememberSearch() {
+  searchHistory.record(searchQuery.value)
+}
+
+function searchFromHistory(keyword: string) {
+  searchQuery.value = keyword
+  searchHistory.record(keyword)
+}
+
 
 watch(() => route.query.platform, (platform) => {
   if (route.name !== 'explore') return
@@ -215,6 +227,7 @@ watch(activeTab, (tab) => {
 
 // 工具函数
 function playResult(r: any) {
+  rememberSearch()
   player.play({
     id: r.id,
     title: r.title,
@@ -291,6 +304,7 @@ onMounted(() => {
         data-shortcut-search
         @focus="isFocused = true"
         @blur="isFocused = false"
+        @keydown.enter="rememberSearch"
       />
       <button v-if="searchQuery" class="clear-btn" @click="searchQuery = ''; searchStore.clear()">
         <span class="material-symbols-rounded" style="font-size: 20px">close</span>
@@ -312,6 +326,18 @@ onMounted(() => {
         ></span>
         <span class="tab-label">{{ tab.label }}</span>
       </button>
+    </div>
+
+    <div v-if="!isSearching && searchHistory.visible.length > 0" class="search-history">
+      <div class="search-history-header">
+        <span class="search-history-title">{{ t('explore.search_history') }}</span>
+        <button class="search-history-clear" @click="searchHistory.clear()">{{ t('explore.clear_search_history') }}</button>
+      </div>
+      <div class="tag-flow">
+        <button v-for="keyword in searchHistory.visible" :key="keyword" class="tag-chip" @click="searchFromHistory(keyword)">
+          {{ keyword }}
+        </button>
+      </div>
     </div>
 
     <!-- 加载状态 -->
@@ -621,6 +647,37 @@ onMounted(() => {
 /* Tag 选择区 */
 .tag-section {
   margin-bottom: 20px;
+}
+
+.search-history {
+  margin-bottom: 20px;
+}
+
+.search-history-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+.search-history-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--md-on-surface-variant);
+}
+
+.search-history-clear {
+  border: none;
+  background: none;
+  padding: 4px 8px;
+  border-radius: 8px;
+  font-size: 12px;
+  color: var(--md-primary);
+  cursor: pointer;
+
+  &:hover {
+    background: var(--md-surface-container-high);
+  }
 }
 
 .tag-flow {

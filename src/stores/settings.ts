@@ -63,6 +63,7 @@ export interface AppSettings {
   neteaseLocalSourceFallback: boolean
   bypassProxy: boolean
   internationalizationEnabled: boolean
+  exploreSearchHistoryEnabled: boolean
   backgroundImageUri: string
   backgroundImageBlur: number
   backgroundImageAlpha: number
@@ -175,6 +176,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   neteaseLocalSourceFallback: false,
   bypassProxy: true,
   internationalizationEnabled: false,
+  exploreSearchHistoryEnabled: true,
   backgroundImageUri: '',
   backgroundImageBlur: 20,
   backgroundImageAlpha: 0.3,
@@ -515,6 +517,7 @@ export const useSettingsStore = defineStore('settings', () => {
   const neteaseLocalSourceFallback = ref(initial.neteaseLocalSourceFallback)
   const bypassProxy = ref(initial.bypassProxy)
   const internationalizationEnabled = ref(initial.internationalizationEnabled)
+  const exploreSearchHistoryEnabled = ref(initial.exploreSearchHistoryEnabled)
   const backgroundImageUri = ref(initial.backgroundImageUri)
   const backgroundImageBlur = ref(initial.backgroundImageBlur)
   const backgroundImageAlpha = ref(initial.backgroundImageAlpha)
@@ -555,7 +558,7 @@ export const useSettingsStore = defineStore('settings', () => {
     lyricBlur, lyricBlurAmount, cloudMusicOffset, qqMusicOffset, coverStyle,
     advancedLyrics, dynamicBackground, dynamicColor, audioReactive, coverBlurBg,
     coverBlurAmount, coverBlurDarken, neteaseQuality, qqMusicQuality,
-    youtubeQuality, biliQuality, bypassProxy, internationalizationEnabled,
+    youtubeQuality, biliQuality, bypassProxy, internationalizationEnabled, exploreSearchHistoryEnabled,
     youtubePlaybackSource, neteaseAutoSourceSwitch, neteaseLocalSourceFallback,
     backgroundImageUri, backgroundImageBlur, backgroundImageAlpha, devModeEnabled,
     logToFile, logLevel,
@@ -652,7 +655,7 @@ export const useSettingsStore = defineStore('settings', () => {
     dynamicColor, audioReactive, coverBlurBg, coverBlurAmount, coverBlurDarken,
     neteaseQuality, qqMusicQuality, youtubeQuality, biliQuality, bypassProxy,
     youtubePlaybackSource, neteaseAutoSourceSwitch, neteaseLocalSourceFallback,
-    internationalizationEnabled, backgroundImageUri, backgroundImageBlur,
+    internationalizationEnabled, exploreSearchHistoryEnabled, backgroundImageUri, backgroundImageBlur,
     backgroundImageAlpha, devModeEnabled, logToFile, logLevel, maxCacheSize, downloadNameTemplate,
     downloadDir, ltServerUrl, ltNickname, ltAllowMemberControl,
     downloadParallelism, downloadAutoFillMetadata, downloadEmbedLyrics,

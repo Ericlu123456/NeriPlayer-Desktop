@@ -84,6 +84,8 @@ pub struct AppSettings {
     pub netease_local_source_fallback: bool,
     pub bypass_proxy: bool,
     pub internationalization_enabled: bool,
+    /// 探索页显示并记录搜索关键词（对齐 Android explore_search_history_enabled）
+    pub explore_search_history_enabled: bool,
     pub background_image_uri: String,
     pub background_image_blur: f32,
     pub background_image_alpha: f32,
@@ -199,6 +201,7 @@ impl Default for AppSettings {
             netease_local_source_fallback: false,
             bypass_proxy: true,
             internationalization_enabled: false,
+            explore_search_history_enabled: true,
             background_image_uri: String::new(),
             background_image_blur: 20.0,
             background_image_alpha: 0.3,

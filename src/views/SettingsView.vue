@@ -71,7 +71,7 @@ const {
   coverBlurBg, coverBlurAmount, coverBlurDarken,
   neteaseQuality, qqMusicQuality, youtubeQuality, biliQuality,
   youtubePlaybackSource, neteaseAutoSourceSwitch, neteaseLocalSourceFallback,
-  bypassProxy, internationalizationEnabled,
+  bypassProxy, internationalizationEnabled, exploreSearchHistoryEnabled,
   backgroundImageUri, backgroundImageBlur, backgroundImageAlpha,
   devModeEnabled, logToFile, logLevel,
   maxCacheSize, downloadNameTemplate, downloadDir,
@@ -1233,6 +1233,15 @@ useEscapeClose(
           <span v-else-if="internationalizationEnabled" class="material-symbols-rounded" style="font-size: 14px">check</span>
         </span></span>
       </label>
+    </div>
+
+    <div class="setting-card">
+      <div class="setting-icon-wrap"><span class="material-symbols-rounded">manage_search</span></div>
+      <div class="setting-info">
+        <div class="setting-title">{{ t('settings.explore_search_history') }}</div>
+        <div class="setting-desc">{{ t('settings.explore_search_history_desc') }}</div>
+      </div>
+      <label class="m3-switch"><input type="checkbox" v-model="exploreSearchHistoryEnabled" /><span class="track"><span class="thumb"><span v-if="exploreSearchHistoryEnabled" class="material-symbols-rounded" style="font-size: 14px">check</span></span></span></label>
     </div>
 
     <!-- 外观 -->

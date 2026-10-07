@@ -62,6 +62,7 @@
     "test:sync-protocol-upgrade": "node scripts/test-sync-protocol-upgrade.mjs",
     "test:history-sync": "node scripts/test-history-sync.mjs",
     "test:long-form-progress": "node scripts/test-long-form-progress.mjs",
+    "test:search-history": "node scripts/test-search-history.mjs",
     "test:user-data-persistence": "node scripts/test-user-data-persistence.mjs",
     "test:home-continue": "node scripts/test-home-continue.mjs",
     "test:home-feed": "node scripts/test-home-feed.mjs",
