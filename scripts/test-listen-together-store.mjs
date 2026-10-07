@@ -878,6 +878,69 @@ await test('a room-closed rejection ends the session locally', async h => {
   assert.ok(!h.commands.some(entry => entry.command === 'lt_leave_room'))
 })
 
+async function hostPlaying(h) {
+  await h.create()
+  await h.message({ type: 'welcome', role: 'controller', state: room([wireTrack(1)]) })
+  // 等远端同步保护期过去，之后的播放才算房主自己的操作
+  await h.timers.advance(4000)
+  h.player.isPlaying = true
+  await flush()
+}
+
+const offlineHost = async h => {
+  await hostPlaying(h)
+  offlineHost.offline = true
+  h.emit('lt:disconnected', { connectionId: 'connection-current', code: 1006, reason: '' })
+  await flush()
+  const baseline = h.commands.length
+  h.player.isPlaying = false
+  await flush()
+  const http = h.commands.slice(baseline).find(entry => entry.command === 'lt_send_control')
+  assert.equal(http?.args.event.type, 'PAUSE', 'a pause made while the socket is down still reaches the room over HTTP')
+  offlineHost.offline = false
+  const playbackCount = h.playback.length
+  h.emit('lt:connected', { connectionId: 'connection-current' })
+  await h.message({ type: 'welcome', role: 'controller', state: room([wireTrack(1)], {
+    version: 2, playback: { ...room().playback, state: 'playing' },
+  }) })
+  assert.ok(!h.playback.slice(playbackCount).some(entry => entry.type === 'play' || entry.type === 'resume'),
+    'the reconnect welcome must not undo what the host did while offline')
+}
+offlineHost.options = { role: 'controller', invoke: command => offlineHost.offline && command === 'lt_send_event' ? false : undefined }
+await test('host controls made while disconnected are sent and survive the reconnect welcome', offlineHost)
+
+const outboxReplay = async h => {
+  await hostPlaying(h)
+  outboxReplay.offline = true
+  h.emit('lt:disconnected', { connectionId: 'connection-current', code: 1006, reason: '' })
+  await flush()
+  h.player.isPlaying = false
+  await flush()
+  h.player.repeatMode = 'all'
+  await flush()
+  h.player.isPlaying = true
+  await flush()
+  assert.deepEqual(h.toasts, [], 'controls that cannot be sent wait for the connection instead of failing')
+  const baseline = h.commands.length
+  outboxReplay.offline = false
+  h.emit('lt:connected', { connectionId: 'connection-current' })
+  await flush()
+  const replayed = h.commands.slice(baseline).filter(entry => entry.command === 'lt_send_event').map(entry => entry.args.event)
+  assert.deepEqual(replayed.map(event => event.type), ['PLAYBACK_MODE', 'PLAY'],
+    'the pause is superseded by the later play, so only the newest transport control is replayed')
+  assert.equal(new Set(replayed.map(event => event.eventId)).size, 2)
+}
+outboxReplay.options = {
+  role: 'controller',
+  invoke: command => {
+    if (!outboxReplay.offline) return undefined
+    if (command === 'lt_send_event') return false
+    if (command === 'lt_send_control') return Promise.reject(new Error('network unreachable'))
+    return undefined
+  },
+}
+await test('controls that fail on both channels are replayed once after reconnecting', outboxReplay)
+
 if (failures.length) {
   console.error(`${passed} store tests passed; ${failures.length} failed: ${failures.join('; ')}`)
   process.exitCode = 1

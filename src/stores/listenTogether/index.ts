@@ -112,6 +112,11 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
   let _reconnectTimer: ReturnType<typeof setTimeout> | null = null
   // 服务端回过 "unsupported event type: np_ping" 后改发旧版 ping
   let _legacyPing = false
+  // WebSocket 和 HTTP 都发不出去的控制（对齐 Android ListenTogetherControlOutbox）：
+  // 按意图只留最新一条，最多 8 条，重连后重放；队列类保存完整快照，重放时不依赖旧的版本基线
+  const _outbox = new Map<string, { event: ListenTogetherEvent; queueSnapshot: boolean }>()
+  // 房主断线期间自己改过播放：重连时的 welcome/房态只更新房间，不能把这些改动撤回去
+  let _hostControlledOffline = false
   // 会话代际：leaveRoom 后递增，让在途的延迟回调失效，不再操作播放器
   let _sessionGeneration = 0
   // 出站事件排序字段：实例标识会话内生成一次，序号单调递增（对齐 Android EventFactory）
@@ -364,6 +369,8 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
     _activeWsConnectionId = null
     _reconnectAttempt = 0
     _legacyPing = false
+    _outbox.clear()
+    _hostControlledOffline = false
     _lastReportedTrackId = null
     _lastReportedQueueKeys = []
     _queueEventInFlight = null
@@ -422,6 +429,7 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
       if (roomId.value) {
         startListenerPing()
         if (isController.value) startHeartbeat()
+        replayOutbox()
       }
     })
     if (generation !== _sessionGeneration) { unlistenConnected(); return false }
@@ -620,7 +628,8 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
       role.value = envelope.role as LtRole
     }
     if (envelope.state) {
-      commitRoomState(envelope.state, 'WELCOME', envelope.expectedPositionMs)
+      commitRoomState(envelope.state, 'WELCOME', envelope.expectedPositionMs,
+        !(isController.value && _hostControlledOffline))
     }
     if (isController.value) startHeartbeat()
     else stopHeartbeat()
@@ -1069,7 +1078,8 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
         shuffleEnabled: player.shuffleEnabled,
       }),
       (newVal) => {
-        if (_suppressPlayerWatch || _pendingRemotePlaybackLoads.size > 0 || player.isRemoteSyncGuardActive() || connectionState.value !== 'connected') return
+        // 断线时也照常上报：发不出去会走 HTTP，再不行进待补发队列，不能让本地操作被重连时的房态撤回
+        if (_suppressPlayerWatch || _pendingRemotePlaybackLoads.size > 0 || player.isRemoteSyncGuardActive()) return
 
         // 曲目变化
         let trackReported = false
@@ -1144,7 +1154,7 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
     _seekWatchStop = watch(
       () => player.lastSeekCommand.seq,
       () => {
-        if (_suppressPlayerWatch || _pendingRemotePlaybackLoads.size > 0 || connectionState.value !== 'connected') return
+        if (_suppressPlayerWatch || _pendingRemotePlaybackLoads.size > 0) return
         const seek = player.lastSeekCommand
         if (seek.source !== 'local') return
         if (player.isRemoteSyncGuardActive()) return
@@ -1167,9 +1177,45 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
     return `${userUuid.value.slice(0, 8)}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
   }
 
+  /** 断线时也能补发的控制按意图归类（对齐 Android ListenTogetherControlOutbox 的键） */
+  function outboxKey(type: string): string | null {
+    switch (type) {
+      case 'SET_TRACK': case 'REQUEST_SET_TRACK': return 'track'
+      case 'SET_QUEUE': case 'REQUEST_SET_QUEUE': return 'queue'
+      case 'PLAY': case 'PAUSE': case 'REQUEST_PLAY': case 'REQUEST_PAUSE': return 'transport'
+      case 'SEEK': case 'REQUEST_SEEK': return 'seek'
+      case 'PLAYBACK_MODE': case 'REQUEST_PLAYBACK_MODE': return 'playback_mode'
+      case 'TRACK_FINISHED': return 'track_finished'
+      default: return null
+    }
+  }
+
+  function rememberForReplay(event: ListenTogetherEvent, queueSnapshot: boolean): boolean {
+    const key = outboxKey(event.type)
+    if (!key) return false
+    _outbox.delete(key)
+    _outbox.set(key, { event, queueSnapshot })
+    while (_outbox.size > 8) _outbox.delete(_outbox.keys().next().value!)
+    return true
+  }
+
+  /** 重连后按原顺序补发；换新的事件 id 与序号，不会被当成已处理或乱序的旧事件 */
+  function replayOutbox() {
+    if (_outbox.size === 0) return
+    const entries = [..._outbox.values()]
+    _outbox.clear()
+    for (const { event, queueSnapshot } of entries) {
+      if (queueSnapshot) sendQueueEvent(event, true)
+      else void sendEvent({ ...event, eventId: undefined, clientTimeMs: undefined, clientSequence: undefined })
+    }
+  }
+
   async function sendEvent(event: ListenTogetherEvent) {
     if (!roomId.value) return
     stripUnsharedAudioLinks(event)
+    if (isController.value && connectionState.value !== 'connected' && outboxKey(event.type)) {
+      _hostControlledOffline = true
+    }
     const generation = _sessionGeneration
     if (!event.eventId) event.eventId = generateEventId()
     if (!event.clientTimeMs) event.clientTimeMs = Date.now()
@@ -1219,9 +1265,12 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
     } catch (error) {
       if (generation !== _sessionGeneration) return
       log.warn('HTTP event send failed:', error)
-      const t = (i18n.global as any).t
-      useToastStore().error(t('listen_together.control_not_sent'))
+      // 两条链路都不通（离线）：留到重连后补发。队列取最新的完整快照，排在后面的修改也不会丢
+      const queueEvent = _queueEventInFlight?.eventId === event.eventId
+      const replay = queueEvent ? _queuedQueueEvent ?? _queueEventSnapshot : event
+      const kept = replay ? rememberForReplay(replay, queueEvent) : false
       completeQueueEvent(event.eventId, false)
+      if (!kept) useToastStore().error((i18n.global as any).t('listen_together.control_not_sent'))
     }
   }
 
@@ -1320,7 +1369,7 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
 
     const pending = _pendingSeekReport
     _pendingSeekReport = null
-    if (!pending || connectionState.value !== 'connected') return
+    if (!pending || !roomId.value) return
 
     const player = usePlayerStore()
     if (pending.trackId && player.currentTrack?.id !== pending.trackId) return
@@ -1671,8 +1720,10 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
           if (stateResp.serverNowMs && Number.isFinite(stateResp.serverNowMs)) {
             _serverClockOffsetMs = stateResp.serverNowMs - Date.now()
           }
-          commitRoomState(stateResp.state, 'reconnect', stateResp.expectedPositionMs)
+          commitRoomState(stateResp.state, 'reconnect', stateResp.expectedPositionMs,
+            !(isController.value && _hostControlledOffline))
         }
+        _hostControlledOffline = false
         if (isController.value) startHeartbeat()
       } catch (error) {
         if (generation !== _sessionGeneration) return
