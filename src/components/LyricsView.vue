@@ -572,6 +572,9 @@ onMounted(() => {
     if (!hostRef.value || lyricPlayer) return
 
     lyricPlayer = new DomLyricPlayer()
+    // AMLL 默认把每行开始时间最多提前 600ms，行会在唱到之前就高亮滚动；
+    // Android 按原始时间轴切行，偏移量也是按原始时间轴标定的
+    lyricPlayer.setOptimizeOptions({ tryAdvanceStartTime: false })
     lyricPlayer.addEventListener('line-click', onLineClick as EventListener)
     lyricPlayer.addEventListener('line-contextmenu', onLineContextMenu as EventListener)
     hostRef.value.appendChild(lyricPlayer.getElement())

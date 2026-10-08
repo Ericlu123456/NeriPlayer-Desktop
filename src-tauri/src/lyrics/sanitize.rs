@@ -162,6 +162,17 @@ mod tests {
     }
 
     #[test]
+    fn credit_lines_in_android_synced_yrc_are_removed() {
+        // Android 匹配后经同步存下的《Sincerely》：开头的制作信息被导出成零时长 YRC 行
+        let yrc = "[0,0](0,0,0) 作词 : TRUE\n[0,0](0,0,0) 作曲 : 堀江晶太\n[0,0](0,0,0) 编曲 : 堀江晶太/Evan Call\n\
+            [0,1150](0,115,0)编(115,115,0)曲 (230,115,0): (345,115,0)堀(460,115,0)江\n\
+            [1150,6150](1150,60,0)知(1210,270,0)ら\n\
+            [7460,6190](7460,180,0)お(7640,470,0)も";
+        let lines = sanitize_matched_lines(parse_auto(yrc), "Sincerely", "TRUE", "");
+        assert_eq!(texts(&lines), vec!["知ら", "おも"]);
+    }
+
+    #[test]
     fn lyric_lines_that_mention_the_title_mid_song_are_kept() {
         let lrc = (0..20)
             .map(|i| format!("[00:{:02}.00]{}", i * 2, if i == 10 { "开不了口 周杰伦" } else { "歌词" }))

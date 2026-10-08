@@ -270,18 +270,15 @@ export type StoredLyricState =
   | { kind: 'cleared' }
   | { kind: 'present'; text: string }
 
+/** null 与缺省同义（Android `matchedRomanizedLyric == null` 即 ABSENT），只有空串才是有意清空 */
 function readPayloadString(
   payload: Record<string, unknown>,
   camel: string,
   snake: string,
 ): string | undefined {
-  if (Object.prototype.hasOwnProperty.call(payload, camel)) {
-    const value = payload[camel]
-    return typeof value === 'string' ? value : value == null ? '' : String(value)
-  }
-  if (Object.prototype.hasOwnProperty.call(payload, snake)) {
-    const value = payload[snake]
-    return typeof value === 'string' ? value : value == null ? '' : String(value)
+  for (const key of [camel, snake]) {
+    const value = payload[key]
+    if (value != null) return typeof value === 'string' ? value : String(value)
   }
   return undefined
 }
@@ -346,17 +343,17 @@ export function resolveStoredRomanizedLyricStateFromPayload(
  * syncPayload 里的歌词落地成歌词行：原文 + 翻译 + 音译
  *
  * null 表示没有本地歌词（可在线拉取），[] 表示有意清空；原文解析失败照常抛出，
- * 翻译或音译解析失败只丢掉那一轨。
+ * 翻译或音译解析失败只丢掉那一轨。parse 的第二个参数区分原文与翻译/音译轨。
  */
 export async function materializeStoredLyrics(
   payload: Record<string, unknown> | undefined | null,
-  parse: (text: string) => Promise<LyricLine[]>,
+  parse: (text: string, track: 'original' | 'secondary') => Promise<LyricLine[]>,
   onSecondaryError?: (error: unknown) => void,
 ): Promise<LyricLine[] | null> {
   const stored = resolveStoredLyricStateFromPayload(payload)
   if (stored.kind === 'absent') return null
   if (stored.kind === 'cleared') return []
-  let lines = await parse(stored.text)
+  let lines = await parse(stored.text, 'original')
   const secondary = [
     [resolveStoredTranslatedLyricStateFromPayload(payload), mergeParsedLyricsWithTranslations],
     [resolveStoredRomanizedLyricStateFromPayload(payload), mergeParsedLyricsWithRomanization],
@@ -364,7 +361,7 @@ export async function materializeStoredLyrics(
   for (const [state, merge] of secondary) {
     if (state.kind !== 'present' || !state.text.trim()) continue
     try {
-      lines = merge(lines, await parse(state.text))
+      lines = merge(lines, await parse(state.text, 'secondary'))
     } catch (error) {
       onSecondaryError?.(error)
     }

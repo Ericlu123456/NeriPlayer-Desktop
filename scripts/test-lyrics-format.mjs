@@ -186,6 +186,13 @@ const plainSynced = [{ startMs: 0, durationMs: 1000, text: 'a', words: [] }]
 assert.equal(shouldBackfillNeteaseRomanization({ matchedLyric: 'x' }, plainSynced), true)
 assert.equal(shouldBackfillNeteaseRomanization({ matchedLyric: 'x', lyricSyncEdited: true }, plainSynced), true, '只编辑过原文时仍补音译')
 assert.equal(shouldBackfillNeteaseRomanization({ lyricSyncEdited: true, matchedRomanizedLyric: '' }, plainSynced), false, '用户有意清空音译')
+assert.equal(
+  shouldBackfillNeteaseRomanization({ matchedLyric: 'x', lyricSyncEdited: true, matchedRomanizedLyric: null, originalRomanizedLyric: null }, plainSynced),
+  true,
+  'Android 同步来的 null 音译是没有，不是清空',
+)
+assert.equal(resolveStoredRomanizedLyricStateFromPayload({ matchedRomanizedLyric: null }).kind, 'absent')
+assert.equal(resolveStoredLyricStateFromPayload({ matchedLyric: null, originalLyric: '[00:01.00]a' }).kind, 'present', 'null 时回落到 original')
 assert.equal(shouldBackfillNeteaseRomanization({}, [{ ...plainSynced[0], roman: 'a' }]), false, '已有音译')
 assert.equal(shouldBackfillNeteaseRomanization({}, []), false)
 
@@ -203,6 +210,12 @@ const stored = await materializeStoredLyrics({
   matchedLyric: '[00:01.00]夜', matchedTranslatedLyric: '[00:01.00]夜晚', matchedRomanizedLyric: '[00:01.00]yoru',
 }, parse)
 assert.deepEqual([stored[0].text, stored[0].translation, stored[0].roman], ['夜', '夜晚', 'yoru'])
+const parsedParts = []
+await materializeStoredLyrics(
+  { matchedLyric: '[00:01.00]夜', matchedTranslatedLyric: '[00:01.00]夜晚' },
+  async (text, part) => { parsedParts.push(part); return parse(text) },
+)
+assert.deepEqual(parsedParts, ['original', 'secondary'], '只有原文按匹配歌词去牛皮癣')
 const secondaryErrors = []
 const brokenRoman = await materializeStoredLyrics(
   { matchedLyric: '[00:01.00]夜', matchedRomanizedLyric: 'broken' }, parse, error => secondaryErrors.push(error))

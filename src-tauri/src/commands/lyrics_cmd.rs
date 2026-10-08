@@ -8,10 +8,20 @@ use crate::state::AppState;
 use std::time::Instant;
 use tauri::State;
 
+/// 自动识别 LRC / YRC(逐字), 支持逐字歌词编辑往返
+///
+/// 传了歌名时按匹配歌词处理：同步来的歌词多是 Android 从平台匹配的，同样去掉制作信息和标题行
 #[tauri::command]
-pub async fn parse_lrc_content(content: String) -> AppResult<Vec<LyricLine>> {
-    // 自动识别 LRC / YRC(逐字), 支持逐字歌词编辑往返
-    Ok(parser::parse_auto(&content))
+pub async fn parse_lrc_content(
+    content: String,
+    title: Option<String>,
+    artist: Option<String>,
+) -> AppResult<Vec<LyricLine>> {
+    let lines = parser::parse_auto(&content);
+    Ok(match title {
+        Some(title) => sanitize::sanitize_matched_lines(lines, &title, artist.as_deref().unwrap_or(""), ""),
+        None => lines,
+    })
 }
 
 #[tauri::command]

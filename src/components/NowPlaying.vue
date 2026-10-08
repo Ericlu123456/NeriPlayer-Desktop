@@ -210,7 +210,9 @@ async function materializeSyncedLyrics(track: TrackInfo): Promise<LyricLine[] | 
   try {
     const lines = await materializeStoredLyrics(
       payload,
-      async content => mapBackendLyrics(await invoke<any[]>('parse_lrc_content', { content })),
+      async (content, part) => mapBackendLyrics(await invoke<any[]>('parse_lrc_content', part === 'original'
+        ? { content, title: track.title, artist: track.artist }
+        : { content })),
       error => log.warn('Parse synced translation or romanization failed:', error),
     )
     if (lines?.length) rememberLyricSource(track, readSyncedLyricSource(payload))
