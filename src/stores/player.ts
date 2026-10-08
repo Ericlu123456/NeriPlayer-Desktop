@@ -942,7 +942,11 @@ export const usePlayerStore = defineStore('player', () => {
     // 倍速播放时后端时钟与插值都应按速度前进；仍拒绝明显回跳
     if (_interpIsPlaying && !forceRendered && !isClockJump
       && safePositionMs < renderedMs - POSITION_BACKWARD_TOLERANCE_MS) {
-      // 仅忽略回跳，不把锚点锁死在旧渲染值（否则倍速歌词会落后）
+      // 后端在缓冲（时钟停了）而插值还在走：渲染值不往回拉，但锚点要跟上后端，
+      // 插值随之停住、等声音追上再走；只丢弃事件的话锚点不动，歌词会按累计卡顿时长永久领先
+      positionMs.value = safePositionMs
+      _interpAnchorMs = safePositionMs
+      _interpAnchorTime = performance.now()
       return
     }
 
@@ -1301,12 +1305,13 @@ export const usePlayerStore = defineStore('player', () => {
       token,
     )
     const settings = useSettingsStore()
-    // 只有切歌交叉淡化要让上一首继续出声；其余情况一发起请求就静音它，新音源解析、缓冲再慢也不会卡着旧声音
-    const keepsPreviousAudible = isPlaying.value
-      && !!currentTrack.value && currentTrack.value.id !== track.id
+    // 换歌时一发起请求就静音上一首，新音源解析、缓冲再慢也不会卡着旧声音；切歌交叉淡化要让它继续出声。
+    // 同一首歌重新请求（断流恢复、换地址、音质切换）时旧会话在新会话就绪前继续出声，避免一断一断
+    const isTrackChange = !!currentTrack.value && currentTrack.value.id !== track.id
+    const keepsPreviousAudible = !isTrackChange || (isPlaying.value
       && settings.crossfadeNext
       && Math.round(settings.crossfadeInDuration) > 0
-      && Math.round(settings.crossfadeOutDuration) > 0
+      && Math.round(settings.crossfadeOutDuration) > 0)
     const claimStarted = performance.now()
     void invoke<void>('begin_playback_request', {
       requestGeneration: token,

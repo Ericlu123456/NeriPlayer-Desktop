@@ -1768,10 +1768,6 @@ fn audio_control_loop(
                     start_position_ms,
                     transition_label,
                 );
-                // 准备新会话（打开解码器、预缓冲）可能要好几秒，直接替换时旧歌不能在这期间继续出声
-                if matches!(transition, PlayTransition::Replace) {
-                    silence_stale_session(current.as_ref(), expected);
-                }
                 let prepared = (|| {
                     if prepare_cancel.load(Ordering::Acquire) {
                         return Err("Timed out waiting for decoded audio".into());
