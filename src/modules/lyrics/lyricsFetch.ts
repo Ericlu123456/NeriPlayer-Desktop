@@ -2,7 +2,7 @@
 import { invoke } from '@tauri-apps/api/core'
 import type { LyricLine } from '@/stores/player'
 import type { DefaultLyricSource } from '@/stores/settings'
-import { mapBackendLyrics } from './lyricsFormat'
+import { mapBackendLyrics, toEditableRomanizationText } from './lyricsFormat'
 import { defaultLyricMatchKeyword, matchLyrics, type LyricMatchSource } from './lyricMatch'
 
 export interface FetchedLyrics {
@@ -84,6 +84,47 @@ export async function fetchPreferredSourceLyrics(
 /** 网易云这首歌的音译轨原文（romalrc），没有时为 null */
 export async function fetchNeteaseRomanizedLyric(songId: number): Promise<string | null> {
   return (await invoke<string | null>('fetch_netease_romanized_lyric', { songId })) ?? null
+}
+
+// 匹配一次要搜网易云，同一首歌（含没找到）在本次运行里只查一次
+const MAX_ROMANIZATION_CACHE = 200
+const romanizationByMatch = new Map<string, Promise<string | null>>()
+
+/**
+ * 网易云音译轨（LRC 文本），对齐 Android loadNeteaseRomanizedFallback：已知网易云 ID 直接取，
+ * 否则按歌名、歌手、时长高置信度匹配网易云，取第一个带音译的结果
+ */
+export async function fetchNeteaseRomanization(
+  track: { id?: string | null; title: string; artist: string; album?: string | null; durationMs?: number | null },
+  songId: number | null,
+): Promise<string | null> {
+  if (songId) return fetchNeteaseRomanizedLyric(songId)
+  const durationMs = track.durationMs || 0
+  if (durationMs <= 0 || !track.title.trim() || !track.artist.trim()) return null
+  const key = [track.id ?? '', track.title.trim(), track.artist.trim(), durationMs].join('\u0000')
+  let pending = romanizationByMatch.get(key)
+  if (!pending) {
+    pending = matchLyrics({
+      keyword: defaultLyricMatchKeyword(track.title, track.artist),
+      title: track.title,
+      artist: track.artist,
+      album: track.album || '',
+      durationMs,
+      preferWordTimed: false,
+      sources: ['netease'],
+    }).then((results) => {
+      const best = results.find(result => result.source === 'netease' && result.confidence === 'high' && result.hasRomanization)
+      return best ? toEditableRomanizationText(best.lines) || null : null
+    })
+    // 网络失败不记住，下次还能再试
+    pending.catch(() => romanizationByMatch.delete(key))
+    romanizationByMatch.set(key, pending)
+    if (romanizationByMatch.size > MAX_ROMANIZATION_CACHE) {
+      const oldest = romanizationByMatch.keys().next().value
+      if (oldest !== undefined) romanizationByMatch.delete(oldest)
+    }
+  }
+  return pending
 }
 
 /** 只要逐字时间轴的歌词（AMLL TTML，其次酷狗 KRC） */

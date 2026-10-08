@@ -5,11 +5,25 @@ import { usePlayerStore, type LyricLine, type TrackInfo } from '@/stores/player'
 import { useSettingsStore } from '@/stores/settings'
 import { useLyricOffsetStore } from '@/stores/lyricOffset'
 import { readSyncedLyricSource } from '@/modules/lyrics/lyricOffset'
-import { fetchLyrics, fetchPreferredSourceLyrics, fetchWordTimedLyrics, preferredLyricMatchSource } from '@/modules/lyrics/lyricsFetch'
+import {
+  fetchLyrics,
+  fetchNeteaseRomanization,
+  fetchPreferredSourceLyrics,
+  fetchWordTimedLyrics,
+  preferredLyricMatchSource,
+} from '@/modules/lyrics/lyricsFetch'
 import { rememberLyricSource } from '@/modules/lyrics/lyricSource'
 import { getCachedLyrics, saveCachedLyrics } from '@/modules/lyrics/lyricsCache'
 import { loadLyricsSingleFlight, hasWordTimedLyrics } from '@/modules/lyrics/lyricsRequest'
-import { mapBackendLyrics, materializeStoredLyrics, mergeWordTimedLyricsWithBaseline, resolveStoredLyricStateFromPayload } from '@/modules/lyrics/lyricsFormat'
+import {
+  mapBackendLyrics,
+  materializeStoredLyrics,
+  mergeParsedLyricsWithRomanization,
+  mergeWordTimedLyricsWithBaseline,
+  resolveKnownNeteaseLyricSongId,
+  resolveStoredLyricStateFromPayload,
+  shouldBackfillNeteaseRomanization,
+} from '@/modules/lyrics/lyricsFormat'
 import { buildDesktopLyricsFrame, desktopLyricsLineIndex, type DesktopLyricsFrame } from './frame'
 import { createDesktopLyricsLoader } from './loader'
 import {
@@ -126,6 +140,22 @@ export function installDesktopLyricsBridge(options: DesktopLyricsBridgeOptions =
       }
     } finally {
       publishing = false
+    }
+  }
+
+  // 同步载荷里的歌词没带音译时，和播放页一样去网易云补上（音译模式下桌面歌词才有第二行）
+  async function backfillRomanization(track: TrackInfo, synced: LyricLine[]) {
+    if (!shouldBackfillNeteaseRomanization(track.syncPayload, synced)) return
+    try {
+      const text = await fetchNeteaseRomanization(track, resolveKnownNeteaseLyricSongId(track))
+      if (!text) return
+      const roman = mapBackendLyrics(await invoke<any[]>('parse_lrc_content', { content: text }))
+      const current = lines.value
+      if (!active || player.currentTrack?.id !== track.id || current.length !== synced.length || current.some(line => line.roman)) return
+      lines.value = mergeParsedLyricsWithRomanization(current, roman)
+      publish(true)
+    } catch (error) {
+      log.warn('romanization backfill unavailable:', summarizeLogError(error))
     }
   }
 
@@ -259,7 +289,11 @@ export function installDesktopLyricsBridge(options: DesktopLyricsBridgeOptions =
     sessionId = crypto.randomUUID()
     loggedFailure = false
     loader = createDesktopLyricsLoader({
-      materialize,
+      materialize: async track => {
+        const synced = await materialize(track)
+        if (synced?.length) void backfillRomanization(track, synced)
+        return synced
+      },
       mergeUpgrade: mergeWordTimedLyricsWithBaseline,
       cached: getCachedLyrics,
       cache: saveCachedLyrics,

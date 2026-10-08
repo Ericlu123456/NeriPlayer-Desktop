@@ -51,7 +51,7 @@ import {
 } from '@/modules/lyrics/lyricOffset'
 import {
   fetchLyrics,
-  fetchNeteaseRomanizedLyric,
+  fetchNeteaseRomanization,
   fetchPreferredSourceLyrics,
   fetchWordTimedLyrics,
   preferredLyricMatchSource,
@@ -304,10 +304,9 @@ function openLyricsEditor(returnView: 'main' | 'editinfo' = 'main') {
 // 音译页为空时从网易云取音译填进去（Android 编辑器同样带上已加载的音译）
 async function prefillEditorRomanization(session: number) {
   const track = player.currentTrack
-  const songId = resolveKnownNeteaseLyricSongId(track)
-  if (!track || !songId) return
+  if (!track) return
   try {
-    const text = await fetchNeteaseRomanizedLyric(songId)
+    const text = await fetchNeteaseRomanization(track, resolveKnownNeteaseLyricSongId(track))
     const stillEditing = session === lyricsEditorSession && player.currentTrack?.id === track.id
       && moreSheetView.value === 'lyrics-editor'
     if (!text || !stillEditing || lyricsRomanizationEditorText.value.trim()) return
@@ -919,9 +918,7 @@ function upgradeWordTimedLyrics(track: TrackInfo, requestId: number) {
 function backfillNeteaseRomanization(track: TrackInfo, requestId: number) {
   const baseline = fetchedLyrics.value
   if (!shouldBackfillNeteaseRomanization(track.syncPayload, baseline)) return
-  const songId = resolveKnownNeteaseLyricSongId(track)
-  if (!songId) return
-  void fetchNeteaseRomanizedLyric(songId).then(async (text) => {
+  void fetchNeteaseRomanization(track, resolveKnownNeteaseLyricSongId(track)).then(async (text) => {
     if (!text || requestId !== lyricFetchRequestId || fetchedLyrics.value !== baseline) return
     const roman = mapBackendLyrics(await invoke<any[]>('parse_lrc_content', { content: text }))
     if (requestId !== lyricFetchRequestId || fetchedLyrics.value !== baseline) return
