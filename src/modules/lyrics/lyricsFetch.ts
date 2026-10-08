@@ -60,6 +60,14 @@ export function preferredLyricMatchSource(
   return source
 }
 
+/**
+ * B 站没有平台歌词：Android 开着「优先使用逐词歌词」时先取 AMLL TTML，没有才回退。
+ * 先搜网易云会拿到另一份歌词并套上网易云的默认偏移，两端对不上
+ */
+export function prefersWordTimedLyricsFirst(playbackSource: string | null | undefined, preferWordTimed: boolean): boolean {
+  return preferWordTimed && playbackSource === 'bilibili'
+}
+
 /** 按默认歌词源匹配：只收歌名、歌手、时长都对得上的高置信度结果，找不到返回 null 回退自动 */
 export async function fetchPreferredSourceLyrics(
   track: { title: string; artist: string; album?: string | null; durationMs?: number | null },
@@ -98,7 +106,11 @@ export async function fetchNeteaseRomanization(
   track: { id?: string | null; title: string; artist: string; album?: string | null; durationMs?: number | null },
   songId: number | null,
 ): Promise<string | null> {
-  if (songId) return fetchNeteaseRomanizedLyric(songId)
+  if (songId) {
+    // 按 ID 取不到（接口失败、后端还没有这条命令）时退回匹配：匹配结果里的网易云歌词已并好音译
+    const byId = await fetchNeteaseRomanizedLyric(songId).catch(() => null)
+    if (byId) return byId
+  }
   const durationMs = track.durationMs || 0
   if (durationMs <= 0 || !track.title.trim() || !track.artist.trim()) return null
   const key = [track.id ?? '', track.title.trim(), track.artist.trim(), durationMs].join('\u0000')
@@ -113,7 +125,10 @@ export async function fetchNeteaseRomanization(
       preferWordTimed: false,
       sources: ['netease'],
     }).then((results) => {
-      const best = results.find(result => result.source === 'netease' && result.confidence === 'high' && result.hasRomanization)
+      const withRoman = results.filter(result => result.source === 'netease' && result.hasRomanization)
+      // 已知 ID 时认准这首；否则只收高置信度
+      const best = (songId ? withRoman.find(result => result.id === String(songId)) : null)
+        ?? withRoman.find(result => result.confidence === 'high')
       return best ? toEditableRomanizationText(best.lines) || null : null
     })
     // 网络失败不记住，下次还能再试

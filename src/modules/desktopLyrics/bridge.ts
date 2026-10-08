@@ -11,6 +11,7 @@ import {
   fetchPreferredSourceLyrics,
   fetchWordTimedLyrics,
   preferredLyricMatchSource,
+  prefersWordTimedLyricsFirst,
 } from '@/modules/lyrics/lyricsFetch'
 import { rememberLyricSource } from '@/modules/lyrics/lyricSource'
 import { getCachedLyrics, saveCachedLyrics } from '@/modules/lyrics/lyricsCache'
@@ -306,6 +307,15 @@ export function installDesktopLyricsBridge(options: DesktopLyricsBridgeOptions =
           if (preferred) {
             rememberLyricSource(track, preferred.source)
             return preferred.lines
+          }
+        }
+        if (prefersWordTimedLyricsFirst(source(track), settings.preferWordTimedLyrics)) {
+          const wordTimed = await fetchWordTimedLyrics({
+            title: track.title, artist: track.artist, durationMs: track.durationMs || 0,
+          }).catch(() => null)
+          if (wordTimed && hasWordTimedLyrics(wordTimed.lines)) {
+            rememberLyricSource(track, wordTimed.source)
+            return wordTimed.lines
           }
         }
         const fetched = await loadLyricsSingleFlight(track, () => fetchLyrics({

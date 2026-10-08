@@ -55,6 +55,7 @@ import {
   fetchPreferredSourceLyrics,
   fetchWordTimedLyrics,
   preferredLyricMatchSource,
+  prefersWordTimedLyricsFirst,
 } from '@/modules/lyrics/lyricsFetch'
 import { lyricSourceOf, rememberLyricSource } from '@/modules/lyrics/lyricSource'
 import { isEditableTarget } from '@/modules/shortcuts/platform'
@@ -892,6 +893,8 @@ watch(nowPlayingTrackKey, () => {
 
 let lyricFetchRequestId = 0
 onUnmounted(() => { lyricFetchRequestId++ })
+/** 只补了音译的歌词 → 补之前那份；逐字升级据此认出「歌词没被换过」 */
+const romanizationBackfilledFrom = new WeakMap<object, LyricLine[]>()
 
 function upgradeWordTimedLyrics(track: TrackInfo, requestId: number) {
   const baseline = fetchedLyrics.value
@@ -904,9 +907,11 @@ function upgradeWordTimedLyrics(track: TrackInfo, requestId: number) {
     const current = player.currentTrack
     if (!current || requestId !== lyricFetchRequestId || !settings.preferWordTimedLyrics) return
     if (identity !== JSON.stringify([current.id, current.title, current.artist, current.durationMs])) return
-    if (fetchedLyrics.value !== baseline || !hasWordTimedLyrics(lines)) return
+    const shown = fetchedLyrics.value
+    const unchanged = shown === baseline || romanizationBackfilledFrom.get(shown) === baseline
+    if (!unchanged || !hasWordTimedLyrics(lines)) return
     if (resolveStoredLyricStateFromPayload(current.syncPayload).kind !== 'absent') return
-    const merged = mergeWordTimedLyricsWithBaseline(baseline, lines)
+    const merged = mergeWordTimedLyricsWithBaseline(shown, lines)
     fetchedLyrics.value = merged
     // 逐字时间轴来自 AMLL TTML / 酷狗，偏移按它们的默认算
     rememberLyricSource(current, source)
@@ -914,17 +919,29 @@ function upgradeWordTimedLyrics(track: TrackInfo, requestId: number) {
   }).catch(error => log.warn('word timed lyric upgrade unavailable:', summarizeLogError(error)))
 }
 
-// 同步载荷里的歌词没带音译时，后台从网易云补上（显示与编辑器音译页都靠它）
+// 歌词没带音译时（同步载荷、旧缓存、非网易云来源），后台从网易云补上（显示与编辑器音译页都靠它）
 function backfillNeteaseRomanization(track: TrackInfo, requestId: number) {
-  const baseline = fetchedLyrics.value
-  if (!shouldBackfillNeteaseRomanization(track.syncPayload, baseline)) return
-  void fetchNeteaseRomanization(track, resolveKnownNeteaseLyricSongId(track)).then(async (text) => {
-    if (!text || requestId !== lyricFetchRequestId || fetchedLyrics.value !== baseline) return
+  if (!shouldBackfillNeteaseRomanization(track.syncPayload, fetchedLyrics.value)) return
+  // 等待期间逐字升级可能已换上新时间轴，音译并到届时显示的那份上
+  const stillWanted = () => requestId === lyricFetchRequestId && player.currentTrack?.id === track.id
+    && shouldBackfillNeteaseRomanization(player.currentTrack?.syncPayload, fetchedLyrics.value)
+  const songId = resolveKnownNeteaseLyricSongId(track)
+  void fetchNeteaseRomanization(track, songId).then(async (text) => {
+    if (!text) {
+      log.info('romanization backfill: none found', { trackId: track.id, songId })
+      return
+    }
+    if (!stillWanted()) return
     const roman = mapBackendLyrics(await invoke<any[]>('parse_lrc_content', { content: text }))
-    if (requestId !== lyricFetchRequestId || fetchedLyrics.value !== baseline) return
-    const merged = mergeParsedLyricsWithRomanization(baseline, roman)
-    if (!merged.some(line => line.roman)) return
+    if (!stillWanted()) return
+    const shown = fetchedLyrics.value
+    const merged = mergeParsedLyricsWithRomanization(shown, roman)
+    if (!merged.some(line => line.roman)) {
+      log.info('romanization backfill: no line matched', { trackId: track.id, romanLines: roman.length })
+      return
+    }
     fetchedLyrics.value = merged
+    romanizationBackfilledFrom.set(fetchedLyrics.value, romanizationBackfilledFrom.get(shown) ?? shown)
     cacheLyricsForTrack(track, merged)
   }).catch(error => log.warn('netease romanization backfill unavailable:', summarizeLogError(error)))
 }
@@ -990,6 +1007,7 @@ watch(nowPlayingTrackKey, async (trackKey) => {
         rememberLyricSource(track, preferred.source)
         cacheLyricsForTrack(track, preferred.lines)
         log.info('lyrics from preferred source:', { requestId, trackId: track.id, source: preferred.source })
+        backfillNeteaseRomanization(track, requestId)
         return
       }
     }
@@ -1002,6 +1020,7 @@ watch(nowPlayingTrackKey, async (trackKey) => {
         lines: cachedLyrics.length,
       })
       if (!preferredSource) upgradeWordTimedLyrics(track, requestId)
+      backfillNeteaseRomanization(track, requestId)
       return
     }
 
@@ -1018,6 +1037,19 @@ watch(nowPlayingTrackKey, async (trackKey) => {
     const { lines: nextLyrics } = await loadLyricsSingleFlight(track, async () => {
       const invokeStarted = performance.now()
       log.info('lyrics backend invoke:', { requestId, trackId: track.id })
+      if (prefersWordTimedLyricsFirst(getPlaybackSourceKind(track), settings.preferWordTimedLyrics)) {
+        const wordTimed = await fetchWordTimedLyrics({
+          title: track.title, artist: track.artist, durationMs: track.durationMs || 0,
+        }).catch((error) => {
+          log.warn('word timed lyrics unavailable, falling back:', summarizeLogError(error))
+          return null
+        })
+        if (wordTimed && hasWordTimedLyrics(wordTimed.lines)) {
+          rememberLyricSource(track, wordTimed.source)
+          cacheLyricsForTrack(track, wordTimed.lines)
+          return wordTimed
+        }
+      }
       const fetched = await fetchLyrics({
         title: track.title,
         artist: track.artist,
@@ -1056,6 +1088,7 @@ watch(nowPlayingTrackKey, async (trackKey) => {
     }
     fetchedLyrics.value = nextLyrics.length > 0 ? nextLyrics : []
     upgradeWordTimedLyrics(track, requestId)
+    backfillNeteaseRomanization(track, requestId)
     log.info('lyrics load committed:', {
       requestId,
       trackId: track.id,

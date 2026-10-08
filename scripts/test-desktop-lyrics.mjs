@@ -265,6 +265,7 @@ try {
       fetchLyrics: () => new Promise(resolve => { fetchRelease = fetched => resolve({ source: 'netease', lines: fetched }) }),
       fetchWordTimedLyrics: async () => ({ source: null, lines: [] }),
       preferredLyricMatchSource: () => null,
+      prefersWordTimedLyricsFirst: () => false,
       fetchPreferredSourceLyrics: async () => null,
     },
     '@/modules/lyrics/lyricSource': { rememberLyricSource() {} },
