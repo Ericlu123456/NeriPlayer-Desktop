@@ -975,11 +975,11 @@ const githubIsSettingRepo = ref(false)
 const GITHUB_TOKEN_URL = 'https://github.com/settings/tokens/new?scopes=repo&description=NeriPlayer%20Backup'
 // 各歌词来源的默认偏移，顺序与默认值对齐 Android 设置页
 const lyricOffsetSettings = [
-  { key: 'cloudMusicOffset', label: 'settings.netease_offset', defaultMs: DEFAULT_LYRIC_OFFSET_MS.netease },
-  { key: 'qqMusicOffset', label: 'settings.qq_offset', defaultMs: DEFAULT_LYRIC_OFFSET_MS.qq },
-  { key: 'kugouOffset', label: 'settings.kugou_offset', defaultMs: DEFAULT_LYRIC_OFFSET_MS.kugou },
-  { key: 'lrclibOffset', label: 'settings.lrclib_offset', defaultMs: DEFAULT_LYRIC_OFFSET_MS.lrclib },
-  { key: 'amllTtmlOffset', label: 'settings.amll_ttml_offset', defaultMs: DEFAULT_LYRIC_OFFSET_MS.amll_ttml },
+  { key: 'cloudMusicOffset', label: 'settings.netease_offset', defaultMs: DEFAULT_LYRIC_OFFSET_MS.netease, iconSvg: '/icons/ic_netease.svg' },
+  { key: 'qqMusicOffset', label: 'settings.qq_offset', defaultMs: DEFAULT_LYRIC_OFFSET_MS.qq, iconSvg: '/icons/ic_qq_music.svg' },
+  { key: 'kugouOffset', label: 'settings.kugou_offset', defaultMs: DEFAULT_LYRIC_OFFSET_MS.kugou, iconSvg: '/icons/ic_kugou.svg' },
+  { key: 'lrclibOffset', label: 'settings.lrclib_offset', defaultMs: DEFAULT_LYRIC_OFFSET_MS.lrclib, iconSvg: '/icons/ic_lrclib.svg' },
+  { key: 'amllTtmlOffset', label: 'settings.amll_ttml_offset', defaultMs: DEFAULT_LYRIC_OFFSET_MS.amll_ttml, iconSvg: '/icons/ic_amll.svg' },
 ] as const
 
 const lyricOffsetsChanged = computed(() => lyricOffsetSettings.some(item => settings[item.key] !== item.defaultMs))
@@ -1897,7 +1897,7 @@ useEscapeClose(
 
       <!-- 各歌词来源的默认偏移（对齐 Android）：显示的就是这类歌词实际生效的偏移 -->
       <div v-for="item in lyricOffsetSettings" :key="item.key" class="setting-card">
-        <div class="setting-icon-wrap"><span class="material-symbols-rounded">music_note</span></div>
+        <div class="setting-icon-wrap"><span class="platform-icon" :style="{ maskImage: `url(${item.iconSvg})` }"></span></div>
         <div class="setting-info">
           <div class="setting-title">{{ t(item.label) }}</div>
           <EditableRangeValue
