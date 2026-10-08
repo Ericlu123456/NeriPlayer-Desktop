@@ -66,6 +66,7 @@
     "test:search-history": "node scripts/test-search-history.mjs",
     "test:user-data-persistence": "node scripts/test-user-data-persistence.mjs",
     "test:home-continue": "node scripts/test-home-continue.mjs",
+    "test:bili-playlist-reference": "node scripts/test-bili-playlist-reference.mjs",
     "test:home-feed": "node scripts/test-home-feed.mjs",
     "test:youtube-home-layout": "node scripts/test-youtube-home-layout.mjs",
     "test:youtube-home-feed": "node scripts/test-youtube-home-feed.mjs",

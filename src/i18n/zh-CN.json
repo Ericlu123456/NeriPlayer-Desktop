@@ -400,6 +400,7 @@
     "artist_videos": "视频",
     "artist_description": "简介",
     "artist_load_more": "加载更多",
+    "playlist_partial_load_failed": "剩下的内容没加载出来：{error}",
     "artist_subscribe": "关注",
     "artist_unsubscribe": "取消关注",
     "artist_collections": "合集",

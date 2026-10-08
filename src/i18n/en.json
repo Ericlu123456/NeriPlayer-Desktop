@@ -400,6 +400,7 @@
     "artist_videos": "Videos",
     "artist_description": "About",
     "artist_load_more": "Load more",
+    "playlist_partial_load_failed": "The rest couldn't be loaded: {error}",
     "artist_subscribe": "Follow",
     "artist_unsubscribe": "Unfollow",
     "artist_collections": "Collections",

@@ -400,6 +400,7 @@
     "artist_videos": "動画",
     "artist_description": "概要",
     "artist_load_more": "さらに読み込む",
+    "playlist_partial_load_failed": "残りを読み込めませんでした：{error}",
     "artist_subscribe": "フォロー",
     "artist_unsubscribe": "フォロー解除",
     "artist_collections": "コレクション",

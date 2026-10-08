@@ -400,6 +400,7 @@
     "artist_videos": "影片",
     "artist_description": "簡介",
     "artist_load_more": "載入更多",
+    "playlist_partial_load_failed": "其餘內容未能載入：{error}",
     "artist_subscribe": "關注",
     "artist_unsubscribe": "取消關注",
     "artist_collections": "合集",

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { usePlayerStore, type TrackInfo } from '@/stores/player'
 import { useDownloadStore } from '@/stores/download'
@@ -100,14 +100,32 @@ const { fabVisible: locateFabVisible, locate: locateCurrentTrack } = useLocateCu
   suppressed: selectionMode,
 })
 
+// 路由切到另一个歌单（同一组件复用）或离开页面后，旧请求的结果一律丢弃
+let loadGeneration = 0
+const loadingMorePages = ref(false)
+const partialLoadError = ref<string | null>(null)
+
 async function loadDetail() {
+  const request = ++loadGeneration
   const mediaId = Number(route.params.mediaId)
-  if (!mediaId) return
+  const archive = route.query.kind === 'collection' || route.query.kind === 'series' ? route.query.kind : null
+  error.value = null
+  partialLoadError.value = null
+  loadingMorePages.value = false
+  if (!mediaId) {
+    error.value = t('player.load_failed')
+    isLoading.value = false
+    return
+  }
+  if (archive) {
+    await loadArchive(request, mediaId, archive)
+    return
+  }
 
   const cacheKey = playlistDetailCacheKey('bilibili-favorite', mediaId)
   isLoading.value = true
-  error.value = null
   const cached = previewCachedDetail<BiliDetailCache>(cacheKey, (detail) => {
+    if (request !== loadGeneration) return false
     applyDetailCache(detail)
     isLoading.value = false
   })
@@ -115,6 +133,7 @@ async function loadDetail() {
   try {
     // 获取收藏夹信息
     const infoData = await invoke<any>('get_bili_fav_folder_info', { mediaId })
+    if (request !== loadGeneration) return
     cached.markFresh()
     const info = infoData?.data || {}
     folderName.value = info.title || ''
@@ -128,6 +147,7 @@ async function loadDetail() {
 
     while (hasMore) {
       const data = await invoke<any>('get_bili_favorite_items', { mediaId, page })
+      if (request !== loadGeneration) return
       const items = data?.data?.medias || []
       allItems.push(...items)
       hasMore = data?.data?.has_more || false
@@ -158,13 +178,96 @@ async function loadDetail() {
       trackCount: mediaCount.value || tracks.value.length,
     })
   } catch (e: any) {
-    if (!(await cached.shown())) {
+    if (request === loadGeneration && !(await cached.shown())) {
       error.value = e?.toString() || t('player.load_failed')
     }
   } finally {
-    isLoading.value = false
+    if (request === loadGeneration) isLoading.value = false
   }
 }
+
+interface ArchivePage {
+  tracks: TrackInfo[]
+  page: number
+  total: number
+  hasMore: boolean
+}
+
+// 合集 / 视频列表：按 UP 主空间归档分页（每页 30），首页到了就先显示，其余页接着补
+const ARCHIVE_MAX_PAGES = 100
+
+async function loadArchive(request: number, contentId: number, kind: 'collection' | 'series') {
+  const mid = Number(route.query.mid)
+  const uploader = String(route.query.uploader || '')
+  const name = String(route.query.name || '')
+  folderName.value = name
+  coverUrl.value = String(route.query.cover || '')
+  mediaCount.value = Number(route.query.count) || 0
+  if (!Number.isSafeInteger(mid) || mid <= 0) {
+    error.value = t('player.load_failed')
+    isLoading.value = false
+    return
+  }
+  const cacheKey = playlistDetailCacheKey(`bilibili-${kind}`, contentId)
+  isLoading.value = true
+  // 缓存里是完整列表：新数据补齐之前继续显示它，不先缩成第一页再慢慢变长
+  let showingCache = false
+  const cached = previewCachedDetail<BiliDetailCache>(cacheKey, (detail) => {
+    if (request !== loadGeneration) return false
+    applyDetailCache(detail)
+    showingCache = true
+    isLoading.value = false
+  })
+  const toTrack = (track: TrackInfo): TrackInfo => ({ ...track, artist: track.artist || uploader, album: name })
+  const seen = new Set<string>()
+  const collected: TrackInfo[] = []
+  try {
+    for (let page = 1; page <= ARCHIVE_MAX_PAGES; page++) {
+      const loaded = await invoke<ArchivePage>('get_bili_artist_collection', { mid, contentId, kind, page })
+      if (request !== loadGeneration) return
+      for (const track of loaded.tracks.map(toTrack)) {
+        if (seen.has(track.id)) continue
+        seen.add(track.id)
+        collected.push(track)
+      }
+      if (page === 1) {
+        cached.markFresh()
+        mediaCount.value = loaded.total || mediaCount.value
+        isLoading.value = false
+      }
+      if (!showingCache || !loaded.hasMore) tracks.value = [...collected]
+      loadingMorePages.value = loaded.hasMore
+      if (!loaded.hasMore) break
+    }
+    loadingMorePages.value = false
+    tracks.value = [...collected]
+    saveDetailCache(cacheKey)
+    recordPlaylistOpen({
+      source: 'bili',
+      id: contentId,
+      mid,
+      subtype: kind === 'collection' ? 'COLLECTION' : 'SERIES',
+      name: folderName.value,
+      coverUrl: coverUrl.value,
+      trackCount: mediaCount.value || tracks.value.length,
+    })
+  } catch (e: any) {
+    if (request !== loadGeneration) return
+    loadingMorePages.value = false
+    const message = e?.toString() || t('player.load_failed')
+    // 已经显示了一部分（前几页或缓存）时保留列表，只在列表下方提示没加载完
+    if (collected.length > 0 || showingCache) partialLoadError.value = message
+    else if (!(await cached.shown())) error.value = message
+  } finally {
+    if (request === loadGeneration) isLoading.value = false
+  }
+}
+
+watch(() => [route.params.mediaId, route.query.kind, route.query.mid], () => {
+  if (route.name === 'bili-playlist') void loadDetail()
+})
+
+onUnmounted(() => { loadGeneration++ })
 
 function playAll() {
   if (tracks.value.length === 0) return
@@ -441,6 +544,14 @@ onMounted(() => {
             </button>
           </div>
         </div>
+        <div v-if="loadingMorePages" class="list-footer">
+          <span class="material-symbols-rounded spinning">progress_activity</span>
+          <span>{{ t('player.loading') }}</span>
+        </div>
+        <div v-else-if="partialLoadError" class="list-footer">
+          <span>{{ t('player.playlist_partial_load_failed', { error: partialLoadError }) }}</span>
+          <button class="retry-btn" @click="loadDetail">{{ t('player.retry') }}</button>
+        </div>
       </div>
     </template>
 
@@ -465,4 +576,14 @@ onMounted(() => {
 
 <style scoped lang="scss">
 @use '@/styles/detail-view.scss' as *;
+
+.list-footer {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 16px;
+  color: var(--md-on-surface-variant);
+  font-size: 13px;
+}
 </style>
