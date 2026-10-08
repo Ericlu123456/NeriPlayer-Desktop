@@ -2,7 +2,8 @@ use crate::error::AppResult;
 use crate::lyrics::manager::LyricsManager;
 use crate::lyrics::matcher::{LyricMatcher, MatchRequest, RankedMatch};
 use crate::lyrics::parser::{self, LyricLine};
-use crate::lyrics::FetchedLyrics;
+use crate::lyrics::sanitize;
+use crate::lyrics::{FetchedLyrics, LyricSource};
 use crate::state::AppState;
 use std::time::Instant;
 use tauri::State;
@@ -24,7 +25,19 @@ pub async fn fetch_word_timed_lyrics(
         state.transport("lyrics"),
         crate::auth::cookies::read_netease_csrf(&state.cookie_jar),
     );
-    manager.fetch_word_timed_lyrics(&title, &artist, duration_ms).await
+    let fetched = manager.fetch_word_timed_lyrics(&title, &artist, duration_ms).await?;
+    Ok(sanitize_fetched(fetched, &title, &artist))
+}
+
+/// 在线取到的歌词去掉制作信息、歌名歌手标题行；用户自己的本地歌词文件原样保留
+fn sanitize_fetched(fetched: FetchedLyrics, title: &str, artist: &str) -> FetchedLyrics {
+    if fetched.source == Some(LyricSource::Local) {
+        return fetched;
+    }
+    FetchedLyrics {
+        source: fetched.source,
+        lines: sanitize::sanitize_matched_lines(fetched.lines, title, artist, ""),
+    }
 }
 
 /// 网易云音译轨原文（romalrc）；同步来的歌词缺音译时补上，对齐 Android loadNeteaseRomanizedFallback
@@ -107,5 +120,5 @@ pub async fn fetch_lyrics(
         result.as_ref().map_or(0, |fetched| fetched.lines.len()),
         started.elapsed().as_millis(),
     );
-    result
+    result.map(|fetched| sanitize_fetched(fetched, &title, &artist))
 }

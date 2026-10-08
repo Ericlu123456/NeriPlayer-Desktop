@@ -469,6 +469,13 @@ fn for_detail<T>(request: &MatchRequest, items: Vec<T>, identity: impl Fn(&T) ->
 pub fn rank(request: &MatchRequest, candidates: Vec<MatchCandidate>) -> Vec<RankedMatch> {
     let usable = candidates
         .into_iter()
+        .map(|mut candidate| {
+            let lines = std::mem::take(&mut candidate.lines);
+            candidate.lines = super::sanitize::sanitize_matched_lines(
+                lines, &candidate.title, &candidate.artist, &candidate.album,
+            );
+            candidate
+        })
         .filter(|candidate| candidate.lines.iter().any(|line| !line.text.trim().is_empty()))
         .filter(|candidate| !has_collapsed_timeline(&candidate.lines))
         .collect::<Vec<_>>();

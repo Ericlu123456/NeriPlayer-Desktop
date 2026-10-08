@@ -2,6 +2,7 @@ pub mod parser;
 pub mod manager;
 mod external;
 pub mod matcher;
+pub mod sanitize;
 mod ttml;
 
 use parser::LyricLine;
