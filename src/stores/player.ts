@@ -3080,7 +3080,7 @@ export const usePlayerStore = defineStore('player', () => {
     lastCommandSource, lastSeekCommand, isRemoteSyncGuardActive,
     playbackSpeed, currentStreamUrl, sleepTimerMode, sleepRemainingSeconds,
     loudnessGainMb, equalizerEnabled, equalizerPresetId, equalizerBands, hasActiveEffects,
-    progress, interpolatedPositionMs, interpolatedProgress, livePositionMs,
+    progress, interpolatedPositionMs, interpolatedProgress, livePositionMs, effectivePlaybackSpeed,
     currentTimeFormatted, durationFormatted,
     play, togglePlayPause, pause, resume, seekTo, next, previous,
     flushPlayerState,

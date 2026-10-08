@@ -132,7 +132,12 @@ pub struct AppSettings {
     pub equalizer_preset_id: String,
     #[serde(deserialize_with = "lenient_i32_vec")]
     pub equalizer_bands: Vec<i32>,
+    /// 桌面歌词外观（字体、颜色、布局、锁定、窗口位置……），逐项规整在前端
+    /// normalizeDesktopLyricsStyle；这里只保证是对象且不过大
+    pub desktop_lyrics: serde_json::Value,
 }
+
+const MAX_DESKTOP_LYRICS_STYLE_BYTES: usize = 16 * 1024;
 
 /// 前端数字输入可能带小数：整数字段四舍五入接收，单个字段不能让整份设置被拒绝
 fn lenient_i32<'de, D>(deserializer: D) -> Result<i32, D::Error>
@@ -250,6 +255,7 @@ impl Default for AppSettings {
             equalizer_enabled: false,
             equalizer_preset_id: "flat".into(),
             equalizer_bands: vec![0; EQUALIZER_BAND_COUNT],
+            desktop_lyrics: serde_json::Value::Object(serde_json::Map::new()),
         }
     }
 }
@@ -313,6 +319,10 @@ impl AppSettings {
         self.playback_speed = clamp_f32(self.playback_speed, 0.25, 3.0, 1.0);
         self.loudness_gain_mb = self.loudness_gain_mb.clamp(0, 1_500);
         self.volume_balance = (clamp_f32(self.volume_balance, -1.0, 1.0, 0.0) * 100.0).round() / 100.0;
+        let style_bytes = serde_json::to_vec(&self.desktop_lyrics).map_or(usize::MAX, |bytes| bytes.len());
+        if !self.desktop_lyrics.is_object() || style_bytes > MAX_DESKTOP_LYRICS_STYLE_BYTES {
+            self.desktop_lyrics = serde_json::Value::Object(serde_json::Map::new());
+        }
 
         if self.netease_quality.trim() == "high" {
             self.netease_quality = "higher".into();
@@ -839,6 +849,24 @@ mod tests {
         }
         let missing: AppSettings = serde_json::from_value(serde_json::json!({})).unwrap();
         assert_eq!(missing.volume_balance, 0.0, "旧配置没有这个字段时居中");
+    }
+
+    #[test]
+    fn desktop_lyrics_style_is_kept_as_an_object_and_bounded() {
+        let missing: AppSettings = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(missing.desktop_lyrics, serde_json::json!({}), "旧配置没有这个字段时为空对象，前端补默认值");
+        let mut kept: AppSettings = serde_json::from_value(serde_json::json!({
+            "desktopLyrics": { "layout": "double", "fontSize": 40, "bounds": { "x": 10, "y": 20, "width": 900, "height": 180 } }
+        }))
+        .unwrap();
+        kept.normalize();
+        assert_eq!(kept.desktop_lyrics["layout"], "double");
+        assert_eq!(kept.desktop_lyrics["bounds"]["width"], 900);
+        for bad in [serde_json::json!("double"), serde_json::json!({ "fontFamily": "x".repeat(20_000) })] {
+            let mut settings = AppSettings { desktop_lyrics: bad, ..AppSettings::default() };
+            settings.normalize();
+            assert_eq!(settings.desktop_lyrics, serde_json::json!({}));
+        }
     }
 
     #[test]

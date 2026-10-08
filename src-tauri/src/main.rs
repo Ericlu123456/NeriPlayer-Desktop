@@ -437,6 +437,9 @@ fn main() {
             desktop_lyrics_cmd::close_desktop_lyrics,
             desktop_lyrics_cmd::publish_desktop_lyrics,
             desktop_lyrics_cmd::get_desktop_lyrics_snapshot,
+            desktop_lyrics_cmd::set_desktop_lyrics_lock,
+            desktop_lyrics_cmd::desktop_lyrics_hit_region,
+            desktop_lyrics_cmd::desktop_lyrics_action,
             player_cmd::trace_playback_ui,
             player_cmd::begin_playback_request,
             player_cmd::play_file,
@@ -710,9 +713,14 @@ fn pause_rendering_while_minimized(window: tauri::WebviewWindow) {
     });
 }
 
+/// 桌面歌词窗口只能读自己的快照、报告解锁按钮位置、把工具栏操作转给主窗口
 fn window_command_allowed(label: &str, command: &str) -> bool {
     label == "main"
-        || (label == desktop_lyrics_cmd::WINDOW_LABEL && command == "get_desktop_lyrics_snapshot")
+        || (label == desktop_lyrics_cmd::WINDOW_LABEL
+            && matches!(
+                command,
+                "get_desktop_lyrics_snapshot" | "desktop_lyrics_action" | "desktop_lyrics_hit_region"
+            ))
 }
 
 #[cfg(test)]
@@ -727,6 +735,9 @@ mod tests {
         assert!(super::window_command_allowed(
             "desktop-lyrics", "get_desktop_lyrics_snapshot",
         ));
+        assert!(super::window_command_allowed("desktop-lyrics", "desktop_lyrics_action"));
+        assert!(super::window_command_allowed("desktop-lyrics", "desktop_lyrics_hit_region"));
+        assert!(!super::window_command_allowed("desktop-lyrics", "set_desktop_lyrics_lock"));
         assert!(!super::window_command_allowed("desktop-lyrics", "play_url"));
         assert!(!super::window_command_allowed(
             "desktop-lyrics", "publish_desktop_lyrics",

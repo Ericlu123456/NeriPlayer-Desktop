@@ -2,6 +2,7 @@ import { defineStore } from 'pinia'
 import { ref, watch, type Ref } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { createLogger } from '@/utils/logger'
+import { normalizeDesktopLyricsStyle, type DesktopLyricsStyle } from '@/modules/desktopLyrics/style'
 
 const log = createLogger('settings')
 
@@ -100,6 +101,7 @@ export interface AppSettings {
   equalizerEnabled: boolean
   equalizerPresetId: string
   equalizerBands: number[]
+  desktopLyrics: DesktopLyricsStyle
 }
 
 interface SettingsLoadResult {
@@ -220,6 +222,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   equalizerEnabled: false,
   equalizerPresetId: 'flat',
   equalizerBands: [0, 0, 0, 0, 0],
+  desktopLyrics: normalizeDesktopLyricsStyle(null),
 }
 
 const LEGACY_KEYS: Partial<Record<SettingKey, string>> = {
@@ -437,6 +440,7 @@ function normalizeSnapshot(input: unknown): AppSettings {
   result.volumeBalance = normalizeVolumeBalance(result.volumeBalance)
   result.equalizerBands = result.equalizerBands.slice(0, 5).map(value => clamp(Math.round(value), -1500, 1500))
   while (result.equalizerBands.length < 5) result.equalizerBands.push(0)
+  result.desktopLyrics = normalizeDesktopLyricsStyle(result.desktopLyrics)
   return result
 }
 
@@ -584,6 +588,7 @@ export const useSettingsStore = defineStore('settings', () => {
   const equalizerEnabled = ref(initial.equalizerEnabled)
   const equalizerPresetId = ref(initial.equalizerPresetId)
   const equalizerBands = ref([...initial.equalizerBands])
+  const desktopLyrics = ref<DesktopLyricsStyle>(initial.desktopLyrics)
 
   const settingRefs: SettingRefs = {
     darkMode, themeColor, locale, defaultScreen, showCoverBadge,
@@ -606,7 +611,7 @@ export const useSettingsStore = defineStore('settings', () => {
     downloadYoutubeQuality, downloadBiliQuality,
     ltAllowMemberControl, ltAutoPauseOnMemberChange, ltShareAudioLinks, volume, audioOutputDevice,
     playbackSpeed, loudnessGainMb, equalizerEnabled, equalizerPresetId,
-    equalizerBands,
+    equalizerBands, desktopLyrics,
   }
 
   const isHydrated = ref(false)
@@ -702,6 +707,6 @@ export const useSettingsStore = defineStore('settings', () => {
     downloadFollowPlaybackQuality, downloadNeteaseQuality, downloadQqMusicQuality,
     downloadYoutubeQuality, downloadBiliQuality,
     ltAutoPauseOnMemberChange, ltShareAudioLinks, volume, audioOutputDevice, playbackSpeed,
-    loudnessGainMb, equalizerEnabled, equalizerPresetId, equalizerBands,
+    loudnessGainMb, equalizerEnabled, equalizerPresetId, equalizerBands, desktopLyrics,
   }
 })
