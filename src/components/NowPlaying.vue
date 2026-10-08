@@ -27,13 +27,18 @@ import { hasLyricsRequestInFlight, hasWordTimedLyrics, loadLyricsSingleFlight } 
 import {
   toEditableLyricsText,
   toEditableTranslationText,
+  toEditableRomanizationText,
   resolveStoredLyricStateFromPayload,
   resolveStoredTranslatedLyricStateFromPayload,
+  resolveStoredRomanizedLyricStateFromPayload,
+  materializeStoredLyrics,
   withUpdatedLyricsPayload,
   mapBackendLyrics as mapBackendLyricsShared,
   mergeParsedLyricsWithTranslations,
+  mergeParsedLyricsWithRomanization,
   mergeWordTimedLyricsWithBaseline,
 } from '@/modules/lyrics/lyricsFormat'
+import { lyricMatchSourceTag, type LyricMatchResult } from '@/modules/lyrics/lyricMatch'
 import {
   formatLyricOffsetMs,
   MAX_LYRIC_DEFAULT_OFFSET_MS,
@@ -60,6 +65,7 @@ import AddToPlaylistDialog from './AddToPlaylistDialog.vue'
 import ListenTogetherPanel from './ListenTogetherPanel.vue'
 import EditableRangeValue from './ui/EditableRangeValue.vue'
 import AudioEffectsPanel from './AudioEffectsPanel.vue'
+import LyricsMatchPanel from './LyricsMatchPanel.vue'
 import ContextMenu from './ui/ContextMenu.vue'
 import type { ContextMenuActionItem } from '@/utils/contextMenu'
 import { playbackSessionTrackKey } from '@/modules/playback/playbackRequest'
@@ -182,27 +188,14 @@ function readCachedLyrics(track: TrackInfo) {
 // 返回 null 表示无本地覆盖 (可在线拉取); [] 表示有意清空或解析失败
 async function materializeSyncedLyrics(track: TrackInfo): Promise<LyricLine[] | null> {
   const payload = track.syncPayload
-  const lyricState = resolveStoredLyricStateFromPayload(payload)
-  if (lyricState.kind === 'absent') return null
-  if (lyricState.kind === 'cleared') return []
   try {
-    const parsed = await invoke<any[]>('parse_lrc_content', { content: lyricState.text })
-    rememberLyricSource(track, readSyncedLyricSource(payload))
-    const translationState = resolveStoredTranslatedLyricStateFromPayload(payload)
-    let parsedTranslations: any[] = []
-    if (translationState.kind === 'present' && translationState.text.trim()) {
-      try {
-        parsedTranslations = await invoke<any[]>('parse_lrc_content', {
-          content: translationState.text,
-        })
-      } catch (e) {
-        log.warn('Parse synced translation failed:', e)
-      }
-    }
-    return mergeParsedLyricsWithTranslations(
-      mapBackendLyrics(parsed),
-      mapBackendLyrics(parsedTranslations),
+    const lines = await materializeStoredLyrics(
+      payload,
+      async content => mapBackendLyrics(await invoke<any[]>('parse_lrc_content', { content })),
+      error => log.warn('Parse synced translation or romanization failed:', error),
     )
+    if (lines?.length) rememberLyricSource(track, readSyncedLyricSource(payload))
+    return lines
   } catch (e) {
     log.warn('Materialize synced lyrics failed:', e)
     return []
@@ -219,11 +212,15 @@ function removeCachedLyricsForCurrentTrack() {
   void clearCachedLyrics(player.currentTrack)
 }
 
-/** 编辑后的歌词写回 syncPayload + 本地歌单, 供同步上传 (对齐 Android) */
+/**
+ * 编辑后的歌词写回 syncPayload + 本地歌单, 供同步上传 (对齐 Android)
+ * nextRomanized 不传时音译保持不变；传 null 清空
+ */
 async function commitLyricsToTrack(
   nextLyric: string | null,
   nextTranslated: string | null,
   source?: string | null,
+  nextRomanized?: string | null,
 ) {
   const track = player.currentTrack
   if (!track) return
@@ -232,6 +229,8 @@ async function commitLyricsToTrack(
     nextLyric,
     nextTranslated,
     source ?? 'LOCAL_EDIT',
+    undefined,
+    nextRomanized,
   )
   // CURRENT version: 有意清空也会上传 None, 与 Android v1 一致
   nextPayload.syncMetadataVersion = 1
@@ -244,81 +243,138 @@ async function commitLyricsToTrack(
   }
 }
 
-// 歌词编辑器
+// 歌词编辑器（对齐 Android LyricsEditorSheet：原文 / 翻译 / 音译三轨 + 匹配）
 const lyricsEditorText = ref('')
 const lyricsTranslationEditorText = ref('')
-const lyricsEditorTab = ref<'original' | 'translation'>('original')
+const lyricsRomanizationEditorText = ref('')
+const lyricsEditorTab = ref<'original' | 'translation' | 'romanization'>('original')
+/** 从「编辑歌曲信息」进来时返回那里 */
+const lyricsEditorReturnView = ref<'main' | 'editinfo'>('main')
+/** 编辑器里填的是匹配来的歌词时记下来源，应用后默认偏移量按它算 */
+const lyricsEditorSource = ref<string | null>(null)
 
-function openLyricsEditor() {
+function storedOrDisplayed(
+  state: ReturnType<typeof resolveStoredLyricStateFromPayload>,
+  lines: LyricLine[],
+  exportText: (lines: LyricLine[]) => string,
+) {
   // 优先使用 syncPayload 原文(保持用户编辑/YRC 源文本), 否则从当前展示行导出
+  if (state.kind === 'present') return state.text
+  return lines.length > 0 ? exportText(lines) : ''
+}
+
+function openLyricsEditor(returnView: 'main' | 'editinfo' = 'main') {
   const payload = player.currentTrack?.syncPayload
-  const stored = resolveStoredLyricStateFromPayload(payload)
-  const storedTranslation = resolveStoredTranslatedLyricStateFromPayload(payload)
   const lines = displayLyrics.value
   lyricsEditorTab.value = 'original'
-  if (stored.kind === 'present') {
-    lyricsEditorText.value = stored.text
-  } else if (lines.length > 0) {
-    lyricsEditorText.value = toEditableLyricsText(lines)
-  } else {
-    lyricsEditorText.value = ''
-  }
-  if (storedTranslation.kind === 'present') {
-    lyricsTranslationEditorText.value = storedTranslation.text
-  } else if (lines.length > 0) {
-    lyricsTranslationEditorText.value = toEditableTranslationText(lines)
-  } else {
-    lyricsTranslationEditorText.value = ''
-  }
+  lyricsEditorReturnView.value = returnView
+  lyricsEditorSource.value = null
+  lyricsEditorText.value = storedOrDisplayed(resolveStoredLyricStateFromPayload(payload), lines, toEditableLyricsText)
+  lyricsTranslationEditorText.value = storedOrDisplayed(
+    resolveStoredTranslatedLyricStateFromPayload(payload), lines, toEditableTranslationText)
+  lyricsRomanizationEditorText.value = storedOrDisplayed(
+    resolveStoredRomanizedLyricStateFromPayload(payload), lines, toEditableRomanizationText)
   goToSubView('lyrics-editor')
+}
+
+function leaveLyricsEditor() {
+  if (lyricsEditorReturnView.value === 'editinfo') goBackTo('editinfo')
+  else goBackToMain()
+}
+
+async function parseOptionalLyricTrack(text: string, label: string): Promise<LyricLine[]> {
+  if (!text) return []
+  try {
+    return mapBackendLyrics(await invoke<any[]>('parse_lrc_content', { content: text }))
+  } catch (e) {
+    log.warn(`Parse ${label} failed, applying the other tracks:`, e)
+    return []
+  }
 }
 
 async function applyLyricsFromEditor() {
   const text = lyricsEditorText.value.trim()
   const translationText = lyricsTranslationEditorText.value.trim()
+  const romanizationText = lyricsRomanizationEditorText.value.trim()
   if (!text) {
     // 清除歌词: 本地 cache + syncPayload matched* 置空 (CURRENT 版本会同步清空)
     fetchedLyrics.value = []
     removeCachedLyricsForCurrentTrack()
-    await commitLyricsToTrack(null, null, 'LOCAL_EDIT')
+    await commitLyricsToTrack(null, null, 'LOCAL_EDIT', null)
     toast.success(t('player.lyrics_cleared'))
-    goBackToMain()
+    leaveLyricsEditor()
     return
   }
   try {
     // parse_lrc_content 已走 parse_auto, 支持 YRC 逐字往返
     const parsed = await invoke<any[]>('parse_lrc_content', { content: text })
-    let parsedTranslations: any[] = []
-    if (translationText) {
-      try {
-        parsedTranslations = await invoke<any[]>('parse_lrc_content', { content: translationText })
-      } catch (e) {
-        log.warn('Parse translation LRC failed, applying original only:', e)
-      }
-    }
-    const nextLyrics = mergeParsedLyricsWithTranslations(
-      mapBackendLyrics(parsed),
-      mapBackendLyrics(parsedTranslations),
+    const nextLyrics = mergeParsedLyricsWithRomanization(
+      mergeParsedLyricsWithTranslations(
+        mapBackendLyrics(parsed),
+        await parseOptionalLyricTrack(translationText, 'translation'),
+      ),
+      await parseOptionalLyricTrack(romanizationText, 'romanization'),
     )
+    const source = lyricsEditorSource.value ?? 'LOCAL_EDIT'
     fetchedLyrics.value = nextLyrics
-    rememberLyricSource(player.currentTrack, 'LOCAL_EDIT')
+    rememberLyricSource(player.currentTrack, source)
     cacheLyricsForTrack(player.currentTrack, nextLyrics)
     // 原文保留编辑器文本(YRC/LRC), 与 Android toEditableLyricsText 往返一致
-    await commitLyricsToTrack(text, translationText || null, 'LOCAL_EDIT')
+    await commitLyricsToTrack(text, translationText || null, source, romanizationText || null)
     toast.success(t('player.lyrics_applied'))
   } catch (e) {
     log.error('Parse lyrics failed:', e)
     toast.error(String(e))
   }
-  goBackToMain()
+  leaveLyricsEditor()
 }
 
-// 歌词填充（搜索 + 应用歌词）
-const lyricFillQuery = ref('')
-const lyricFillResults = ref<any[]>([])
-const isLyricFilling = ref(false)
-const lyricFillPlatform = ref<'netease' | 'lrclib' | 'qq'>('netease')
+// 歌词匹配（对齐 Android 编辑器「匹配」）：从编辑器进来时填回编辑器，从菜单进来时直接应用
+const lyricMatchTarget = ref<'track' | 'editor'>('track')
+const lyricMatchSession = ref(0)
 
+function openLyricMatch(target: 'track' | 'editor') {
+  lyricMatchTarget.value = target
+  lyricMatchSession.value++
+  goToSubView('lyrics-fill')
+}
+
+function leaveLyricMatch() {
+  if (lyricMatchTarget.value === 'editor') goBackTo('lyrics-editor')
+  else goBackToMain()
+}
+
+async function onLyricMatchPicked(result: LyricMatchResult) {
+  const source = lyricMatchSourceTag(result.source)
+  const lyricText = toEditableLyricsText(result.lines)
+  const translationText = toEditableTranslationText(result.lines)
+  const romanizationText = toEditableRomanizationText(result.lines)
+  if (lyricMatchTarget.value === 'editor') {
+    lyricsEditorText.value = lyricText
+    lyricsTranslationEditorText.value = translationText
+    // 候选没有音译时保留用户已填的音译
+    if (romanizationText) lyricsRomanizationEditorText.value = romanizationText
+    lyricsEditorSource.value = source
+    lyricsEditorTab.value = 'original'
+    toast.success(t('player.lyrics_match_filled'))
+    goBackTo('lyrics-editor')
+    return
+  }
+  try {
+    fetchedLyrics.value = result.lines
+    rememberLyricSource(player.currentTrack, source)
+    cacheLyricsForTrack(player.currentTrack, result.lines)
+    // 换了一份歌词：候选没有音译时清掉旧音译，免得挂到新歌词上
+    await commitLyricsToTrack(lyricText, translationText || null, source, romanizationText || null)
+    toast.success(t('player.lyrics_fill_applied'))
+    goBackToMain()
+  } catch (e) {
+    log.error('Apply matched lyrics failed:', e)
+    toast.error(String(e))
+  }
+}
+
+// 「获取歌曲信息」的搜索结果自带歌词时直接解析
 async function parseLyricsFromSearchResult(result: any): Promise<{
   lines: LyricLine[]
   rawLyric: string
@@ -361,72 +417,6 @@ async function parseLyricsFromSearchResult(result: any): Promise<{
   }
 
   return null
-}
-
-async function doLyricFillSearch() {
-  const q = lyricFillQuery.value.trim()
-  if (!q) return
-  isLyricFilling.value = true
-  lyricFillResults.value = []
-  try {
-    const results = await invoke<any[]>('search', {
-      query: q,
-      platform: lyricFillPlatform.value,
-      includeLyrics: true,
-    })
-    lyricFillResults.value = results
-  } catch (e) {
-    log.error('Lyric fill search failed:', e)
-  } finally {
-    isLyricFilling.value = false
-  }
-}
-
-async function applyLyricFill(result: any) {
-  try {
-    const source = lyricSourceForPlatform(result?.source || result?.platform || lyricFillPlatform.value)
-    const direct = await parseLyricsFromSearchResult(result)
-    if (direct && direct.lines.length > 0) {
-      fetchedLyrics.value = direct.lines
-      rememberLyricSource(player.currentTrack, source)
-      cacheLyricsForTrack(player.currentTrack, direct.lines)
-      // 搜索填充也写回本地 syncPayload, 不直接覆写云端; 下次同步上传
-      await commitLyricsToTrack(direct.rawLyric, direct.rawTranslated, source)
-      toast.success(t('player.lyrics_fill_applied'))
-      goBackToMain()
-      return
-    }
-    const idText = String(result.id || '')
-    const neteaseId = idText.startsWith('netease:') ? parseInt(idText.replace('netease:', '')) : null
-    const qqSongMid = idText.startsWith('qq:') ? idText.replace('qq:', '') : null
-    const fetched = await fetchLyrics({
-      title: result.title || '',
-      artist: result.artist || '',
-      durationSecs: Math.floor((result.duration_ms || 0) / 1000),
-      audioPath: null,
-      neteaseId,
-      qqSongMid,
-      youtubeVideoId: null,
-    })
-    const nextLyrics = fetched.lines
-    fetchedLyrics.value = nextLyrics
-    // 兜底可能落到 LRCLIB / AMLL 等别的源，按实际来源记，重启后偏移量才对得上
-    const actualSource = fetched.source ? lyricSourceForPlatform(fetched.source) : source
-    rememberLyricSource(player.currentTrack, actualSource)
-    cacheLyricsForTrack(player.currentTrack, nextLyrics)
-    if (nextLyrics.length > 0) {
-      await commitLyricsToTrack(
-        toEditableLyricsText(nextLyrics),
-        toEditableTranslationText(nextLyrics) || null,
-        actualSource,
-      )
-    }
-    toast.success(t('player.lyrics_fill_applied'))
-    goBackToMain()
-  } catch (e) {
-    log.error('Lyric fill failed:', e)
-    toast.error(String(e))
-  }
 }
 
 const fetchedLyrics = ref<LyricLine[]>([])
@@ -1254,8 +1244,12 @@ function openQualitySwitcher() {
   goToSubView('quality')
 }
 function goBackToMain() {
+  goBackTo('main')
+}
+
+function goBackTo(view: typeof moreSheetView.value) {
   moreSheetTransition.value = 'slide-right'
-  moreSheetView.value = 'main'
+  moreSheetView.value = view
 }
 
 // 关闭更多选项面板时重置子视图
@@ -1565,10 +1559,7 @@ const audioEffectsSummary = computed(() => {
 })
 
 function openLyricsFill() {
-  lyricFillQuery.value = player.currentTrack?.title || ''
-  lyricFillResults.value = []
-  lyricFillPlatform.value = currentSource.value === 'netease' ? 'netease' : (currentSource.value === 'qq' ? 'qq' : 'lrclib')
-  goToSubView('lyrics-fill')
+  openLyricMatch('track')
 }
 
 const currentTrackId = computed(() => player.currentTrack?.id || '')
@@ -2591,7 +2582,7 @@ const sliderActiveColor = computed(() => {
                 </div>
                 <span class="material-symbols-rounded np-more-chevron">chevron_right</span>
               </button>
-              <button class="np-more-list-item" @click="openLyricsEditor">
+              <button class="np-more-list-item" @click="openLyricsEditor()">
                 <span class="material-symbols-rounded">edit_note</span>
                 <div class="np-more-list-info">
                   <span class="np-more-list-headline">{{ t('player.lyrics_editor') }}</span>
@@ -2856,6 +2847,14 @@ const sliderActiveColor = computed(() => {
               <label class="np-more-form-label">{{ t('player.cover_url_label') }}</label>
               <input v-model="editCoverUrl" class="np-more-input" />
 
+              <!-- 对齐 Android：歌曲信息里直接进歌词编辑 -->
+              <div class="np-more-form-actions">
+                <button class="np-more-form-btn" @click="openLyricsEditor('editinfo')">
+                  <span class="material-symbols-rounded">edit_note</span>
+                  {{ t('player.edit_lyrics') }}
+                </button>
+              </div>
+
               <div class="np-more-form-actions">
                 <button class="np-more-form-btn primary" @click="saveEditInfo">
                   <span class="material-symbols-rounded">check</span>
@@ -2986,10 +2985,14 @@ const sliderActiveColor = computed(() => {
           <!-- 子视图：歌词编辑器（对齐 Android LyricsEditorSheet） -->
           <template v-else-if="moreSheetView === 'lyrics-editor'">
             <div class="np-more-sub-header">
-              <button class="np-more-back" @click="goBackToMain()">
+              <button class="np-more-back" @click="leaveLyricsEditor()">
                 <span class="material-symbols-rounded">arrow_back</span>
               </button>
               <h4 class="np-more-title">{{ t('player.lyrics_editor') }}</h4>
+              <button class="np-more-header-action" @click="openLyricMatch('editor')">
+                <span class="material-symbols-rounded">manage_search</span>
+                {{ t('player.lyrics_match_action') }}
+              </button>
             </div>
             <div class="np-lyrics-editor">
               <div class="np-more-segmented">
@@ -3005,6 +3008,12 @@ const sliderActiveColor = computed(() => {
                 >
                   {{ t('player.lyrics_editor_translation') }}
                 </button>
+                <button
+                  :class="{ active: lyricsEditorTab === 'romanization' }"
+                  @click="lyricsEditorTab = 'romanization'"
+                >
+                  {{ t('player.lyrics_editor_romanization') }}
+                </button>
               </div>
               <textarea
                 v-if="lyricsEditorTab === 'original'"
@@ -3014,10 +3023,17 @@ const sliderActiveColor = computed(() => {
                 spellcheck="false"
               />
               <textarea
-                v-else
+                v-else-if="lyricsEditorTab === 'translation'"
                 v-model="lyricsTranslationEditorText"
                 class="np-lyrics-textarea"
                 :placeholder="t('player.lyrics_translation_placeholder')"
+                spellcheck="false"
+              />
+              <textarea
+                v-else
+                v-model="lyricsRomanizationEditorText"
+                class="np-lyrics-textarea"
+                :placeholder="t('player.lyrics_romanization_placeholder')"
                 spellcheck="false"
               />
               <div class="np-more-form-actions">
@@ -3025,7 +3041,7 @@ const sliderActiveColor = computed(() => {
                   <span class="material-symbols-rounded">check</span>
                   {{ t('player.lyrics_apply') }}
                 </button>
-                <button class="np-more-form-btn" @click="lyricsEditorText = ''; lyricsTranslationEditorText = ''; applyLyricsFromEditor()">
+                <button class="np-more-form-btn" @click="lyricsEditorText = ''; lyricsTranslationEditorText = ''; lyricsRomanizationEditorText = ''; applyLyricsFromEditor()">
                   <span class="material-symbols-rounded">clear_all</span>
                   {{ t('player.lyrics_clear') }}
                 </button>
@@ -3033,62 +3049,26 @@ const sliderActiveColor = computed(() => {
             </div>
           </template>
 
-          <!-- 子视图：歌词填充（对齐 Android FillOptionsDialog） -->
+          <!-- 子视图：歌词匹配（对齐 Android 歌词编辑器「匹配」；从菜单进来时直接应用） -->
           <template v-else-if="moreSheetView === 'lyrics-fill'">
             <div class="np-more-sub-header">
-              <button class="np-more-back" @click="goBackToMain()">
+              <button class="np-more-back" @click="leaveLyricMatch()">
                 <span class="material-symbols-rounded">arrow_back</span>
               </button>
-              <h4 class="np-more-title">{{ t('player.lyrics_fill') }}</h4>
+              <h4 class="np-more-title">{{ t(lyricMatchTarget === 'editor' ? 'player.lyrics_match' : 'player.lyrics_fill') }}</h4>
             </div>
-            <div class="np-more-search-bar">
-              <input
-                v-model="lyricFillQuery"
-                class="np-more-input"
-                :placeholder="t('player.search_song')"
-                @keydown.enter="doLyricFillSearch"
-              />
-              <button class="np-more-search-btn" @click="doLyricFillSearch" :disabled="isLyricFilling">
-                <span class="material-symbols-rounded">search</span>
-              </button>
-            </div>
-            <div class="np-more-segmented platform">
-              <button
-                :class="{ active: lyricFillPlatform === 'netease' }"
-                @click="lyricFillPlatform = 'netease'; lyricFillResults = []"
-              >
-                {{ t('player.source_netease') }}
-              </button>
-              <button
-                :class="{ active: lyricFillPlatform === 'qq' }"
-                @click="lyricFillPlatform = 'qq'; lyricFillResults = []"
-              >
-                {{ t('player.source_qq') }}
-              </button>
-              <button
-                :class="{ active: lyricFillPlatform === 'lrclib' }"
-                @click="lyricFillPlatform = 'lrclib'; lyricFillResults = []"
-              >
-                LRCLIB
-              </button>
-            </div>
-            <div v-if="isLyricFilling" class="np-more-status">{{ t('player.searching') }}</div>
-            <div v-else-if="lyricFillResults.length === 0 && lyricFillQuery" class="np-more-status">{{ t('player.no_results') }}</div>
-            <div class="np-more-search-results">
-              <button
-                v-for="(r, ri) in lyricFillResults"
-                :key="ri"
-                class="np-more-search-item"
-                @click="applyLyricFill(r)"
-              >
-                <BilibiliCoverImage :src="r.cover_url" class="np-more-search-cover"><span class="np-more-search-cover np-more-search-cover-fallback material-symbols-rounded filled">music_note</span></BilibiliCoverImage>
-                <div class="np-more-search-info">
-                  <span class="np-more-search-title">{{ r.title }}</span>
-                  <span class="np-more-search-artist">{{ r.artist }}</span>
-                </div>
-                <span class="material-symbols-rounded" style="font-size: 18px; color: rgba(255,255,255,0.3)">lyrics</span>
-              </button>
-            </div>
+            <LyricsMatchPanel
+              v-if="player.currentTrack"
+              :key="`${lyricMatchSession}:${player.currentTrack.id}`"
+              :title="player.currentTrack.title"
+              :artist="player.currentTrack.artist"
+              :album="player.currentTrack.album"
+              :duration-ms="player.currentTrack.durationMs || 0"
+              :playback-source="currentSource"
+              :prefer-word-timed="settings.advancedLyrics"
+              :apply-label="t(lyricMatchTarget === 'editor' ? 'player.lyrics_match_fill_editor' : 'player.lyrics_match_apply')"
+              @pick="onLyricMatchPicked"
+            />
           </template>
 
           </div>
@@ -4681,6 +4661,25 @@ const sliderActiveColor = computed(() => {
   border-bottom: 1px solid rgba(255,255,255,0.06);
 
   .np-more-title { margin: 0; }
+
+  .np-more-header-action {
+    margin-left: auto;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 6px 12px 6px 10px;
+    border: none;
+    border-radius: 999px;
+    background: rgba(255,255,255,0.1);
+    color: rgba(255,255,255,0.85);
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.15s;
+
+    .material-symbols-rounded { font-size: 18px; }
+    &:hover { background: rgba(255,255,255,0.16); }
+  }
 }
 
 .np-more-back {
