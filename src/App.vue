@@ -380,7 +380,13 @@ watch(
 
 // 启动时初始化：加载同步配置 + 检查登录状态 + 自动同步
 onMounted(async () => {
-  uninstallDesktopLyrics = installDesktopLyricsBridge()
+  uninstallDesktopLyrics = installDesktopLyricsBridge({
+    openSettings: () => {
+      if (isNowPlayingOpen.value) closeNowPlaying()
+      // 带上时间戳：已经在设置页时也能再次跳到桌面歌词分区
+      void router.push({ name: 'settings', query: { section: 'lyrics', focus: 'desktop-lyrics', at: String(Date.now()) } })
+    },
+  })
   const syncStore = useSyncStore()
   const authStore = useAuthStore()
   window.addEventListener('beforeunload', handleBeforeUnload)

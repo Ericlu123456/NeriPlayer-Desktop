@@ -74,7 +74,8 @@ import { getTrackCoverUrl } from '@/utils/trackCover'
 import { summarizeLogError } from '@/utils/logSanitizer'
 import { neteaseSongArtists } from '@/modules/library/artistNavigation'
 import { splitArtistNames } from '@/modules/library/localArtists'
-import { openDesktopLyricsWindow } from '@/modules/desktopLyrics/bridge'
+import { closeDesktopLyricsWindow, desktopLyricsOpen, openDesktopLyricsWindow } from '@/modules/desktopLyrics/bridge'
+import { normalizeDesktopLyricsStyle } from '@/modules/desktopLyrics/style'
 import { getPlaybackSourceKind } from '@/modules/playback/playbackSource'
 import { usePlaybackAudioInfoDisplay } from '@/composables/usePlaybackAudioInfoDisplay'
 import {
@@ -100,14 +101,22 @@ const downloadStore = useDownloadStore()
 const lyricOffsetStore = useLyricOffsetStore()
 const router = useRouter()
 const { t } = useI18n()
-async function showDesktopLyrics() {
+async function toggleDesktopLyrics() {
   try {
-    await openDesktopLyricsWindow()
-    hideMoreSheet()
+    if (desktopLyricsOpen.value) {
+      await closeDesktopLyricsWindow()
+    } else {
+      await openDesktopLyricsWindow()
+      hideMoreSheet()
+    }
   } catch (error) {
     log.warn('desktop lyrics window failed:', summarizeLogError(error))
     toast.error(t('player.desktop_lyrics_failed'))
   }
+}
+
+function toggleDesktopLyricsLock() {
+  settings.desktopLyrics = normalizeDesktopLyricsStyle({ ...settings.desktopLyrics, locked: !settings.desktopLyrics.locked })
 }
 const playViewMode = ref<'cover' | 'lyrics'>('cover')
 const coverLoadError = ref(false)
@@ -2568,10 +2577,17 @@ const sliderActiveColor = computed(() => {
                   </button>
                 </div>
               </div>
-              <button class="np-more-list-item" @click="showDesktopLyrics">
+              <button class="np-more-list-item" :class="{ active: desktopLyricsOpen }" @click="toggleDesktopLyrics">
                 <span class="material-symbols-rounded">picture_in_picture_alt</span>
                 <div class="np-more-list-info">
                   <span class="np-more-list-headline">{{ t('player.desktop_lyrics') }}</span>
+                </div>
+                <span v-if="desktopLyricsOpen" class="material-symbols-rounded np-more-list-check">check</span>
+              </button>
+              <button v-if="desktopLyricsOpen" class="np-more-list-item" @click="toggleDesktopLyricsLock">
+                <span class="material-symbols-rounded">{{ settings.desktopLyrics.locked ? 'lock' : 'lock_open' }}</span>
+                <div class="np-more-list-info">
+                  <span class="np-more-list-headline">{{ t(settings.desktopLyrics.locked ? 'desktop_lyrics.unlock' : 'desktop_lyrics.lock') }}</span>
                 </div>
               </button>
               <button class="np-more-list-item" @click="openLyricsFill">
@@ -4692,6 +4708,12 @@ const sliderActiveColor = computed(() => {
   color: rgba(255,255,255,0.7);
   transition: background 0.15s;
   &:hover { background: rgba(255,255,255,0.08); }
+}
+
+.np-more-list-check {
+  margin-left: auto;
+  font-size: 20px;
+  color: var(--md-primary, #d0bcff);
 }
 
 // Android 风格列表项
