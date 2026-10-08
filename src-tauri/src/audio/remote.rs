@@ -6,7 +6,7 @@ use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex, OnceLock};
+use std::sync::{Arc, Condvar, LazyLock, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
 use symphonia::core::audio::{AudioBufferRef, SampleBuffer, SignalSpec};
 use symphonia::core::codecs::{self, Decoder, DecoderOptions, CODEC_TYPE_NULL};
@@ -521,6 +521,12 @@ impl RemoteAudioSource {
         }
         let initial_block = initial_block_bytes(duration_hint_ms);
         let probe_started = Instant::now();
+        tokio::select! {
+            () = join_warming_probe(&url) => {}
+            () = wait_for_generation_change(&playback_generation, expected_generation) => {
+                return Err(AppError::Audio("Playback request superseded".into()));
+            }
+        }
         let warm = take_warm_probe(&url);
         let probe_elapsed_ms = warm.as_ref().map(|probe| probe.elapsed_ms);
         let range_result = if let Some(probe) = warm {
@@ -531,12 +537,12 @@ impl RemoteAudioSource {
                 probe.fetched_at.elapsed().as_millis(),
                 probe.data.len(),
             );
-            Ok((probe.total_len, probe.data))
+            Ok(ProbeHead { total_len: probe.total_len, data: probe.data, rest: None })
         } else {
             // 连接层失败（重置、超时）只说明这条链路一时不通，换条连接再试一次；
             // 状态码或 Range 不受支持则直接交给调用方走兜底
             let range_probe = async {
-                match probe_range_len(&client, &url, &referer, initial_block).await {
+                match probe_range_head(&client, &url, &referer, initial_block, true).await {
                     Err(AppError::Network(error)) if error.is_connect() || error.is_timeout() => {
                         log::warn!(
                             target: "remote-audio",
@@ -545,7 +551,7 @@ impl RemoteAudioSource {
                             probe_started.elapsed().as_millis(),
                             error.without_url(),
                         );
-                        probe_range_len(&client, &url, &referer, initial_block).await
+                        probe_range_head(&client, &url, &referer, initial_block, true).await
                     }
                     result => result,
                 }
@@ -569,16 +575,17 @@ impl RemoteAudioSource {
             probe_started.elapsed().as_millis(),
             open_started.elapsed().as_millis(),
         );
-        let (total_len, initial_segment) = match range_result {
-            Ok((len, data)) => {
+        let (total_len, initial_segment, probe_rest) = match range_result {
+            Ok(ProbeHead { total_len: len, data, rest }) => {
                 log::info!(
                     target: "remote-audio",
-                    "range probe data host={}, total_len={}, initial_bytes={}",
+                    "range probe data host={}, total_len={}, initial_bytes={}, streaming_rest={}",
                     host,
                     len,
                     data.len(),
+                    rest.as_ref().map_or(0, |(end, _)| end.saturating_add(1).saturating_sub(data.len() as u64)),
                 );
-                (len, Some(CachedSegment { start: 0, data }))
+                (len, Some(CachedSegment { start: 0, data }), rest)
             }
             Err(range_error) => {
                 if playback_generation.load(Ordering::Acquire) != expected_generation {
@@ -630,6 +637,7 @@ impl RemoteAudioSource {
             );
         }
 
+        let head_len = initial_segment.as_ref().map_or(0, |segment| segment.data.len() as u64);
         let initial_disk_segment = initial_segment
             .as_ref()
             .map(|segment| (segment.start, segment.data.clone()));
@@ -799,6 +807,9 @@ impl RemoteAudioSource {
             let allow_linear_fallback =
                 matches!(access_mode, RemoteAccessMode::LongFormProgressive);
             build_seek_index_for_long_form(&inner, duration_hint_ms, allow_linear_fallback);
+        }
+        if let Some((rest_end, response)) = probe_rest {
+            continue_probe_in_background(&inner, head_len, rest_end, response, probe_started);
         }
         replenish_prefetch_window(&inner, 0);
 
@@ -1407,6 +1418,11 @@ impl Read for RemoteAudioSource {
             let mut read = self.read_cached_at(physical, &mut out[total_read..window]);
             if read == 0 {
                 read = self.read_disk_cached_at(physical, &mut out[total_read..window]);
+            }
+            // 已经读到数据、下一段还在路上时先交出去：FFmpeg 一次要 64KB，凑满要等慢链路上的下一块，
+            // 起播就被这一块卡住。短读是 Read 的正常语义，调用方会接着读
+            if read == 0 && total_read > 0 {
+                break;
             }
             if read == 0 {
                 match self.fetch_physical_range(physical, limit) {
@@ -3058,8 +3074,31 @@ struct WarmProbe {
 
 /// 直链签名本身也会过期，留太久的首包没用
 const WARM_PROBE_TTL: Duration = Duration::from_secs(10 * 60);
-const WARM_PROBE_LIMIT: usize = 3;
+/// 预开只拉 64KB：够解码起步（Opus 约 3 秒），冷连接上少收一半正文就能早一秒就绪，
+/// 后面的数据走预开留下的热连接
+const PREWARM_BLOCK_BYTES: u64 = 64 * 1024;
+/// 下一首、鼠标停着的那首，外加切换途中的余量
+const WARM_PROBE_LIMIT: usize = 4;
 static WARM_PROBES: Mutex<Vec<WarmProbe>> = Mutex::new(Vec::new());
+
+/// 正在预开的地址：正式打开撞上时等它，别对同一台冷主机再建一条连接互相抢带宽
+static WARMING: LazyLock<Mutex<HashMap<String, Arc<tokio::sync::Notify>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+/// 等预开的上限：超过就自己拉，预开卡住不能拖住起播
+const WARMING_JOIN_TIMEOUT: Duration = Duration::from_secs(6);
+
+/// 同一地址的预开还在路上就等它出结果；返回时预开已结束或等不及了
+async fn join_warming_probe(url: &str) {
+    let Some(notify) = WARMING.lock().ok().and_then(|warming| warming.get(url).cloned()) else {
+        return;
+    };
+    // Notified 一创建就能收到 notify_waiters，先建再复查，不会漏掉中间的完成通知
+    let notified = notify.notified();
+    if !WARMING.lock().is_ok_and(|warming| warming.contains_key(url)) {
+        return;
+    }
+    let _ = tokio::time::timeout(WARMING_JOIN_TIMEOUT, notified).await;
+}
 
 fn take_warm_probe(url: &str) -> Option<WarmProbe> {
     let mut probes = WARM_PROBES.lock().ok()?;
@@ -3082,8 +3121,39 @@ pub async fn prewarm(
     if already_warm {
         return Ok(false);
     }
+    let notify = {
+        let Ok(mut warming) = WARMING.lock() else {
+            return Ok(false);
+        };
+        if warming.contains_key(url) {
+            return Ok(false);
+        }
+        let notify = Arc::new(tokio::sync::Notify::new());
+        warming.insert(url.to_owned(), Arc::clone(&notify));
+        notify
+    };
+    // 不管成败都要摘掉登记并唤醒等待方，否则正式打开会白等到超时
+    struct WarmingGuard<'a> {
+        url: &'a str,
+        notify: Arc<tokio::sync::Notify>,
+    }
+    impl Drop for WarmingGuard<'_> {
+        fn drop(&mut self) {
+            if let Ok(mut warming) = WARMING.lock() {
+                warming.remove(self.url);
+            }
+            self.notify.notify_waiters();
+        }
+    }
+    let _guard = WarmingGuard { url, notify };
     let started = Instant::now();
-    let (total_len, data) = probe_range_len(client, url, referer, initial_block_bytes(duration_hint_ms)).await?;
+    let full_block = initial_block_bytes(duration_hint_ms);
+    let block = if full_block > REMOTE_INITIAL_BLOCK_BYTES { full_block } else { PREWARM_BLOCK_BYTES };
+    let (mut total_len, mut data) = probe_range_len(client, url, referer, block).await?;
+    if block < full_block.min(total_len) && !probe_head_is_self_contained(&data) {
+        // MP4 文件头比预开块大：补拉完整首包，打开阶段建索引要用
+        (total_len, data) = probe_range_len(client, url, referer, full_block).await?;
+    }
     let probe = WarmProbe {
         url: url.to_owned(),
         total_len,
@@ -3107,8 +3177,39 @@ async fn probe_range_len(
     referer: &str,
     initial_block_bytes: u64,
 ) -> AppResult<(u64, Vec<u8>)> {
-    let range_end = initial_block_bytes.max(REMOTE_INITIAL_BLOCK_BYTES).saturating_sub(1);
-    let response = client
+    let head = probe_range_head(client, url, referer, initial_block_bytes, false).await?;
+    Ok((head.total_len, head.data))
+}
+
+/// 首包收到这么多、并且文件头已经完整，就可以开始解码；同一响应剩下的部分在后台接着收
+const PROBE_EARLY_RETURN_BYTES: usize = 32 * 1024;
+
+struct ProbeHead {
+    total_len: u64,
+    data: Vec<u8>,
+    /// 提前返回时还没收完的部分：(物理尾偏移, 仍在传输的响应)
+    rest: Option<(u64, reqwest::Response)>,
+}
+
+/// 打开阶段只从首包解析 MP4 文件头（moov、sidx 都在第一个 moof/mdat 之前）。
+/// 其它容器不靠首包建任何状态，解码器读到哪拉到哪
+fn probe_head_is_self_contained(head: &[u8]) -> bool {
+    let is_iso_bmff = head.len() >= 8
+        && matches!(&head[4..8], b"ftyp" | b"styp" | b"moov" | b"sidx" | b"free" | b"skip" | b"wide" | b"moof" | b"mdat");
+    !is_iso_bmff || detect_mp4_header_end(head).is_some()
+}
+
+/// 慢链路上新连接的拥塞窗口要好几个往返才撑得开，128KB 首包光收完正文就要 1 秒左右；
+/// allow_early 时收够文件头和开头一小段就返回，让解码先跑起来
+async fn probe_range_head(
+    client: &reqwest::Client,
+    url: &str,
+    referer: &str,
+    initial_block_bytes: u64,
+    allow_early: bool,
+) -> AppResult<ProbeHead> {
+    let range_end = initial_block_bytes.max(1).saturating_sub(1);
+    let mut response = client
         .get(url)
         .header(REFERER, referer)
         .header(USER_AGENT, playback_user_agent(url))
@@ -3132,15 +3233,87 @@ async fn probe_range_len(
         .ok_or_else(|| {
             AppError::Audio("Remote Range response did not include a valid byte range".into())
         })?;
-    let data = response
-        .bytes()
-        .await
-        .map_err(AppError::Network)?
-        .to_vec();
+    if content_range.start != 0 || content_range.end > range_end {
+        return Err(AppError::Audio(format!(
+            "unexpected Content-Range {}-{}/{} for request 0-{range_end}",
+            content_range.start, content_range.end, content_range.total,
+        )));
+    }
+    let expected_len = (content_range.end - content_range.start).saturating_add(1) as usize;
+    let mut data = Vec::with_capacity(expected_len);
+    while data.len() < expected_len {
+        let Some(chunk) = response.chunk().await.map_err(AppError::Network)? else {
+            break;
+        };
+        data.extend_from_slice(&chunk);
+        if allow_early
+            && data.len() >= PROBE_EARLY_RETURN_BYTES
+            && data.len() < expected_len
+            && probe_head_is_self_contained(&data)
+        {
+            return Ok(ProbeHead {
+                total_len: content_range.total,
+                data,
+                rest: Some((content_range.end, response)),
+            });
+        }
+    }
     validate_http_range_data(content_range, 0, range_end, &data)
         .map_err(|err| AppError::Audio(err.to_string()))?;
 
-    Ok((content_range.total, data))
+    Ok(ProbeHead { total_len: content_range.total, data, rest: None })
+}
+
+/// 提前返回的首包剩下的部分登记成在途请求：解码线程读到这里会等它，不会另发一次请求。
+/// 收完入缓存后接着按正常节奏预取；中途失败只是撤销登记，读的人自己去拉
+fn continue_probe_in_background(
+    inner: &Arc<RemoteAudioInner>,
+    start: u64,
+    end: u64,
+    mut response: reqwest::Response,
+    started: Instant,
+) {
+    let Some(entry) = claim_prefetch_start(inner, start, end) else {
+        return;
+    };
+    let inner = Arc::clone(inner);
+    tauri::async_runtime::spawn(async move {
+        let expected_len = (end - start).saturating_add(1) as usize;
+        let mut data = Vec::with_capacity(expected_len);
+        let complete = loop {
+            if inner.playback_cancelled() {
+                break false;
+            }
+            match response.chunk().await {
+                Ok(Some(chunk)) => {
+                    data.extend_from_slice(&chunk);
+                    if data.len() >= expected_len {
+                        break data.len() == expected_len;
+                    }
+                }
+                Ok(None) => break data.len() == expected_len,
+                Err(error) => {
+                    log::warn!(target: "remote-range", "probe tail interrupted at {}: {}", start + data.len() as u64, error.without_url());
+                    break false;
+                }
+            }
+        };
+        if complete {
+            inner.record_fetch_success(end.saturating_add(1), started.elapsed().as_millis() as u64);
+            if let Ok(mut cache) = inner.cache.lock() {
+                if !cache_contains_position(&cache, start) {
+                    cache.push(CachedSegment { start, data: data.clone() });
+                    cache.sort_by_key(|segment| segment.start);
+                    trim_cache(&inner, &mut cache, cache_center(&inner, start));
+                }
+            }
+            write_disk_range(&inner, start, &data);
+        }
+        release_prefetch_start(&inner, start, &entry);
+        if complete {
+            replenish_prefetch_window(&inner, start);
+        }
+    });
 }
 
 fn fetch_range_block(
@@ -4645,6 +4818,174 @@ mod tests {
         ));
         server.join().unwrap();
         assert_flac_source_info(SymphoniaAudioDecoder::new_remote(source.unwrap()).unwrap());
+    }
+
+    /// 首包收够文件头就开始解码，剩下的部分沿用同一个响应在后台收完：
+    /// 打开不等首包传完，整段读出来逐字节一致，服务端只收到一次请求
+    #[test]
+    fn open_returns_before_the_first_block_finishes_streaming() {
+        let mut body = b"fLaC".to_vec();
+        body.extend((0..(super::REMOTE_INITIAL_BLOCK_BYTES as usize - 4)).map(|index| (index % 251) as u8));
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/streaming.flac", listener.local_addr().unwrap());
+        let served = body.clone();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            let mut request = Vec::new();
+            let mut chunk = [0u8; 1024];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let count = stream.read(&mut chunk).unwrap();
+                assert!(count > 0);
+                request.extend_from_slice(&chunk[..count]);
+            }
+            let header = format!(
+                "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-{}/{}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                served.len() - 1, served.len(), served.len(),
+            );
+            stream.write_all(header.as_bytes()).unwrap();
+            stream.write_all(&served[..40 * 1024]).unwrap();
+            stream.flush().unwrap();
+            thread::sleep(Duration::from_millis(400));
+            stream.write_all(&served[40 * 1024..]).unwrap();
+        });
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let started = Instant::now();
+        let mut source = runtime
+            .block_on(RemoteAudioSource::open(
+                reqwest::Client::builder().no_proxy().build().unwrap(),
+                url,
+                String::new(),
+                None,
+                0,
+                Arc::new(AtomicU64::new(1)),
+                1,
+            ))
+            .unwrap();
+        assert!(started.elapsed() < Duration::from_millis(350), "打开要在首包传完之前返回: {:?}", started.elapsed());
+
+        let mut read_back = Vec::new();
+        source.read_to_end(&mut read_back).unwrap();
+        server.join().unwrap();
+        assert!(read_back == body, "流式收完的首包要与原文件一致");
+    }
+
+    /// 首包剩下的部分传到一半断了：撤销在途登记，读的人自己按 Range 补拉，数据照样完整
+    #[test]
+    fn a_broken_probe_tail_is_refetched_by_the_reader() {
+        let mut body = b"fLaC".to_vec();
+        body.extend((0..(super::REMOTE_INITIAL_BLOCK_BYTES as usize - 4)).map(|index| (index % 241) as u8));
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/broken.flac", listener.local_addr().unwrap());
+        let served = body.clone();
+        let server = thread::spawn(move || {
+            let read_request = |stream: &mut std::net::TcpStream| {
+                stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+                let mut request = Vec::new();
+                let mut chunk = [0u8; 1024];
+                while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    let count = stream.read(&mut chunk).unwrap();
+                    if count == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&chunk[..count]);
+                }
+                String::from_utf8_lossy(&request).to_ascii_lowercase()
+            };
+            let (mut first, _) = listener.accept().unwrap();
+            read_request(&mut first);
+            let header = format!(
+                "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-{}/{}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                served.len() - 1, served.len(), served.len(),
+            );
+            first.write_all(header.as_bytes()).unwrap();
+            first.write_all(&served[..40 * 1024]).unwrap();
+            first.flush().unwrap();
+            thread::sleep(Duration::from_millis(100));
+            drop(first);
+            listener.set_nonblocking(true).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while Instant::now() < deadline {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    thread::sleep(Duration::from_millis(5));
+                    continue;
+                };
+                stream.set_nonblocking(false).unwrap();
+                let request = read_request(&mut stream);
+                let range = request.split("range: bytes=").nth(1).and_then(|rest| rest.lines().next()).unwrap_or("0-");
+                let (start, end) = range.split_once('-').unwrap();
+                let start: usize = start.trim().parse().unwrap();
+                let end: usize = end.trim().parse::<usize>().unwrap_or(served.len() - 1).min(served.len() - 1);
+                let header = format!(
+                    "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes {start}-{end}/{}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    served.len(), end - start + 1,
+                );
+                stream.write_all(header.as_bytes()).unwrap();
+                stream.write_all(&served[start..=end]).unwrap();
+                if end == served.len() - 1 {
+                    break;
+                }
+            }
+        });
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let mut source = runtime
+            .block_on(RemoteAudioSource::open(
+                reqwest::Client::builder().no_proxy().build().unwrap(),
+                url,
+                String::new(),
+                None,
+                0,
+                Arc::new(AtomicU64::new(1)),
+                1,
+            ))
+            .unwrap();
+
+        let mut read_back = Vec::new();
+        source.read_to_end(&mut read_back).unwrap();
+        assert!(read_back == body, "断掉的部分要由读的人补拉回来");
+        drop(source);
+        server.join().unwrap();
+    }
+
+    /// 点下去时预开还在路上：正式打开等它出结果，不对同一主机再发一次首包请求
+    #[test]
+    fn open_joins_a_prewarm_that_is_still_in_flight() {
+        let body = silent_flac_24bit_stereo();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/joining.flac", listener.local_addr().unwrap());
+        let served = body.clone();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            let mut request = Vec::new();
+            let mut chunk = [0u8; 1024];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let count = stream.read(&mut chunk).unwrap();
+                assert!(count > 0);
+                request.extend_from_slice(&chunk[..count]);
+            }
+            thread::sleep(Duration::from_millis(300));
+            let header = format!(
+                "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-{}/{}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                served.len() - 1, served.len(), served.len(),
+            );
+            stream.write_all(header.as_bytes()).unwrap();
+            stream.write_all(&served).unwrap();
+        });
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let warming = {
+            let (client, url) = (client.clone(), url.clone());
+            runtime.spawn(async move { super::prewarm(&client, &url, "", 0).await })
+        };
+        thread::sleep(Duration::from_millis(50));
+
+        let source = runtime
+            .block_on(RemoteAudioSource::open(client, url, String::new(), None, 0, Arc::new(AtomicU64::new(1)), 1))
+            .expect("等到预开的首包就能打开，不该再发请求");
+        assert!(runtime.block_on(warming).unwrap().unwrap());
+        server.join().unwrap();
+        assert_eq!(source.inner.total_len, body.len() as u64);
     }
 
     /// 预开过的直链正式打开时不再请求首包：本地服务只应答一次，之后再连就被拒
@@ -7134,6 +7475,36 @@ mod tests {
                 .build()
                 .unwrap()
         };
+        let configs: [(&str, fn() -> reqwest::Client); 3] = [
+            ("default", || reqwest::Client::builder().no_proxy().build().unwrap()),
+            ("http1", || reqwest::Client::builder().no_proxy().http1_only().build().unwrap()),
+            ("ipv4", || {
+                reqwest::Client::builder()
+                    .no_proxy()
+                    .local_address(std::net::IpAddr::from([0, 0, 0, 0]))
+                    .build()
+                    .unwrap()
+            }),
+        ];
+        for round in 0..2 {
+            for (label, make) in configs {
+                let client = make();
+                let started = Instant::now();
+                let response = runtime.block_on(
+                    client
+                        .get(&url)
+                        .header(super::RANGE, "bytes=0-32767")
+                        .header(super::USER_AGENT, super::playback_user_agent(&url))
+                        .send(),
+                );
+                eprintln!(
+                    "round {round} {label}: headers status={:?} version={:?} ttfb_ms={}",
+                    response.as_ref().map(|r| r.status()).ok(),
+                    response.as_ref().map(|r| r.version()).ok(),
+                    started.elapsed().as_millis(),
+                );
+            }
+        }
         let shared = build();
         for round in 0..3 {
             for (label, client) in [("fresh", build()), ("shared", shared.clone())] {

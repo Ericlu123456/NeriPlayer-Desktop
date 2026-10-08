@@ -847,14 +847,29 @@ export const usePlayerStore = defineStore('player', () => {
     })
   }
 
-  // 只预开紧接着的下一首：首包和到 CDN 的连接提前就位，切过去不再等冷连接（经代理要 3 秒左右）
+  // 鼠标停在哪一行、多久以前：解析回来时它还是最新的意图，才值得预开
+  let intentTrackId: string | null = null
+  let intentAt = 0
+  const INTENT_PREWARM_WINDOW_MS = 10_000
+
+  // 只预开紧接着的下一首和鼠标正停着的那首：首包和到 CDN 的连接提前就位，
+  // 播放时不再等冷连接（经代理要 3 秒左右）
   playbackPrefetchManager.onPrefetched = (track, result) => {
     if (result.source === 'local' || result.streamType === 'hls' || !result.url) return
-    if (nextPrefetchTracks()[0]?.id !== track.id) return
+    const isIntent = track.id === intentTrackId && Date.now() - intentAt < INTENT_PREWARM_WINDOW_MS
+    if (!isIntent && nextPrefetchTracks()[0]?.id !== track.id) return
     void invoke('prewarm_remote_audio', {
       url: result.url,
       durationHintMs: result.durationMs || track.durationMs || 0,
     }).catch(() => {})
+  }
+
+  /** 列表行悬停或聚焦：多半马上要点它，提前解析并预开 */
+  function prefetchIntent(track: TrackInfo) {
+    if (!isRemotePlaybackTrack(track) || track.id === currentTrack.value?.id) return
+    intentTrackId = track.id
+    intentAt = Date.now()
+    playbackPrefetchManager.prefetchIntent(track, playbackSourceSettings(), playbackUrlResolver)
   }
 
   function prefetchPlaybackTracks(tracks: readonly TrackInfo[]) {
@@ -3114,7 +3129,7 @@ export const usePlayerStore = defineStore('player', () => {
     applyPersistedSettings, decoderCapabilities,
     startSleepTimer, startSleepTimerEndOfTrack, startSleepTimerEndOfQueue, cancelSleepTimer,
     playAll, shufflePlay, addToQueueNext, addToQueueEnd, removeFromQueue, clearQueue,
-    prefetchPlaybackTracks,
+    prefetchPlaybackTracks, prefetchIntent,
     updateCurrentTrackInfo, patchCurrentTrackSyncPayload, restoreOriginalTrackInfo, hasOriginalTrackInfo,
     handleDownloadedFileRemoved, withReleasedAudioFile, replayWithQuality,
   }
