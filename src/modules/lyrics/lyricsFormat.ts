@@ -67,6 +67,14 @@ export function toEditableTranslationText(lines: LyricLine[]): string {
     .join('\n')
 }
 
+/** 音译轨同翻译一样按 LRC 导出 */
+export function toEditableRomanizationText(lines: LyricLine[]): string {
+  return lines
+    .filter(line => !!line.roman)
+    .map(line => lyricLineToLrc(line, line.roman || ''))
+    .join('\n')
+}
+
 /** 从后端 snake_case / 前端 camelCase 统一映射 LyricLine */
 export function mapBackendLyrics(raw: any[]): LyricLine[] {
   if (!Array.isArray(raw)) return []
@@ -137,6 +145,19 @@ export function mergeParsedLyricsWithTranslations(
     ...line,
     translation: line.translation || original[i].translation || undefined,
   }))
+}
+
+/** 音译行按时间轴并到原文行上，与翻译用同一套容差匹配 */
+export function mergeParsedLyricsWithRomanization(
+  original: LyricLine[],
+  romanized: LyricLine[],
+): LyricLine[] {
+  if (!romanized.length) return original
+  const merged = mergeParsedLyricsWithTranslations(
+    original.map(line => ({ ...line, translation: line.roman })),
+    romanized,
+  )
+  return original.map((line, index) => ({ ...line, roman: merged[index].translation || undefined }))
 }
 
 export function mergeWordTimedLyricsWithBaseline(
@@ -229,6 +250,48 @@ export function resolveStoredTranslatedLyricStateFromPayload(
   )
 }
 
+export function resolveStoredRomanizedLyricStateFromPayload(
+  payload: Record<string, unknown> | undefined | null,
+): StoredLyricState {
+  return resolveStoredLyricState(
+    payload,
+    'matchedRomanizedLyric',
+    'matched_romanized_lyric',
+    'originalRomanizedLyric',
+    'original_romanized_lyric',
+  )
+}
+
+/**
+ * syncPayload 里的歌词落地成歌词行：原文 + 翻译 + 音译
+ *
+ * null 表示没有本地歌词（可在线拉取），[] 表示有意清空；原文解析失败照常抛出，
+ * 翻译或音译解析失败只丢掉那一轨。
+ */
+export async function materializeStoredLyrics(
+  payload: Record<string, unknown> | undefined | null,
+  parse: (text: string) => Promise<LyricLine[]>,
+  onSecondaryError?: (error: unknown) => void,
+): Promise<LyricLine[] | null> {
+  const stored = resolveStoredLyricStateFromPayload(payload)
+  if (stored.kind === 'absent') return null
+  if (stored.kind === 'cleared') return []
+  let lines = await parse(stored.text)
+  const secondary = [
+    [resolveStoredTranslatedLyricStateFromPayload(payload), mergeParsedLyricsWithTranslations],
+    [resolveStoredRomanizedLyricStateFromPayload(payload), mergeParsedLyricsWithRomanization],
+  ] as const
+  for (const [state, merge] of secondary) {
+    if (state.kind !== 'present' || !state.text.trim()) continue
+    try {
+      lines = merge(lines, await parse(state.text))
+    } catch (error) {
+      onSecondaryError?.(error)
+    }
+  }
+  return lines
+}
+
 /** 从 sync_payload 取出可解析的歌词原文; 有意清空返回空串, 缺失返回 null */
 export function resolveStoredLyricText(payload: Record<string, unknown> | undefined | null): string | null {
   const state = resolveStoredLyricStateFromPayload(payload)
@@ -249,6 +312,9 @@ export function resolveStoredTranslatedLyricText(
 /**
  * 更新 sync_payload 歌词字段
  * 首次覆盖时保留 original*
+ *
+ * nextRomanized 为 undefined 时不动音译（只改原文/翻译的旧调用方）；null 或空串清空音译，
+ * 换了一份没有音译的歌词时要清掉，免得旧音译挂在新歌词上
  */
 export function withUpdatedLyricsPayload(
   payload: Record<string, unknown> | undefined | null,
@@ -256,6 +322,7 @@ export function withUpdatedLyricsPayload(
   nextTranslated: string | null,
   source?: string | null,
   now: number = Date.now(),
+  nextRomanized?: string | null,
 ): Record<string, unknown> {
   const base: Record<string, unknown> = { ...(payload || {}) }
   const prevMatched = typeof base.matchedLyric === 'string'
@@ -264,6 +331,22 @@ export function withUpdatedLyricsPayload(
   const prevTranslated = typeof base.matchedTranslatedLyric === 'string'
     ? base.matchedTranslatedLyric
     : (typeof base.matched_translated_lyric === 'string' ? base.matched_translated_lyric : null)
+  const prevRomanized = typeof base.matchedRomanizedLyric === 'string'
+    ? base.matchedRomanizedLyric
+    : (typeof base.matched_romanized_lyric === 'string' ? base.matched_romanized_lyric : null)
+
+  if (
+    nextRomanized !== undefined
+    && base.originalRomanizedLyric == null
+    && base.original_romanized_lyric == null
+    && prevRomanized
+  ) {
+    base.originalRomanizedLyric = prevRomanized
+  }
+  if (nextRomanized !== undefined) {
+    base.matchedRomanizedLyric = nextRomanized?.trim() ? nextRomanized : ''
+    delete base.matched_romanized_lyric
+  }
 
   if (base.originalLyric == null && base.original_lyric == null && prevMatched) {
     base.originalLyric = prevMatched

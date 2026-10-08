@@ -9,7 +9,7 @@ import { fetchLyrics, fetchWordTimedLyrics } from '@/modules/lyrics/lyricsFetch'
 import { rememberLyricSource } from '@/modules/lyrics/lyricSource'
 import { getCachedLyrics, saveCachedLyrics } from '@/modules/lyrics/lyricsCache'
 import { loadLyricsSingleFlight, hasWordTimedLyrics } from '@/modules/lyrics/lyricsRequest'
-import { mapBackendLyrics, mergeParsedLyricsWithTranslations, mergeWordTimedLyricsWithBaseline, resolveStoredLyricStateFromPayload, resolveStoredTranslatedLyricStateFromPayload } from '@/modules/lyrics/lyricsFormat'
+import { mapBackendLyrics, materializeStoredLyrics, mergeWordTimedLyricsWithBaseline, resolveStoredLyricStateFromPayload } from '@/modules/lyrics/lyricsFormat'
 import { buildDesktopLyricsFrame, type DesktopLyricsFrame } from './frame'
 import { createDesktopLyricsLoader } from './loader'
 import { createLogger } from '@/utils/logger'
@@ -19,19 +19,13 @@ const log = createLogger('desktop-lyrics')
 let installed: { open: () => Promise<void>; dispose: () => void } | null = null
 
 async function materialize(track: TrackInfo): Promise<LyricLine[] | null> {
-  const stored = resolveStoredLyricStateFromPayload(track.syncPayload)
-  if (stored.kind === 'absent') return null
-  if (stored.kind === 'cleared') return []
-  const parsed = mapBackendLyrics(await invoke<any[]>('parse_lrc_content', { content: stored.text }))
-  rememberLyricSource(track, readSyncedLyricSource(track.syncPayload))
-  const translation = resolveStoredTranslatedLyricStateFromPayload(track.syncPayload)
-  if (translation.kind !== 'present' || !translation.text.trim()) return parsed
-  try {
-    const translated = mapBackendLyrics(await invoke<any[]>('parse_lrc_content', { content: translation.text }))
-    return mergeParsedLyricsWithTranslations(parsed, translated)
-  } catch {
-    return parsed
-  }
+  const lines = await materializeStoredLyrics(
+    track.syncPayload,
+    async content => mapBackendLyrics(await invoke<any[]>('parse_lrc_content', { content })),
+    error => log.warn('stored translation or romanization not parsed:', summarizeLogError(error)),
+  )
+  if (lines?.length) rememberLyricSource(track, readSyncedLyricSource(track.syncPayload))
+  return lines
 }
 
 function source(track: TrackInfo | null): string {

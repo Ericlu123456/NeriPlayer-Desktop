@@ -231,9 +231,8 @@ try {
     '@/modules/lyrics/lyricsRequest': { loadLyricsSingleFlight: (_, fetch) => fetch(), hasWordTimedLyrics: () => false },
     '@/modules/lyrics/lyricsFormat': {
       resolveStoredLyricStateFromPayload: () => ({ kind: 'absent' }),
-      resolveStoredTranslatedLyricStateFromPayload: () => ({ kind: 'absent' }),
+      materializeStoredLyrics: async () => null,
       mapBackendLyrics: value => value,
-      mergeParsedLyricsWithTranslations: value => value,
       mergeWordTimedLyricsWithBaseline: (_, value) => value,
     },
     './frame': { buildDesktopLyricsFrame },
