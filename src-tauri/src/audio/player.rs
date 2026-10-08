@@ -383,8 +383,7 @@ impl OutputDeviceProfile {
     }
 
     fn open_named(name: &str) -> Result<Self, String> {
-        let device = cpal::default_host()
-            .output_devices()
+        let device = render_devices(&cpal::default_host())
             .map_err(|error| format!("Could not list audio output devices: {error}"))?
             .find(|device| device.name().is_ok_and(|candidate| candidate == name))
             .ok_or_else(|| "Selected audio output device is unavailable".to_string())?;
@@ -438,10 +437,19 @@ impl Drop for OutputDeviceChangeRequest {
     }
 }
 
+/// 能输出的设备，按默认混音格式判断
+///
+/// 不用 cpal 的 `output_devices()`：它对每个设备试探几十种格式，cpal 0.15 在 WASAPI 上
+/// 不释放 `IsFormatSupported` 返回的近似格式，每次枚举泄漏约 23 KB（7 个设备实测）。
+/// 设备监视每 2 秒枚举一次，一小时就是三十多 MB。
+fn render_devices(host: &cpal::Host) -> Result<impl Iterator<Item = Device>, cpal::DevicesError> {
+    Ok(host.devices()?.filter(|device| device.default_output_config().is_ok()))
+}
+
 pub fn list_audio_output_devices() -> AppResult<Vec<AudioOutputDevice>> {
     let host = cpal::default_host();
     let default_name = host.default_output_device().and_then(|device| device.name().ok());
-    let devices = host.output_devices().map_err(|error| AppError::Audio(error.to_string()))?;
+    let devices = render_devices(&host).map_err(|error| AppError::Audio(error.to_string()))?;
     let mut result = Vec::new();
     for device in devices {
         let Ok(name) = device.name() else { continue };
