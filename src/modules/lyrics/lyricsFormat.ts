@@ -178,13 +178,16 @@ export function matchTranslationsToLineIndices(
     .filter(tl => (tl.text || '').trim() && !isLyricCreditMetadataLine(tl.text || ''))
     .sort((a, b) => (Number(a.startMs) || 0) - (Number(b.startMs) || 0))
   if (!effective.length) return matches
-  const spans = lines.map(lineSpan)
+  // 原文里的制作信息行不接收翻译：它常紧挨着第一句正文，会把第一句的翻译抢走
+  const bodyIndices = lines.map((_, index) => index).filter(index => !isLyricCreditMetadataLine(lines[index].text || ''))
+  const candidates = bodyIndices.length ? bodyIndices : lines.map((_, index) => index)
+  const spans = candidates.map(index => lineSpan(lines[index]))
   let translationIndex = 0
   let lineIndex = 0
-  while (lineIndex < lines.length && translationIndex < effective.length) {
+  while (lineIndex < candidates.length && translationIndex < effective.length) {
     const groupStart = spans[lineIndex].start
     let groupEnd = lineIndex
-    while (groupEnd < lines.length && spans[groupEnd].start === groupStart) groupEnd++
+    while (groupEnd < candidates.length && spans[groupEnd].start === groupStart) groupEnd++
     const groupSize = groupEnd - lineIndex
     const representative = spans[groupEnd - 1]
     const next = spans[groupEnd]
@@ -200,7 +203,7 @@ export function matchTranslationsToLineIndices(
       translationIndex++
     }
     group.forEach((text, offset) => {
-      if (text != null) matches.set(groupEnd - group.length + offset, text)
+      if (text != null) matches.set(candidates[groupEnd - group.length + offset], text)
     })
     lineIndex = groupEnd
   }

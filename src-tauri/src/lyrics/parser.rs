@@ -300,14 +300,19 @@ fn match_translations_to_line_indices(lines: &[LyricLine], translations: &[Lyric
         .filter(|t| !t.text.trim().is_empty() && !is_lyric_credit_metadata_line(&t.text))
         .collect();
     effective.sort_by_key(|t| t.start_ms);
-    let spans: Vec<TimedSpan> = lines.iter().map(line_span).collect();
+    // 原文里的制作信息行不接收翻译：它常紧挨着第一句正文，会把第一句的翻译抢走
+    let body: Vec<usize> = (0..lines.len())
+        .filter(|&index| !is_lyric_credit_metadata_line(&lines[index].text))
+        .collect();
+    let candidates: Vec<usize> = if body.is_empty() { (0..lines.len()).collect() } else { body };
+    let spans: Vec<TimedSpan> = candidates.iter().map(|&index| line_span(&lines[index])).collect();
     let mut matches = Vec::new();
     let mut translation_index = 0;
     let mut line_index = 0;
-    while line_index < lines.len() && translation_index < effective.len() {
+    while line_index < candidates.len() && translation_index < effective.len() {
         let group_start = spans[line_index].start;
         let mut group_end = line_index;
-        while group_end < lines.len() && spans[group_end].start == group_start {
+        while group_end < candidates.len() && spans[group_end].start == group_start {
             group_end += 1;
         }
         let group_size = group_end - line_index;
@@ -329,7 +334,7 @@ fn match_translations_to_line_indices(lines: &[LyricLine], translations: &[Lyric
         let matched = group.len();
         for (offset, text) in group.into_iter().enumerate() {
             if let Some(text) = text {
-                matches.push((group_end - matched + offset, text));
+                matches.push((candidates[group_end - matched + offset], text));
             }
         }
         line_index = group_end;
@@ -409,6 +414,19 @@ mod tests {
             got,
             vec!["向下望就能变得坚强", "因为我也不过是人啊", "吵死了", "如此", "这般的世界", "降雨的天空", "我不懂啊"]
         );
+    }
+
+    #[test]
+    fn credit_line_next_to_the_first_verse_does_not_take_its_romanization() {
+        // 网易云《Sincerely》开头：编曲信息行 [0,1150] 紧挨第一句，音译 0.50s 落在信息行时段里
+        let yrc = "[0,1150](0,115,0)编(115,115,0)曲 (230,115,0): (345,115,0)堀(460,115,0)江\n\
+            [1150,6150](1150,60,0)知(1210,270,0)ら\n\
+            [7460,6190](7460,180,0)お(7640,470,0)も";
+        let mut lines = parse_auto(yrc);
+        merge_roman(&mut lines, "[00:00.400]\n[00:00.50]shi ra na i\n[00:07.50]o mo ka ge");
+        assert_eq!(lines[0].roman, None);
+        assert_eq!(lines[1].roman.as_deref(), Some("shi ra na i"));
+        assert_eq!(lines[2].roman.as_deref(), Some("o mo ka ge"));
     }
 
     #[test]
