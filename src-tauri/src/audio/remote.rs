@@ -295,6 +295,8 @@ struct RemoteAudioInner {
 struct RemoteSeekIndex {
     duration_ms: u64,
     entries: Vec<SeekIndexEntry>,
+    /// 条目时间是 sidx 给的分片真实起点；线性估算只是大致落点
+    exact_times: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -310,10 +312,10 @@ impl RemoteSeekIndex {
         self.estimate_segment(target_ms).0
     }
 
-    /// (start, end_exclusive_hint)：用下一条 sidx 推段长，便于一次预满 moof+mdat
-    fn estimate_segment(&self, target_ms: u64) -> (u64, Option<u64>) {
+    /// (分片起点字节, 分片起点时间)
+    fn estimate_segment(&self, target_ms: u64) -> (u64, u64) {
         if self.entries.is_empty() {
-            return (0, None);
+            return (0, 0);
         }
         let mut best_idx = 0usize;
         for (idx, entry) in self.entries.iter().enumerate() {
@@ -323,9 +325,8 @@ impl RemoteSeekIndex {
                 break;
             }
         }
-        let start = self.entries[best_idx].byte_offset;
-        let end = self.entries.get(best_idx + 1).map(|e| e.byte_offset);
-        (start, end)
+        let entry = self.entries[best_idx];
+        (entry.byte_offset, entry.time_ms)
     }
 
     #[allow(dead_code)]
@@ -916,7 +917,10 @@ impl RemoteAudioSource {
     }
 
     /// 配置虚拟 body：逻辑 [0, header_end) = 文件头；逻辑 header_end.. = 目标 moof 起
-    pub fn configure_virtual_body_for_time(&self, position_ms: u64) -> io::Result<u64> {
+    ///
+    /// 解码会从目标所在分片的开头出声。返回该分片的起点时间（只有落点确实是 sidx
+    /// 记录的那个分片时才有），调用方据此丢掉分片开头到目标之间的音频
+    pub fn configure_virtual_body_for_time(&self, position_ms: u64) -> io::Result<Option<u64>> {
         self.ensure_read_current()?;
         let header_end = self.inner.header_end.load(Ordering::Acquire);
         if header_end == 0 {
@@ -938,8 +942,9 @@ impl RemoteAudioSource {
             ));
         };
         // 只算 sidx 落点；真正 body 拉取交给 splice 分块（避免这里一次拉过大超时）
-        let (seg_start, _seg_end_hint) = index.estimate_segment(position_ms);
+        let (seg_start, seg_start_ms) = index.estimate_segment(position_ms);
         let mut target = seg_start.max(header_end).min(self.inner.total_len.saturating_sub(1));
+        let mut exact_start = index.exact_times && target == seg_start;
 
         // 轻量探测：最多拉 256KB 校验 moof 并对齐；失败也不致命，splice 会再 snap
         let probe_end = target
@@ -993,6 +998,7 @@ impl RemoteAudioSource {
                     target = target
                         .saturating_add(rel)
                         .min(self.inner.total_len.saturating_sub(1));
+                    exact_start = false;
                 }
                 let store = data[rel as usize..].to_vec();
                 if !store.is_empty() {
@@ -1029,14 +1035,15 @@ impl RemoteAudioSource {
         let logical_len = header_end.saturating_add(self.inner.total_len.saturating_sub(target));
         log::info!(
             target: "remote-audio",
-            "virtual-body configured target_ms={}, header_end={}, body_origin={}, total_len={}, logical_len={}",
+            "virtual-body configured target_ms={}, segment_start_ms={:?}, header_end={}, body_origin={}, total_len={}, logical_len={}",
             position_ms,
+            exact_start.then_some(seg_start_ms),
             header_end,
             target,
             self.inner.total_len,
             logical_len,
         );
-        Ok(target)
+        Ok(exact_start.then_some(seg_start_ms))
     }
 
     pub fn clear_virtual_body(&self) {
@@ -3891,6 +3898,7 @@ fn build_seek_index_for_long_form(
         index = Some(RemoteSeekIndex {
             duration_ms: duration_hint_ms,
             entries,
+            exact_times: false,
         });
         log::info!(
             target: "remote-audio",
@@ -4153,6 +4161,7 @@ fn parse_sidx_body(
     Some(RemoteSeekIndex {
         duration_ms: duration_ms.max(entries.last().map(|e| e.time_ms).unwrap_or(0)),
         entries,
+        exact_times: true,
     })
 }
 
@@ -5218,6 +5227,7 @@ mod tests {
                     byte_offset: 100_000_000,
                 },
             ],
+            exact_times: true,
         };
         let source = RemoteAudioSource {
             inner: Arc::new(RemoteAudioInner {
@@ -5441,6 +5451,7 @@ mod tests {
                             SeekIndexEntry { time_ms: 0, byte_offset: 10_799 },
                             SeekIndexEntry { time_ms: 10_000, byte_offset: 172_000 },
                         ],
+                        exact_times: true,
                     })),
                     throughput_ewma_bps: AtomicU64::new(0),
                     bitrate_bps: 0,
@@ -5893,6 +5904,7 @@ mod tests {
                     byte_offset: 100_000,
                 },
             ],
+            exact_times: true,
         };
         assert_eq!(index.estimate_segment_start(0), 1_000);
         assert_eq!(index.estimate_segment_start(49_999), 1_000);
@@ -5966,6 +5978,7 @@ mod tests {
                     byte_offset: 1_000,
                 },
             ],
+            exact_times: false,
         };
         assert_eq!(index.estimate_byte(0), 0);
         assert_eq!(index.estimate_byte(25_000), 250);
@@ -6911,6 +6924,7 @@ mod tests {
                     byte_offset: 500_000,
                 },
             ],
+            exact_times: true,
         });
         let source = RemoteAudioSource {
             inner: Arc::clone(&inner),
@@ -6988,9 +7002,67 @@ mod tests {
         // seek 到 15s 应落在 10s 段起点（首个 moof 后 1MB 处）
         let atom_len = sidx_atom_two_segments().len() as u64;
         assert_eq!(
-            index.estimate_segment(15_000).0,
-            atom_len + 1024 * 1024,
+            index.estimate_segment(15_000),
+            (atom_len + 1024 * 1024, 10_000),
+            "落点分片从 10s 开始出声，播放器要丢掉 10s 到 15s 之间的音频",
         );
+        assert!(index.exact_times);
+    }
+
+    /// 真实 B 站 fMP4（FLAC）实测：字节跳转后丢掉分片开头，出声的第一个样本必须就是目标位置
+    ///
+    /// NERI_BILI_REPRO_FILE=<下载完的 .m4s> [NERI_BILI_REPRO_TARGET_MS=32700] cargo test -- --ignored bili_virtual_body
+    #[test]
+    #[ignore]
+    fn bili_virtual_body_seek_starts_exactly_at_the_target() {
+        let Ok(path) = std::env::var("NERI_BILI_REPRO_FILE") else {
+            eprintln!("NERI_BILI_REPRO_FILE 未设置，跳过");
+            return;
+        };
+        let target_ms: u64 = std::env::var("NERI_BILI_REPRO_TARGET_MS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(32_700);
+        let bytes = std::fs::read(&path).expect("repro file");
+        let inner = forbidden_test_inner("http://127.0.0.1:1/bili.m4s".into(), bytes.len() as u64);
+        let header_end = super::detect_mp4_header_end(&bytes).expect("mp4 header end");
+        inner.header_end.store(header_end, Ordering::Release);
+        inner.cache.lock().expect("cache lock").push(CachedSegment { start: 0, data: bytes });
+        assert!(super::build_seek_index_from_head(&inner, 0), "B 站 fMP4 首包带 sidx");
+        let source = RemoteAudioSource {
+            inner: Arc::clone(&inner),
+            pos: 0,
+            access_mode: RemoteAccessMode::StandardSeekable,
+            read_cancellation: None,
+        };
+
+        let segment_start_ms = source
+            .configure_virtual_body_for_time(target_ms)
+            .expect("configure virtual body")
+            .expect("sidx 落点要给出分片起点");
+        assert!(segment_start_ms <= target_ms && target_ms - segment_start_ms < 10_000);
+        let mut seeked = SymphoniaAudioDecoder::new_remote_virtual(source, true).expect("virtual body open");
+        let samples_per_ms = |ms: u64, decoder: &SymphoniaAudioDecoder| {
+            (ms * u64::from(decoder.sample_rate()) / 1_000 * u64::from(decoder.channels())) as usize
+        };
+        let lead = samples_per_ms(target_ms - segment_start_ms, &seeked);
+        assert_eq!(seeked.by_ref().take(lead).count(), lead);
+        let seeked: Vec<f32> = seeked.take(4_096).collect();
+
+        // sidx 时间按整毫秒记，允许 1ms 以内的错位
+        let mut reference = SymphoniaAudioDecoder::new_file(std::path::Path::new(&path)).expect("reference open");
+        let one_ms = samples_per_ms(1, &reference);
+        let channels = usize::from(reference.channels());
+        let skip = samples_per_ms(target_ms, &reference) - one_ms;
+        assert_eq!(reference.by_ref().take(skip).count(), skip);
+        let reference: Vec<f32> = reference.take(4_096 + 2 * one_ms).collect();
+
+        assert_eq!(seeked.len(), 4_096);
+        let shift = (0..=2 * one_ms)
+            .step_by(channels)
+            .find(|&shift| reference[shift..shift + seeked.len()] == seeked[..])
+            .expect("跳转后的音频与从头解码到目标处不一致");
+        eprintln!("target {target_ms}ms segment {segment_start_ms}ms offset {} samples", shift as i64 - one_ms as i64);
     }
 
     /// 回归（Bilibili 2 小时 fMP4 seek 爬 12s）：FragmentedProgressive
