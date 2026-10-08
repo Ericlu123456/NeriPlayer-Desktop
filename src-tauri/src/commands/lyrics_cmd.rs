@@ -1,5 +1,6 @@
 use crate::error::AppResult;
 use crate::lyrics::manager::LyricsManager;
+use crate::lyrics::matcher::{LyricMatcher, MatchRequest, RankedMatch};
 use crate::lyrics::parser::{self, LyricLine};
 use crate::lyrics::FetchedLyrics;
 use crate::state::AppState;
@@ -24,6 +25,23 @@ pub async fn fetch_word_timed_lyrics(
         crate::auth::cookies::read_netease_csrf(&state.cookie_jar),
     );
     manager.fetch_word_timed_lyrics(&title, &artist, duration_ms).await
+}
+
+/// 歌词编辑器「匹配」：按所选平台搜索并排序候选，每个候选带完整歌词行
+#[tauri::command]
+pub async fn match_lyrics(request: MatchRequest, state: State<'_, AppState>) -> AppResult<Vec<RankedMatch>> {
+    let started = Instant::now();
+    let sources = request.sources.clone();
+    let matcher = LyricMatcher::new(state.transport("lyrics"), state.netease());
+    let results = matcher.find(request).await;
+    log::info!(
+        target: "lyrics-command",
+        "match sources={sources:?} results={} top={:?} elapsed_ms={}",
+        results.len(),
+        results.first().map(|result| (result.source, result.confidence, result.score)),
+        started.elapsed().as_millis(),
+    );
+    Ok(results)
 }
 
 #[tauri::command]

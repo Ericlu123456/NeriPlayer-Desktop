@@ -516,6 +516,7 @@ fn main() {
             lyrics_cmd::load_lyrics_file,
             lyrics_cmd::fetch_lyrics,
             lyrics_cmd::fetch_word_timed_lyrics,
+            lyrics_cmd::match_lyrics,
             settings_cmd::get_settings,
             settings_cmd::save_settings,
             settings_cmd::get_app_data_dir,
