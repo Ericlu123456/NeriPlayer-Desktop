@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { usePlayerStore, type TrackInfo } from '@/stores/player'
+import { normalizeTrack, usePlayerStore, type TrackInfo } from '@/stores/player'
 import { useDownloadStore } from '@/stores/download'
 import { useDelayedFlag } from '@/composables/useDelayedFlag'
 import { useI18n } from 'vue-i18n'
@@ -187,7 +187,7 @@ async function loadDetail() {
 }
 
 interface ArchivePage {
-  tracks: TrackInfo[]
+  tracks: unknown[]
   page: number
   total: number
   hasMore: boolean
@@ -218,7 +218,11 @@ async function loadArchive(request: number, contentId: number, kind: 'collection
     showingCache = true
     isLoading.value = false
   })
-  const toTrack = (track: TrackInfo): TrackInfo => ({ ...track, artist: track.artist || uploader, album: name })
+  // 后端 TrackInfo 是 snake_case（cover_url、duration_ms），先规整成前端字段
+  const toTrack = (raw: unknown): TrackInfo => {
+    const track = normalizeTrack(raw)
+    return { ...track, artist: track.artist || uploader, album: name }
+  }
   const seen = new Set<string>()
   const collected: TrackInfo[] = []
   try {
