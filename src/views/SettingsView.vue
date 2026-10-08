@@ -68,7 +68,7 @@ const {
   fadeIn, fadeInDuration, fadeOutDuration,
   crossfadeNext, crossfadeInDuration, crossfadeOutDuration,
   keepProgress, rememberLongFormProgress, keepPlaybackMode,
-  showTranslation, lyricBlur, lyricBlurAmount,
+  showTranslation, showRomanization, lyricBlur, lyricBlurAmount,
   advancedLyrics, dynamicBackground, dynamicColor, audioReactive,
   coverBlurBg, coverBlurAmount, coverBlurDarken,
   neteaseQuality, qqMusicQuality, youtubeQuality, biliQuality,
@@ -1866,6 +1866,15 @@ useEscapeClose(
         <div class="setting-desc">{{ t('settings.show_translation_desc') }}</div>
       </div>
       <label class="m3-switch"><input type="checkbox" v-model="showTranslation" /><span class="track"><span class="thumb"><span v-if="showTranslation" class="material-symbols-rounded" style="font-size: 14px">check</span></span></span></label>
+    </div>
+
+    <div class="setting-card">
+      <div class="setting-icon-wrap"><span class="material-symbols-rounded">abc</span></div>
+      <div class="setting-info">
+        <div class="setting-title">{{ t('settings.show_romanization') }}</div>
+        <div class="setting-desc">{{ t('settings.show_romanization_desc') }}</div>
+      </div>
+      <label class="m3-switch"><input type="checkbox" v-model="showRomanization" /><span class="track"><span class="thumb"><span v-if="showRomanization" class="material-symbols-rounded" style="font-size: 14px">check</span></span></span></label>
     </div>
 
     <div class="setting-card">

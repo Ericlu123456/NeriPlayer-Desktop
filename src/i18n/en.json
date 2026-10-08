@@ -632,6 +632,8 @@
     "nav_lyrics_desc": "Adjust lyrics display and synchronization",
     "show_translation": "Show Translation",
     "show_translation_desc": "Display translation below lyrics",
+    "show_romanization": "Show Romanization",
+    "show_romanization_desc": "Display romanized lyrics below each line, and under each word for word-timed lyrics",
     "lyric_blur": "Lyrics Blur",
     "lyric_blur_desc": "Blur inactive lyric lines",
     "blur_strength": "Blur Strength",

@@ -65,6 +65,8 @@ pub struct AppSettings {
     pub remember_long_form_progress: bool,
     pub keep_playback_mode: bool,
     pub show_translation: bool,
+    /// 罗马音等音译；与 Android 一样默认不显示
+    pub show_romanization: bool,
     pub lyric_blur: bool,
     pub lyric_blur_amount: f32,
     #[serde(deserialize_with = "lenient_i32")]
@@ -193,6 +195,7 @@ impl Default for AppSettings {
             remember_long_form_progress: true,
             keep_playback_mode: true,
             show_translation: true,
+            show_romanization: false,
             lyric_blur: true,
             lyric_blur_amount: 1.5,
             cloud_music_offset: 1000,
@@ -836,6 +839,15 @@ mod tests {
         }
         let missing: AppSettings = serde_json::from_value(serde_json::json!({})).unwrap();
         assert_eq!(missing.volume_balance, 0.0, "旧配置没有这个字段时居中");
+    }
+
+    #[test]
+    fn romanization_is_its_own_switch_and_off_by_default_like_android() {
+        let missing: AppSettings = serde_json::from_value(serde_json::json!({ "showTranslation": true })).unwrap();
+        assert!(missing.show_translation);
+        assert!(!missing.show_romanization, "旧配置没有这个字段时不显示音译");
+        let saved = serde_json::to_value(AppSettings { show_romanization: true, ..AppSettings::default() }).unwrap();
+        assert_eq!(saved["showRomanization"], true);
     }
 
     #[test]

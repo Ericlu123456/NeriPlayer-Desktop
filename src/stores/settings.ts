@@ -45,6 +45,7 @@ export interface AppSettings {
   rememberLongFormProgress: boolean
   keepPlaybackMode: boolean
   showTranslation: boolean
+  showRomanization: boolean
   lyricBlur: boolean
   lyricBlurAmount: number
   cloudMusicOffset: number
@@ -164,6 +165,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   rememberLongFormProgress: true,
   keepPlaybackMode: true,
   showTranslation: true,
+  showRomanization: false,
   lyricBlur: true,
   lyricBlurAmount: 1.5,
   cloudMusicOffset: 1000,
@@ -527,6 +529,7 @@ export const useSettingsStore = defineStore('settings', () => {
   const rememberLongFormProgress = ref(initial.rememberLongFormProgress)
   const keepPlaybackMode = ref(initial.keepPlaybackMode)
   const showTranslation = ref(initial.showTranslation)
+  const showRomanization = ref(initial.showRomanization)
   const lyricBlur = ref(initial.lyricBlur)
   const lyricBlurAmount = ref(initial.lyricBlurAmount)
   const cloudMusicOffset = ref(initial.cloudMusicOffset)
@@ -589,7 +592,7 @@ export const useSettingsStore = defineStore('settings', () => {
     showAudioBitrate, showAudioFormat, showAudioChannels, showAudioSampleRate, showAudioBitDepth,
     fadeInDuration, fadeOutDuration, crossfadeNext, crossfadeInDuration,
     crossfadeOutDuration, keepProgress, rememberLongFormProgress, keepPlaybackMode, showTranslation,
-    lyricBlur, lyricBlurAmount, cloudMusicOffset, qqMusicOffset, kugouOffset, lrclibOffset,
+    showRomanization, lyricBlur, lyricBlurAmount, cloudMusicOffset, qqMusicOffset, kugouOffset, lrclibOffset,
     amllTtmlOffset, coverStyle,
     advancedLyrics, dynamicBackground, dynamicColor, audioReactive, coverBlurBg,
     coverBlurAmount, coverBlurDarken, neteaseQuality, qqMusicQuality,
@@ -685,7 +688,8 @@ export const useSettingsStore = defineStore('settings', () => {
     showAudioBitrate, showAudioFormat, showAudioChannels, showAudioSampleRate, showAudioBitDepth,
     crossfade, normalizeVolume, multichannelDrc, volumeBalance, fadeIn, fadeInDuration, fadeOutDuration,
     crossfadeNext, crossfadeInDuration, crossfadeOutDuration,
-    keepProgress, rememberLongFormProgress, keepPlaybackMode, showTranslation, lyricBlur, lyricBlurAmount,
+    keepProgress, rememberLongFormProgress, keepPlaybackMode, showTranslation, showRomanization,
+    lyricBlur, lyricBlurAmount,
     cloudMusicOffset, qqMusicOffset, kugouOffset, lrclibOffset, amllTtmlOffset,
     advancedLyrics, dynamicBackground,
     dynamicColor, audioReactive, coverBlurBg, coverBlurAmount, coverBlurDarken,

@@ -215,7 +215,7 @@ function toAmllWord(word: PlayerLyricWord): AmllLyricWord {
     startTime,
     endTime,
   }
-  if (richWord.romanWord) amllWord.romanWord = richWord.romanWord
+  if (richWord.romanWord && settings.showRomanization) amllWord.romanWord = richWord.romanWord
   if (richWord.obscene != null) amllWord.obscene = richWord.obscene
   if (richWord.ruby?.length) {
     amllWord.ruby = richWord.ruby.map(ruby => {
@@ -262,7 +262,7 @@ function toAmllLine(line: PlayerLyricLine): AmllLyricLine {
   return {
     words,
     translatedLyric: settings.showTranslation ? (line.translation || '') : '',
-    romanLyric: settings.showTranslation ? (line.roman || '') : '',
+    romanLyric: settings.showRomanization ? (line.roman || '') : '',
     startTime,
     endTime,
     isBG: false,
@@ -602,7 +602,7 @@ watch(() => settings.advancedLyrics, () => {
   reloadLyrics()
 })
 
-watch(() => settings.showTranslation, () => {
+watch([() => settings.showTranslation, () => settings.showRomanization], () => {
   reloadLyrics()
 })
 

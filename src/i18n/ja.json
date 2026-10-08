@@ -632,6 +632,8 @@
     "nav_lyrics_desc": "歌詞の表示と同期を調整",
     "show_translation": "翻訳を表示",
     "show_translation_desc": "歌詞の下に翻訳を表示",
+    "show_romanization": "ローマ字を表示",
+    "show_romanization_desc": "歌詞の下にローマ字などの読みを表示し、単語同期の歌詞では各語の下にも表示",
     "lyric_blur": "歌詞ぼかし",
     "lyric_blur_desc": "非アクティブ行をぼかし",
     "blur_strength": "ぼかし強度",

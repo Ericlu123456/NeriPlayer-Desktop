@@ -632,6 +632,8 @@
     "nav_lyrics_desc": "调整歌词显示和同步",
     "show_translation": "显示翻译",
     "show_translation_desc": "在歌词下方显示翻译",
+    "show_romanization": "显示音译",
+    "show_romanization_desc": "在歌词下方显示罗马音等音译，逐字歌词同时在每个字下方标注",
     "lyric_blur": "歌词模糊",
     "lyric_blur_desc": "非活跃歌词行高斯模糊",
     "blur_strength": "模糊强度",
