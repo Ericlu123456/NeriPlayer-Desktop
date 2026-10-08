@@ -138,6 +138,17 @@ try {
     now += 271_000
     assert.equal(manager.take(netease, settings), null)
   })
+  await run('a finished prefetch is reported so the player can pre-open the stream', async () => {
+    const manager = new PlaybackPrefetchManager()
+    const reported = []
+    manager.onPrefetched = (track, result) => reported.push([track.id, result.url])
+    const netease = { ...youtube, id: 'netease:778', source: 'netease' }
+    globalThis.__cacheInvoke = async () => ({ url: 'https://m.music.126.net/prewarm', format: 'mp3', bitrate: 320_000, level: 'exhigh', song_id: 778 })
+    manager.prefetch(netease, settings, new source.PlaybackUrlResolver())
+    await new Promise(setImmediate)
+    assert.deepEqual(reported, [['netease:778', 'https://m.music.126.net/prewarm']])
+    assert.ok(manager.take(netease, settings), '回调不影响预取结果入缓存')
+  })
   await run('YouTube prefetches run one at a time', async () => {
     const manager = new PlaybackPrefetchManager()
     const gates = []

@@ -847,6 +847,16 @@ export const usePlayerStore = defineStore('player', () => {
     })
   }
 
+  // 只预开紧接着的下一首：首包和到 CDN 的连接提前就位，切过去不再等冷连接（经代理要 3 秒左右）
+  playbackPrefetchManager.onPrefetched = (track, result) => {
+    if (result.source === 'local' || result.streamType === 'hls' || !result.url) return
+    if (nextPrefetchTracks()[0]?.id !== track.id) return
+    void invoke('prewarm_remote_audio', {
+      url: result.url,
+      durationHintMs: result.durationMs || track.durationMs || 0,
+    }).catch(() => {})
+  }
+
   function prefetchPlaybackTracks(tracks: readonly TrackInfo[]) {
     const candidates = initialPlaybackPrefetchWindow(tracks)
       .filter(track => isRemotePlaybackTrack(track))

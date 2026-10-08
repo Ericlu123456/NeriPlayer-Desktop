@@ -44,6 +44,8 @@ export class PlaybackPrefetchManager {
   private readonly ttlMs: number | undefined
   private readonly maxEntries: number
   private currentDemandKey: string | null = null
+  /** 预取解析成功、结果已入缓存后调用；播放层据此预开下一首的直链 */
+  onPrefetched: ((track: TrackInfo, result: ResolvedPlaybackSource) => void) | null = null
   // YouTube 预取串行执行（对齐 Android 单许可的预取闸门），避免抢在用户要听的曲目前面排队取 PoToken；
   // 被取代或清除的任务立即让出名额
   private readonly youtubeQueue: QueuedPrefetch[] = []
@@ -82,6 +84,7 @@ export class PlaybackPrefetchManager {
       // clearForTrack/clear 可能在解析完成前删除了令牌，此时丢弃旧结果
       if (this.jobs.get(cacheKey)?.token !== token) return
       this.put(cacheKey, resolution, ttlMs)
+      this.onPrefetched?.(track, resolution)
     }).catch(() => {
       // 预热失败不影响当前播放
     }).finally(() => {

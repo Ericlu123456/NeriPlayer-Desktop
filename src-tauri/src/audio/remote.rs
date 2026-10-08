@@ -519,13 +519,20 @@ impl RemoteAudioSource {
         if playback_generation.load(Ordering::Acquire) != expected_generation {
             return Err(AppError::Audio("Playback request superseded".into()));
         }
-        let initial_block = if duration_hint_ms >= REMOTE_LONG_FORM_DURATION_MS {
-            REMOTE_LONG_INITIAL_BLOCK_BYTES
-        } else {
-            REMOTE_INITIAL_BLOCK_BYTES
-        };
+        let initial_block = initial_block_bytes(duration_hint_ms);
         let probe_started = Instant::now();
-        let range_result = {
+        let warm = take_warm_probe(&url);
+        let probe_elapsed_ms = warm.as_ref().map(|probe| probe.elapsed_ms);
+        let range_result = if let Some(probe) = warm {
+            log::info!(
+                target: "remote-audio",
+                "range probe warm hit host={}, age_ms={}, bytes={}",
+                host,
+                probe.fetched_at.elapsed().as_millis(),
+                probe.data.len(),
+            );
+            Ok((probe.total_len, probe.data))
+        } else {
             // 连接层失败（重置、超时）只说明这条链路一时不通，换条连接再试一次；
             // 状态码或 Range 不受支持则直接交给调用方走兜底
             let range_probe = async {
@@ -597,7 +604,7 @@ impl RemoteAudioSource {
                 .as_ref()
                 .map(|segment| segment.data.len() as u64)
                 .unwrap_or(0),
-            (probe_started.elapsed().as_millis().max(1)) as u64,
+            probe_elapsed_ms.unwrap_or(probe_started.elapsed().as_millis() as u64).max(1),
         );
 
         if let Some(cache) = disk_cache.as_ref().cloned() {
@@ -3031,6 +3038,69 @@ impl PcmSource for SymphoniaAudioDecoder {
     }
 }
 
+fn initial_block_bytes(duration_hint_ms: u64) -> u64 {
+    if duration_hint_ms >= REMOTE_LONG_FORM_DURATION_MS {
+        REMOTE_LONG_INITIAL_BLOCK_BYTES
+    } else {
+        REMOTE_INITIAL_BLOCK_BYTES
+    }
+}
+
+/// 预先拿到的首包：总长与开头一块。经代理时冷连接拿首包要 3 秒左右，热连接不到 1 秒
+struct WarmProbe {
+    url: String,
+    total_len: u64,
+    data: Vec<u8>,
+    /// 当时拉首包的耗时，正式打开时据此估初始吞吐
+    elapsed_ms: u64,
+    fetched_at: Instant,
+}
+
+/// 直链签名本身也会过期，留太久的首包没用
+const WARM_PROBE_TTL: Duration = Duration::from_secs(10 * 60);
+const WARM_PROBE_LIMIT: usize = 3;
+static WARM_PROBES: Mutex<Vec<WarmProbe>> = Mutex::new(Vec::new());
+
+fn take_warm_probe(url: &str) -> Option<WarmProbe> {
+    let mut probes = WARM_PROBES.lock().ok()?;
+    probes.retain(|probe| probe.fetched_at.elapsed() < WARM_PROBE_TTL);
+    let index = probes.iter().position(|probe| probe.url == url)?;
+    Some(probes.swap_remove(index))
+}
+
+/// 预开即将播放的直链：先把总长和首包拿到手，连接也留在池里。之后正式打开同一个地址时
+/// 跳过首包请求，切到下一首几乎立即出声。已经预开过的地址不重复请求
+pub async fn prewarm(
+    client: &reqwest::Client,
+    url: &str,
+    referer: &str,
+    duration_hint_ms: u64,
+) -> AppResult<bool> {
+    let already_warm = WARM_PROBES.lock().is_ok_and(|probes| {
+        probes.iter().any(|probe| probe.url == url && probe.fetched_at.elapsed() < WARM_PROBE_TTL)
+    });
+    if already_warm {
+        return Ok(false);
+    }
+    let started = Instant::now();
+    let (total_len, data) = probe_range_len(client, url, referer, initial_block_bytes(duration_hint_ms)).await?;
+    let probe = WarmProbe {
+        url: url.to_owned(),
+        total_len,
+        data,
+        elapsed_ms: started.elapsed().as_millis() as u64,
+        fetched_at: Instant::now(),
+    };
+    if let Ok(mut probes) = WARM_PROBES.lock() {
+        probes.retain(|existing| existing.url != url && existing.fetched_at.elapsed() < WARM_PROBE_TTL);
+        if probes.len() >= WARM_PROBE_LIMIT {
+            probes.remove(0);
+        }
+        probes.push(probe);
+    }
+    Ok(true)
+}
+
 async fn probe_range_len(
     client: &reqwest::Client,
     url: &str,
@@ -4575,6 +4645,44 @@ mod tests {
         ));
         server.join().unwrap();
         assert_flac_source_info(SymphoniaAudioDecoder::new_remote(source.unwrap()).unwrap());
+    }
+
+    /// 预开过的直链正式打开时不再请求首包：本地服务只应答一次，之后再连就被拒
+    #[test]
+    fn prewarmed_url_opens_without_another_probe() {
+        let body = silent_flac_24bit_stereo();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/prewarmed.flac", listener.local_addr().unwrap());
+        let served = body.clone();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            let mut request = Vec::new();
+            let mut chunk = [0u8; 1024];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let count = stream.read(&mut chunk).unwrap();
+                assert!(count > 0);
+                request.extend_from_slice(&chunk[..count]);
+            }
+            let header = format!(
+                "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-{}/{}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                served.len() - 1, served.len(), served.len(),
+            );
+            stream.write_all(header.as_bytes()).unwrap();
+            stream.write_all(&served).unwrap();
+        });
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+
+        assert!(runtime.block_on(super::prewarm(&client, &url, "", 0)).unwrap());
+        server.join().unwrap();
+        assert!(!runtime.block_on(super::prewarm(&client, &url, "", 0)).unwrap(), "同一地址不重复预开");
+
+        let source = runtime
+            .block_on(RemoteAudioSource::open(client, url.clone(), String::new(), None, 0, Arc::new(AtomicU64::new(1)), 1))
+            .expect("预开的首包足够打开，不能再发请求");
+        assert_eq!(source.inner.total_len, body.len() as u64);
+        assert!(super::take_warm_probe(&url).is_none(), "打开后首包从预开缓存里取走");
     }
 
     fn pcm_wav(sample_count: u32) -> Vec<u8> {
@@ -7007,6 +7115,38 @@ mod tests {
             "落点分片从 10s 开始出声，播放器要丢掉 10s 到 15s 之间的音频",
         );
         assert!(index.exact_times);
+    }
+
+    /// 起播首包耗时实测：NERI_PROBE_URL=<直链> cargo test -- --ignored --nocapture probe_timing
+    #[test]
+    #[ignore]
+    fn probe_timing_against_a_real_url() {
+        let Ok(url) = std::env::var("NERI_PROBE_URL") else {
+            eprintln!("NERI_PROBE_URL 未设置，跳过");
+            return;
+        };
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let build = || {
+            reqwest::Client::builder()
+                .connect_timeout(Duration::from_secs(10))
+                .read_timeout(Duration::from_secs(30))
+                .no_proxy()
+                .build()
+                .unwrap()
+        };
+        let shared = build();
+        for round in 0..3 {
+            for (label, client) in [("fresh", build()), ("shared", shared.clone())] {
+                let started = Instant::now();
+                let result = runtime.block_on(super::probe_range_len(&client, &url, "", super::REMOTE_INITIAL_BLOCK_BYTES));
+                eprintln!(
+                    "round {round} {label}: ok={} bytes={} elapsed_ms={}",
+                    result.is_ok(),
+                    result.as_ref().map_or(0, |(_, data)| data.len()),
+                    started.elapsed().as_millis(),
+                );
+            }
+        }
     }
 
     /// 真实 B 站 fMP4（FLAC）实测：字节跳转后丢掉分片开头，出声的第一个样本必须就是目标位置

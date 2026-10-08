@@ -1624,6 +1624,39 @@ fn playback_user_agent(url: &str) -> &'static str {
     }
 }
 
+/// 预开下一首的直链（总长 + 首包），切过去时省掉冷连接上的首包等待；失败不影响播放
+#[tauri::command]
+pub async fn prewarm_remote_audio(
+    url: String,
+    duration_hint_ms: Option<u64>,
+    state: State<'_, AppState>,
+) -> AppResult<bool> {
+    let parsed = url::Url::parse(&url).map_err(|_| AppError::Audio("Invalid stream URL".into()))?;
+    if parsed.scheme() != "https" && parsed.scheme() != "http" {
+        return Err(AppError::Audio("Invalid stream URL".into()));
+    }
+    let started = std::time::Instant::now();
+    let warmed = crate::audio::remote::prewarm(
+        &state.http(),
+        &url,
+        playback_referer(&url),
+        duration_hint_ms.unwrap_or(0),
+    )
+    .await
+    .inspect_err(|error| {
+        log::info!(target: "remote-audio", "prewarm skipped host={}: {error}", parsed.host_str().unwrap_or("unknown"));
+    })?;
+    if warmed {
+        log::info!(
+            target: "remote-audio",
+            "prewarm ready host={}, elapsed_ms={}",
+            parsed.host_str().unwrap_or("unknown"),
+            started.elapsed().as_millis(),
+        );
+    }
+    Ok(warmed)
+}
+
 async fn open_remote_audio_source(
     url: &str,
     duration_hint_ms: u64,

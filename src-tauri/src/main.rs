@@ -452,6 +452,7 @@ fn main() {
             player_cmd::play_url,
             player_cmd::play_url_fast,
             player_cmd::play_url_streaming,
+            player_cmd::prewarm_remote_audio,
             player_cmd::pause,
             player_cmd::resume,
             player_cmd::toggle_play_pause,
