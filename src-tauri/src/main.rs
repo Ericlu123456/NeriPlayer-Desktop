@@ -181,6 +181,9 @@ fn main() {
                 tauri::async_runtime::spawn(async move {
                     let state = handle_yt.state::<AppState>();
                     auth_cmd::maybe_refresh_youtube_session(&handle_yt, state.inner(), true).await;
+                    // 会话保鲜之后再预热：首页配置按登录指纹缓存，Cookie 轮换前拿的会作废
+                    let auth = state.auth.lock().youtube.clone();
+                    neri_player_desktop::api::youtube::playback::warm_playback(auth, state.bypasses_system_proxy()).await;
                 });
             }
 
