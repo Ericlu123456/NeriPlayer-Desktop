@@ -226,6 +226,16 @@ const bgImageStyle = computed(() => {
     opacity: settingsStore.backgroundImageAlpha,
   }
 })
+watch(
+  () => [!!bgImageStyle.value, settingsStore.enhancedAdvancedBlur, settingsStore.enhancedAdvancedBlurRadius] as const,
+  ([active, glass, radius]) => {
+    const root = document.documentElement
+    root.classList.toggle('has-custom-bg', active)
+    root.classList.toggle('enhanced-blur', active && glass)
+    root.style.setProperty('--glass-blur', `${radius}px`)
+  },
+  { immediate: true },
+)
 
 // 对齐 Android：数据变更后短暂延迟，给连续操作留出合并时间
 const DEBOUNCE_SYNC_MS = 5_000

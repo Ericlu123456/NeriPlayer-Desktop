@@ -193,6 +193,9 @@ enum AudioCmd {
     Pause,
     Resume,
     Stop,
+    /// 切歌时立刻静音上一首：只暂停代际早于 `before_generation` 的会话，不推进任何代际，
+    /// 晚于新会话到达也不会误伤它，也不会作废排在后面的 Play
+    SilenceStale { before_generation: u64 },
     ReleaseFile {
         path: String,
         reply: mpsc::Sender<Option<u64>>,
@@ -576,6 +579,12 @@ fn finish_decode_worker(
         let _ = worker.join();
     } else {
         reap_worker_handle(worker);
+    }
+}
+
+fn silence_stale_session(current: Option<&PlaybackSession>, before_generation: u64) {
+    if let Some(session) = current.filter(|session| session.playback_generation < before_generation) {
+        session.pause();
     }
 }
 
@@ -1161,6 +1170,11 @@ impl PlayerEngine {
         self.transition_generation.fetch_add(1, Ordering::AcqRel);
         let _ = self.cmd_tx.send(AudioCmd::Stop);
         self.clear_playback_state();
+    }
+
+    /// 新播放请求一开始就静音上一首（交叉淡化除外），不必等新音源解析、缓冲完
+    pub fn silence_stale_sessions(&self, before_generation: u64) {
+        let _ = self.cmd_tx.send(AudioCmd::SilenceStale { before_generation });
     }
 
     fn clear_playback_state(&mut self) {
@@ -1754,6 +1768,10 @@ fn audio_control_loop(
                     start_position_ms,
                     transition_label,
                 );
+                // 准备新会话（打开解码器、预缓冲）可能要好几秒，直接替换时旧歌不能在这期间继续出声
+                if matches!(transition, PlayTransition::Replace) {
+                    silence_stale_session(current.as_ref(), expected);
+                }
                 let prepared = (|| {
                     if prepare_cancel.load(Ordering::Acquire) {
                         return Err("Timed out waiting for decoded audio".into());
@@ -1898,6 +1916,9 @@ fn audio_control_loop(
                     session.stop();
                 }
                 SharedAudioLevel::reset(&shared_level);
+            }
+            AudioCmd::SilenceStale { before_generation } => {
+                silence_stale_session(current.as_ref(), before_generation);
             }
             AudioCmd::ReleaseFile { path, reply } => {
                 let released = current.as_ref()

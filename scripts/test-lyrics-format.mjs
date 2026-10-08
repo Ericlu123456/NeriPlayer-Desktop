@@ -26,7 +26,10 @@ const {
   resolveStoredRomanizedLyricStateFromPayload,
   mergeWordTimedLyricsWithBaseline,
   mergeParsedLyricsWithRomanization,
+  mergeParsedLyricsWithTranslations,
   materializeStoredLyrics,
+  resolveKnownNeteaseLyricSongId,
+  shouldBackfillNeteaseRomanization,
   toEditableRomanizationText,
 } = await loadTsModule('../src/modules/lyrics/lyricsFormat.ts')
 
@@ -158,6 +161,33 @@ const mergedRoman = mergeParsedLyricsWithRomanization(
 assert.equal(mergedRoman[0].roman, 'yoru', '按时间轴容差并到对应行')
 assert.equal(mergedRoman[0].translation, '夜晚', '不动翻译')
 assert.equal(mergedRoman[1].roman, 'sora-old', '没对上的行保留原音译')
+
+// 翻译与 YRC 行首相差 0.6~1s（超出 450ms）时按区间重叠逐行对上，对齐 Android matchTranslationsToLineIndices
+const yrcLines = [[24300, 3280], [27580, 2220], [33420, 2750], [36200, 3950], [45580, 4170], [50070, 2910]]
+  .map(([startMs, durationMs], i) => ({ startMs, durationMs, text: `l${i}`, words: [] }))
+const lrcTranslations = [24450, 28220, 32760, 36950, 44560, 49990]
+  .map((startMs, i, all) => ({ startMs, durationMs: (all[i + 1] ?? startMs + 5000) - startMs, text: `t${i}`, words: [] }))
+assert.deepEqual(
+  mergeParsedLyricsWithTranslations(yrcLines, lrcTranslations).map(l => l.translation),
+  ['t0', 't1', 't2', 't3', 't4', 't5'],
+)
+const creditMerged = mergeParsedLyricsWithTranslations(
+  [{ startMs: 1000, durationMs: 0, text: '作词：a', words: [] }, { startMs: 1000, durationMs: 2000, text: 'Hello', words: [] }, { startMs: 3000, durationMs: 2000, text: 'Hi', words: [] }],
+  [{ startMs: 1000, durationMs: 2000, text: '你好', words: [] }, { startMs: 3000, durationMs: 2000, text: '//', words: [] }],
+)
+assert.deepEqual(creditMerged.map(l => l.translation), [undefined, '你好', undefined], '同刻向组尾对齐，占位符不显示')
+
+// 同步歌词缺音译时的网易云补全（Android loadNeteaseRomanizedFallback / resolveKnownNeteaseLyricSongId）
+assert.equal(resolveKnownNeteaseLyricSongId({ id: 'netease:123' }), 123)
+assert.equal(resolveKnownNeteaseLyricSongId({ id: 'bilibili:1', syncPayload: { matchedLyricSource: 'CLOUD_MUSIC', matchedSongId: '456' } }), 456)
+assert.equal(resolveKnownNeteaseLyricSongId({ id: 'netease:123', syncPayload: { matchedLyricSource: 'QQ_MUSIC', matchedSongId: '456' } }), 123, 'QQ 的匹配 ID 不能拿去网易云取词')
+assert.equal(resolveKnownNeteaseLyricSongId({ id: 'youtube:abc' }), null)
+const plainSynced = [{ startMs: 0, durationMs: 1000, text: 'a', words: [] }]
+assert.equal(shouldBackfillNeteaseRomanization({ matchedLyric: 'x' }, plainSynced), true)
+assert.equal(shouldBackfillNeteaseRomanization({ matchedLyric: 'x', lyricSyncEdited: true }, plainSynced), true, '只编辑过原文时仍补音译')
+assert.equal(shouldBackfillNeteaseRomanization({ lyricSyncEdited: true, matchedRomanizedLyric: '' }, plainSynced), false, '用户有意清空音译')
+assert.equal(shouldBackfillNeteaseRomanization({}, [{ ...plainSynced[0], roman: 'a' }]), false, '已有音译')
+assert.equal(shouldBackfillNeteaseRomanization({}, []), false)
 
 // 存储歌词落地：原文 + 翻译 + 音译；副轨解析失败只丢副轨
 const parsedTracks = {

@@ -27,6 +27,13 @@ pub async fn fetch_word_timed_lyrics(
     manager.fetch_word_timed_lyrics(&title, &artist, duration_ms).await
 }
 
+/// 网易云音译轨原文（romalrc）；同步来的歌词缺音译时补上，对齐 Android loadNeteaseRomanizedFallback
+#[tauri::command]
+pub async fn fetch_netease_romanized_lyric(song_id: u64, state: State<'_, AppState>) -> AppResult<Option<String>> {
+    let lyrics = state.netease().get_lyrics(song_id).await?;
+    Ok(lyrics.romalrc.filter(|text| !text.trim().is_empty()))
+}
+
 /// 歌词编辑器「匹配」：按所选平台搜索并排序候选，每个候选带完整歌词行
 #[tauri::command]
 pub async fn match_lyrics(request: MatchRequest, state: State<'_, AppState>) -> AppResult<Vec<RankedMatch>> {

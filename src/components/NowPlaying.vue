@@ -37,6 +37,8 @@ import {
   mergeParsedLyricsWithTranslations,
   mergeParsedLyricsWithRomanization,
   mergeWordTimedLyricsWithBaseline,
+  resolveKnownNeteaseLyricSongId,
+  shouldBackfillNeteaseRomanization,
 } from '@/modules/lyrics/lyricsFormat'
 import { lyricMatchSourceTag, type LyricMatchResult } from '@/modules/lyrics/lyricMatch'
 import {
@@ -44,9 +46,16 @@ import {
   MAX_LYRIC_DEFAULT_OFFSET_MS,
   MIN_LYRIC_DEFAULT_OFFSET_MS,
   LYRIC_OFFSET_STEP_MS,
+  normalizeLyricSource,
   readSyncedLyricSource,
 } from '@/modules/lyrics/lyricOffset'
-import { fetchLyrics, fetchWordTimedLyrics } from '@/modules/lyrics/lyricsFetch'
+import {
+  fetchLyrics,
+  fetchNeteaseRomanizedLyric,
+  fetchPreferredSourceLyrics,
+  fetchWordTimedLyrics,
+  preferredLyricMatchSource,
+} from '@/modules/lyrics/lyricsFetch'
 import { lyricSourceOf, rememberLyricSource } from '@/modules/lyrics/lyricSource'
 import { isEditableTarget } from '@/modules/shortcuts/platform'
 import {
@@ -256,6 +265,9 @@ async function commitLyricsToTrack(
 const lyricsEditorText = ref('')
 const lyricsTranslationEditorText = ref('')
 const lyricsRomanizationEditorText = ref('')
+/** 打开编辑器时音译页的初始内容：一开始就空、用户也没动过时，应用不能把音译记成「有意清空」 */
+const lyricsRomanizationEditorInitial = ref('')
+let lyricsEditorSession = 0
 const lyricsEditorTab = ref<'original' | 'translation' | 'romanization'>('original')
 /** 从「编辑歌曲信息」进来时返回那里 */
 const lyricsEditorReturnView = ref<'main' | 'editinfo'>('main')
@@ -283,7 +295,27 @@ function openLyricsEditor(returnView: 'main' | 'editinfo' = 'main') {
     resolveStoredTranslatedLyricStateFromPayload(payload), lines, toEditableTranslationText)
   lyricsRomanizationEditorText.value = storedOrDisplayed(
     resolveStoredRomanizedLyricStateFromPayload(payload), lines, toEditableRomanizationText)
+  lyricsRomanizationEditorInitial.value = lyricsRomanizationEditorText.value
+  const session = ++lyricsEditorSession
+  if (!lyricsRomanizationEditorText.value.trim()) void prefillEditorRomanization(session)
   goToSubView('lyrics-editor')
+}
+
+// 音译页为空时从网易云取音译填进去（Android 编辑器同样带上已加载的音译）
+async function prefillEditorRomanization(session: number) {
+  const track = player.currentTrack
+  const songId = resolveKnownNeteaseLyricSongId(track)
+  if (!track || !songId) return
+  try {
+    const text = await fetchNeteaseRomanizedLyric(songId)
+    const stillEditing = session === lyricsEditorSession && player.currentTrack?.id === track.id
+      && moreSheetView.value === 'lyrics-editor'
+    if (!text || !stillEditing || lyricsRomanizationEditorText.value.trim()) return
+    lyricsRomanizationEditorText.value = text
+    lyricsRomanizationEditorInitial.value = text
+  } catch (error) {
+    log.warn('editor romanization prefill unavailable:', summarizeLogError(error))
+  }
 }
 
 function leaveLyricsEditor() {
@@ -329,7 +361,9 @@ async function applyLyricsFromEditor() {
     rememberLyricSource(player.currentTrack, source)
     cacheLyricsForTrack(player.currentTrack, nextLyrics)
     // 原文保留编辑器文本(YRC/LRC), 与 Android toEditableLyricsText 往返一致
-    await commitLyricsToTrack(text, translationText || null, source, romanizationText || null)
+    const romanizedForCommit = romanizationText
+      || (lyricsRomanizationEditorInitial.value.trim() ? null : undefined)
+    await commitLyricsToTrack(text, translationText || null, source, romanizedForCommit)
     toast.success(t('player.lyrics_applied'))
   } catch (e) {
     log.error('Parse lyrics failed:', e)
@@ -862,14 +896,14 @@ onUnmounted(() => { lyricFetchRequestId++ })
 
 function upgradeWordTimedLyrics(track: TrackInfo, requestId: number) {
   const baseline = fetchedLyrics.value
-  if (!settings.advancedLyrics || !getPlaybackSourceKind(track) || hasWordTimedLyrics(baseline)) return
+  if (!settings.preferWordTimedLyrics || !getPlaybackSourceKind(track) || hasWordTimedLyrics(baseline)) return
   if (resolveStoredLyricStateFromPayload(track.syncPayload).kind !== 'absent') return
   const identity = JSON.stringify([track.id, track.title, track.artist, track.durationMs])
   void loadLyricsSingleFlight(track, () => fetchWordTimedLyrics({
     title: track.title, artist: track.artist, durationMs: track.durationMs || 0,
   }), 'word-timed').then(({ lines, source }) => {
     const current = player.currentTrack
-    if (!current || requestId !== lyricFetchRequestId || !settings.advancedLyrics) return
+    if (!current || requestId !== lyricFetchRequestId || !settings.preferWordTimedLyrics) return
     if (identity !== JSON.stringify([current.id, current.title, current.artist, current.durationMs])) return
     if (fetchedLyrics.value !== baseline || !hasWordTimedLyrics(lines)) return
     if (resolveStoredLyricStateFromPayload(current.syncPayload).kind !== 'absent') return
@@ -879,6 +913,23 @@ function upgradeWordTimedLyrics(track: TrackInfo, requestId: number) {
     rememberLyricSource(current, source)
     cacheLyricsForTrack(current, merged)
   }).catch(error => log.warn('word timed lyric upgrade unavailable:', summarizeLogError(error)))
+}
+
+// 同步载荷里的歌词没带音译时，后台从网易云补上（显示与编辑器音译页都靠它）
+function backfillNeteaseRomanization(track: TrackInfo, requestId: number) {
+  const baseline = fetchedLyrics.value
+  if (!shouldBackfillNeteaseRomanization(track.syncPayload, baseline)) return
+  const songId = resolveKnownNeteaseLyricSongId(track)
+  if (!songId) return
+  void fetchNeteaseRomanizedLyric(songId).then(async (text) => {
+    if (!text || requestId !== lyricFetchRequestId || fetchedLyrics.value !== baseline) return
+    const roman = mapBackendLyrics(await invoke<any[]>('parse_lrc_content', { content: text }))
+    if (requestId !== lyricFetchRequestId || fetchedLyrics.value !== baseline) return
+    const merged = mergeParsedLyricsWithRomanization(baseline, roman)
+    if (!merged.some(line => line.roman)) return
+    fetchedLyrics.value = merged
+    cacheLyricsForTrack(track, merged)
+  }).catch(error => log.warn('netease romanization backfill unavailable:', summarizeLogError(error)))
 }
 
 // 当曲目切换时自动获取歌词
@@ -920,6 +971,7 @@ watch(nowPlayingTrackKey, async (trackKey) => {
       fetchedLyrics.value = syncedLyrics
       if (syncedLyrics.length > 0) {
         cacheLyricsForTrack(track, syncedLyrics)
+        backfillNeteaseRomanization(track, requestId)
       }
       log.info('lyrics from sync payload:', {
         requestId,
@@ -930,6 +982,21 @@ watch(nowPlayingTrackKey, async (trackKey) => {
       return
     }
 
+    // 设了默认歌词源时先按它匹配（Android tryGetPreferredLyricSourceResult），缓存已是该来源就直接用
+    const preferredSource = preferredLyricMatchSource(getPlaybackSourceKind(track), settings.defaultLyricSource)
+    if (preferredSource && !(cachedLyrics?.length && normalizeLyricSource(lyricSourceOf(track)) === preferredSource)) {
+      const preferred = await fetchPreferredSourceLyrics(track, preferredSource, settings.preferWordTimedLyrics)
+        .catch(error => { log.warn('preferred lyric source unavailable:', summarizeLogError(error)); return null })
+      if (requestId !== lyricFetchRequestId) return
+      if (preferred) {
+        fetchedLyrics.value = preferred.lines
+        rememberLyricSource(track, preferred.source)
+        cacheLyricsForTrack(track, preferred.lines)
+        log.info('lyrics from preferred source:', { requestId, trackId: track.id, source: preferred.source })
+        return
+      }
+    }
+
     // 先显示缓存，缺少逐字时间时再后台升级
     if (cachedLyrics?.length) {
       log.info('lyrics from local cache:', {
@@ -937,7 +1004,7 @@ watch(nowPlayingTrackKey, async (trackKey) => {
         trackId: track.id,
         lines: cachedLyrics.length,
       })
-      upgradeWordTimedLyrics(track, requestId)
+      if (!preferredSource) upgradeWordTimedLyrics(track, requestId)
       return
     }
 
@@ -3081,7 +3148,7 @@ const sliderActiveColor = computed(() => {
               :album="player.currentTrack.album"
               :duration-ms="player.currentTrack.durationMs || 0"
               :playback-source="currentSource"
-              :prefer-word-timed="settings.advancedLyrics"
+              :prefer-word-timed="settings.preferWordTimedLyrics"
               :apply-label="t(lyricMatchTarget === 'editor' ? 'player.lyrics_match_fill_editor' : 'player.lyrics_match_apply')"
               @pick="onLyricMatchPicked"
             />

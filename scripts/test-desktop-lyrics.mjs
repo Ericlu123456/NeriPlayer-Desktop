@@ -211,7 +211,7 @@ const player = {
   next: async () => { playerCalls.push('next') },
   previous: async () => { playerCalls.push('previous') },
 }
-const settings = { advancedLyrics: false, desktopLyrics: undefined }
+const settings = { preferWordTimedLyrics: false, defaultLyricSource: 'automatic', desktopLyrics: undefined }
 const watchers = []
 const intervals = new Map()
 const invocations = []
@@ -264,6 +264,8 @@ try {
     '@/modules/lyrics/lyricsFetch': {
       fetchLyrics: () => new Promise(resolve => { fetchRelease = fetched => resolve({ source: 'netease', lines: fetched }) }),
       fetchWordTimedLyrics: async () => ({ source: null, lines: [] }),
+      preferredLyricMatchSource: () => null,
+      fetchPreferredSourceLyrics: async () => null,
     },
     '@/modules/lyrics/lyricSource': { rememberLyricSource() {} },
     '@/modules/lyrics/lyricsCache': { getCachedLyrics: () => null, saveCachedLyrics: () => { cachedAfterClose++ } },

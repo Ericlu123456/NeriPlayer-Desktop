@@ -5,7 +5,7 @@ import { usePlayerStore, type LyricLine, type TrackInfo } from '@/stores/player'
 import { useSettingsStore } from '@/stores/settings'
 import { useLyricOffsetStore } from '@/stores/lyricOffset'
 import { readSyncedLyricSource } from '@/modules/lyrics/lyricOffset'
-import { fetchLyrics, fetchWordTimedLyrics } from '@/modules/lyrics/lyricsFetch'
+import { fetchLyrics, fetchPreferredSourceLyrics, fetchWordTimedLyrics, preferredLyricMatchSource } from '@/modules/lyrics/lyricsFetch'
 import { rememberLyricSource } from '@/modules/lyrics/lyricSource'
 import { getCachedLyrics, saveCachedLyrics } from '@/modules/lyrics/lyricsCache'
 import { loadLyricsSingleFlight, hasWordTimedLyrics } from '@/modules/lyrics/lyricsRequest'
@@ -265,6 +265,15 @@ export function installDesktopLyricsBridge(options: DesktopLyricsBridgeOptions =
       cache: saveCachedLyrics,
       onChange: value => { lines.value = value; publish(true) },
       fetch: async track => {
+        const preferredSource = preferredLyricMatchSource(source(track) === 'local' ? null : source(track), settings.defaultLyricSource)
+        if (preferredSource) {
+          const preferred = await fetchPreferredSourceLyrics(track, preferredSource, settings.preferWordTimedLyrics)
+            .catch(error => { log.warn('preferred lyric source unavailable:', summarizeLogError(error)); return null })
+          if (preferred) {
+            rememberLyricSource(track, preferred.source)
+            return preferred.lines
+          }
+        }
         const fetched = await loadLyricsSingleFlight(track, () => fetchLyrics({
           title: track.title, artist: track.artist,
           durationSecs: Math.floor((track.durationMs || 0) / 1000), audioPath: track.audioUrl || null,
@@ -275,7 +284,8 @@ export function installDesktopLyricsBridge(options: DesktopLyricsBridgeOptions =
         if (fetched.lines.length) rememberLyricSource(track, fetched.source)
         return fetched.lines
       },
-      canUpgrade: (track, baseline) => settings.advancedLyrics && source(track) !== 'local'
+      canUpgrade: (track, baseline) => settings.preferWordTimedLyrics && settings.defaultLyricSource === 'automatic'
+        && source(track) !== 'local'
         && !hasWordTimedLyrics(baseline) && resolveStoredLyricStateFromPayload(track.syncPayload).kind === 'absent',
       upgrade: async track => {
         const fetched = await loadLyricsSingleFlight(track, () => fetchWordTimedLyrics({
@@ -286,7 +296,7 @@ export function installDesktopLyricsBridge(options: DesktopLyricsBridgeOptions =
       adoptSource: rememberLyricSource,
     })
     stopTrack = watch(
-      [() => player.currentTrack, () => player.lyrics, () => settings.advancedLyrics],
+      [() => player.currentTrack, () => player.lyrics, () => settings.preferWordTimedLyrics, () => settings.defaultLyricSource],
       () => { void loader?.load(player.currentTrack, player.lyrics) },
       { deep: true, immediate: true },
     )

@@ -82,6 +82,10 @@ pub struct AppSettings {
     pub amll_ttml_offset: i32,
     pub cover_style: String,
     pub advanced_lyrics: bool,
+    /// 有逐字结果时优先用；关闭后不再用 AMLL/酷狗补逐字（对齐 Android prefer_word_timed_lyrics）
+    pub prefer_word_timed_lyrics: bool,
+    /// 播放时优先尝试的歌词源，找不到时回退自动（对齐 Android default_lyric_source）
+    pub default_lyric_source: String,
     pub dynamic_color: bool,
     pub dynamic_background: bool,
     pub audio_reactive: bool,
@@ -102,6 +106,10 @@ pub struct AppSettings {
     pub background_image_uri: String,
     pub background_image_blur: f32,
     pub background_image_alpha: f32,
+    /// 背景图模式下卡片、搜索框等控件的实时玻璃模糊（对齐 Android enhanced_advanced_blur_enabled，PC 默认开）
+    pub enhanced_advanced_blur: bool,
+    /// 玻璃模糊半径（px），12–64 按 4 对齐（Android enhanced_advanced_blur_radius_dp）
+    pub enhanced_advanced_blur_radius: f32,
     pub dev_mode_enabled: bool,
     pub log_to_file: bool,
     pub log_level: String,
@@ -210,6 +218,8 @@ impl Default for AppSettings {
             amll_ttml_offset: 0,
             cover_style: "card".into(),
             advanced_lyrics: true,
+            prefer_word_timed_lyrics: true,
+            default_lyric_source: "automatic".into(),
             dynamic_color: false,
             dynamic_background: true,
             audio_reactive: true,
@@ -229,6 +239,8 @@ impl Default for AppSettings {
             background_image_uri: String::new(),
             background_image_blur: 20.0,
             background_image_alpha: 0.3,
+            enhanced_advanced_blur: true,
+            enhanced_advanced_blur_radius: 36.0,
             dev_mode_enabled: false,
             log_to_file: false,
             log_level: "info".into(),
@@ -280,6 +292,11 @@ impl AppSettings {
             "home",
         );
         self.cover_style = normalize_choice(&self.cover_style, &["disc", "card"], "card");
+        self.default_lyric_source = normalize_choice(
+            &self.default_lyric_source,
+            &["automatic", "cloud_music", "kugou", "qq_music", "lrclib", "amll_ttml"],
+            "automatic",
+        );
 
         if self.crossfade {
             if !self.crossfade_next {
@@ -309,6 +326,8 @@ impl AppSettings {
         self.cover_blur_darken = clamp_f32(self.cover_blur_darken, 0.0, 1.0, 0.2);
         self.background_image_blur = clamp_f32(self.background_image_blur, 0.0, 100.0, 20.0);
         self.background_image_alpha = clamp_f32(self.background_image_alpha, 0.0, 1.0, 0.3);
+        self.enhanced_advanced_blur_radius =
+            (clamp_f32(self.enhanced_advanced_blur_radius, 12.0, 64.0, 36.0) / 4.0).round() * 4.0;
         self.max_cache_size = self
             .max_cache_size
             .clamp(MIN_MEDIA_CACHE_SIZE_MB, MAX_MEDIA_CACHE_SIZE_MB);

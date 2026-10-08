@@ -1300,6 +1300,13 @@ export const usePlayerStore = defineStore('player', () => {
       `command=${commandSource}, startMs=${Math.max(0, Math.round(startPositionMs))}, force=${forceResolve}`,
       token,
     )
+    const settings = useSettingsStore()
+    // 只有切歌交叉淡化要让上一首继续出声；其余情况一发起请求就静音它，新音源解析、缓冲再慢也不会卡着旧声音
+    const keepsPreviousAudible = isPlaying.value
+      && !!currentTrack.value && currentTrack.value.id !== track.id
+      && settings.crossfadeNext
+      && Math.round(settings.crossfadeInDuration) > 0
+      && Math.round(settings.crossfadeOutDuration) > 0
     const claimStarted = performance.now()
     void invoke<void>('begin_playback_request', {
       requestGeneration: token,
@@ -1308,6 +1315,7 @@ export const usePlayerStore = defineStore('player', () => {
       hasCover: !!getTrackCoverUrl(track),
       hasAudioUrl: !!track.audioUrl,
       hasSyncPayload: !!track.syncPayload,
+      silencePrevious: !keepsPreviousAudible,
     }).then(() => {
       if (token !== playbackRequestToken) return
       tracePlaybackUi(
@@ -1336,7 +1344,6 @@ export const usePlayerStore = defineStore('player', () => {
     const wasPlayingBeforeSwitch = isPlaying.value
     const hadPlaybackSessionBeforeRequest = hasPlaybackSession.value
     const isSwitchingTrack = !!previousTrack && previousTrack.id !== track.id
-    const settings = useSettingsStore()
     const fadeInDurationMs = Math.max(0, Math.round(settings.fadeInDuration))
     const fadeOutDurationMs = Math.max(0, Math.round(settings.fadeOutDuration))
     const overlapFadeInDurationMs = settings.crossfadeNext

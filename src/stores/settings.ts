@@ -12,6 +12,11 @@ export const YOUTUBE_PLAYBACK_SOURCES = [
   'automatic', 'visionos', 'android_vr', 'web_remix', 'tv_html5', 'web_creator',
 ] as const
 export type YouTubePlaybackSource = typeof YOUTUBE_PLAYBACK_SOURCES[number]
+/** 与 Android LyricSourcePreference.storageValue 一致 */
+export const DEFAULT_LYRIC_SOURCES = [
+  'automatic', 'cloud_music', 'kugou', 'qq_music', 'lrclib', 'amll_ttml',
+] as const
+export type DefaultLyricSource = typeof DEFAULT_LYRIC_SOURCES[number]
 
 export interface AppSettings {
   formatVersion: number
@@ -56,6 +61,10 @@ export interface AppSettings {
   amllTtmlOffset: number
   coverStyle: CoverStyle
   advancedLyrics: boolean
+  /** 有逐字结果时优先用；关闭后不再用 AMLL/酷狗补逐字（Android prefer_word_timed_lyrics） */
+  preferWordTimedLyrics: boolean
+  /** 播放时优先尝试的歌词源，找不到时回退自动（Android default_lyric_source） */
+  defaultLyricSource: DefaultLyricSource
   dynamicBackground: boolean
   dynamicColor: boolean
   audioReactive: boolean
@@ -75,6 +84,10 @@ export interface AppSettings {
   backgroundImageUri: string
   backgroundImageBlur: number
   backgroundImageAlpha: number
+  /** 背景图模式下卡片、搜索框等控件的实时玻璃模糊（Android enhanced_advanced_blur_enabled） */
+  enhancedAdvancedBlur: boolean
+  /** 玻璃模糊半径（px），12–64 按 4 对齐（Android enhanced_advanced_blur_radius_dp） */
+  enhancedAdvancedBlurRadius: number
   devModeEnabled: boolean
   logToFile: boolean
   logLevel: string
@@ -127,6 +140,10 @@ export const LYRIC_FONT_SCALE_STEP = 0.05
 // 封面模糊强度 × 30 = CSS 模糊半径（px），8 档上限即 240px
 export const COVER_BLUR_PX_PER_UNIT = 30
 export const MAX_COVER_BLUR_AMOUNT = 8
+// 对齐 Android EnhancedAdvancedBlurPreference 12–64dp，按 4 对齐
+export const ENHANCED_BLUR_RADIUS_MIN = 12
+export const ENHANCED_BLUR_RADIUS_MAX = 64
+export const ENHANCED_BLUR_RADIUS_STEP = 4
 // 对齐 Android LyricDefaultOffset ±5000ms，按 50ms 对齐
 export const LYRIC_DEFAULT_OFFSET_RANGE_MS = 5000
 export const LYRIC_DEFAULT_OFFSET_STEP_MS = 50
@@ -177,6 +194,8 @@ const DEFAULT_SETTINGS: AppSettings = {
   amllTtmlOffset: 0,
   coverStyle: 'card',
   advancedLyrics: true,
+  preferWordTimedLyrics: true,
+  defaultLyricSource: 'automatic',
   dynamicBackground: true,
   dynamicColor: false,
   audioReactive: true,
@@ -196,6 +215,8 @@ const DEFAULT_SETTINGS: AppSettings = {
   backgroundImageUri: '',
   backgroundImageBlur: 20,
   backgroundImageAlpha: 0.3,
+  enhancedAdvancedBlur: true,
+  enhancedAdvancedBlurRadius: 36,
   devModeEnabled: false,
   logToFile: false,
   logLevel: 'info',
@@ -401,6 +422,7 @@ function normalizeSnapshot(input: unknown): AppSettings {
   result.downloadQqMusicQuality = normalizeChoice(result.downloadQqMusicQuality, QQ_QUALITIES, 'high')
   result.downloadYoutubeQuality = normalizeChoice(result.downloadYoutubeQuality, YOUTUBE_QUALITIES, 'high')
   result.downloadBiliQuality = normalizeChoice(result.downloadBiliQuality, BILI_QUALITIES, 'high')
+  result.defaultLyricSource = normalizeChoice(result.defaultLyricSource, [...DEFAULT_LYRIC_SOURCES], 'automatic') as DefaultLyricSource
 
   // 旧版「无缝切换」与「切歌交叉淡入淡出」是同一效果的两个开关，合并到后者并沿用当时的淡入淡出时长
   if (result.crossfade) {
@@ -428,6 +450,9 @@ function normalizeSnapshot(input: unknown): AppSettings {
   result.coverBlurDarken = clamp(result.coverBlurDarken, 0, 1)
   result.backgroundImageBlur = clamp(result.backgroundImageBlur, 0, 100)
   result.backgroundImageAlpha = clamp(result.backgroundImageAlpha, 0, 1)
+  result.enhancedAdvancedBlurRadius = Math.round(
+    clamp(result.enhancedAdvancedBlurRadius, ENHANCED_BLUR_RADIUS_MIN, ENHANCED_BLUR_RADIUS_MAX) / ENHANCED_BLUR_RADIUS_STEP,
+  ) * ENHANCED_BLUR_RADIUS_STEP
   result.maxCacheSize = clampInteger(
     result.maxCacheSize,
     MIN_MEDIA_CACHE_SIZE_MB,
@@ -543,6 +568,8 @@ export const useSettingsStore = defineStore('settings', () => {
   const amllTtmlOffset = ref(initial.amllTtmlOffset)
   const coverStyle = ref<CoverStyle>(initial.coverStyle)
   const advancedLyrics = ref(initial.advancedLyrics)
+  const preferWordTimedLyrics = ref(initial.preferWordTimedLyrics)
+  const defaultLyricSource = ref<DefaultLyricSource>(initial.defaultLyricSource)
   const dynamicBackground = ref(initial.dynamicBackground)
   const dynamicColor = ref(initial.dynamicColor)
   const audioReactive = ref(initial.audioReactive)
@@ -562,6 +589,8 @@ export const useSettingsStore = defineStore('settings', () => {
   const backgroundImageUri = ref(initial.backgroundImageUri)
   const backgroundImageBlur = ref(initial.backgroundImageBlur)
   const backgroundImageAlpha = ref(initial.backgroundImageAlpha)
+  const enhancedAdvancedBlur = ref(initial.enhancedAdvancedBlur)
+  const enhancedAdvancedBlurRadius = ref(initial.enhancedAdvancedBlurRadius)
   const devModeEnabled = ref(initial.devModeEnabled)
   const logToFile = ref(initial.logToFile)
   const logLevel = ref(initial.logLevel)
@@ -599,11 +628,12 @@ export const useSettingsStore = defineStore('settings', () => {
     crossfadeOutDuration, keepProgress, rememberLongFormProgress, keepPlaybackMode, showTranslation,
     showRomanization, lyricBlur, lyricBlurAmount, cloudMusicOffset, qqMusicOffset, kugouOffset, lrclibOffset,
     amllTtmlOffset, coverStyle,
-    advancedLyrics, dynamicBackground, dynamicColor, audioReactive, coverBlurBg,
+    advancedLyrics, preferWordTimedLyrics, defaultLyricSource, dynamicBackground, dynamicColor, audioReactive, coverBlurBg,
     coverBlurAmount, coverBlurDarken, neteaseQuality, qqMusicQuality,
     youtubeQuality, biliQuality, bypassProxy, internationalizationEnabled, exploreSearchHistoryEnabled,
     youtubePlaybackSource, neteaseAutoSourceSwitch, neteaseLocalSourceFallback,
-    backgroundImageUri, backgroundImageBlur, backgroundImageAlpha, devModeEnabled,
+    backgroundImageUri, backgroundImageBlur, backgroundImageAlpha, enhancedAdvancedBlur,
+    enhancedAdvancedBlurRadius, devModeEnabled,
     logToFile, logLevel,
     maxCacheSize, downloadNameTemplate, downloadDir, ltServerUrl, ltNickname,
     downloadParallelism, downloadAutoFillMetadata, downloadEmbedLyrics,
@@ -696,12 +726,13 @@ export const useSettingsStore = defineStore('settings', () => {
     keepProgress, rememberLongFormProgress, keepPlaybackMode, showTranslation, showRomanization,
     lyricBlur, lyricBlurAmount,
     cloudMusicOffset, qqMusicOffset, kugouOffset, lrclibOffset, amllTtmlOffset,
-    advancedLyrics, dynamicBackground,
+    advancedLyrics, preferWordTimedLyrics, defaultLyricSource, dynamicBackground,
     dynamicColor, audioReactive, coverBlurBg, coverBlurAmount, coverBlurDarken,
     neteaseQuality, qqMusicQuality, youtubeQuality, biliQuality, bypassProxy,
     youtubePlaybackSource, neteaseAutoSourceSwitch, neteaseLocalSourceFallback,
     internationalizationEnabled, exploreSearchHistoryEnabled, backgroundImageUri, backgroundImageBlur,
-    backgroundImageAlpha, devModeEnabled, logToFile, logLevel, maxCacheSize, downloadNameTemplate,
+    backgroundImageAlpha, enhancedAdvancedBlur, enhancedAdvancedBlurRadius,
+    devModeEnabled, logToFile, logLevel, maxCacheSize, downloadNameTemplate,
     downloadDir, ltServerUrl, ltNickname, ltAllowMemberControl,
     downloadParallelism, downloadAutoFillMetadata, downloadEmbedLyrics,
     downloadFollowPlaybackQuality, downloadNeteaseQuality, downloadQqMusicQuality,

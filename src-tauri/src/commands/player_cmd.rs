@@ -259,19 +259,25 @@ pub async fn begin_playback_request(
     has_cover: Option<bool>,
     has_audio_url: Option<bool>,
     has_sync_payload: Option<bool>,
+    silence_previous: Option<bool>,
     state: State<'_, AppState>,
 ) -> AppResult<()> {
     log::info!(
         target: "playback-request",
-        "begin generation={}, id={}, source={}, cover={}, direct_url={}, sync_payload={}",
+        "begin generation={}, id={}, source={}, cover={}, direct_url={}, sync_payload={}, silence_previous={}",
         request_generation,
         track_id.as_deref().unwrap_or("unknown"),
         source.as_deref().unwrap_or("unknown"),
         has_cover.unwrap_or(false),
         has_audio_url.unwrap_or(false),
-        has_sync_payload.unwrap_or(false)
+        has_sync_payload.unwrap_or(false),
+        silence_previous.unwrap_or(false)
     );
-    claim_playback_request(&state, request_generation)
+    claim_playback_request(&state, request_generation)?;
+    if silence_previous.unwrap_or(false) {
+        state.player.lock().silence_stale_sessions(request_generation);
+    }
+    Ok(())
 }
 
 #[derive(Serialize)]

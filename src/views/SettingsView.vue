@@ -47,6 +47,10 @@ import {
   MAX_DOWNLOAD_PARALLELISM,
   MIN_DOWNLOAD_PARALLELISM,
   YOUTUBE_PLAYBACK_SOURCES,
+  DEFAULT_LYRIC_SOURCES,
+  ENHANCED_BLUR_RADIUS_MAX,
+  ENHANCED_BLUR_RADIUS_MIN,
+  ENHANCED_BLUR_RADIUS_STEP,
   useSettingsStore,
 } from '@/stores/settings'
 import { useAuthStore } from '@/stores/auth'
@@ -94,12 +98,13 @@ const {
   crossfadeNext, crossfadeInDuration, crossfadeOutDuration,
   keepProgress, rememberLongFormProgress, keepPlaybackMode,
   showTranslation, showRomanization, lyricBlur, lyricBlurAmount,
-  advancedLyrics, dynamicBackground, dynamicColor, audioReactive,
+  advancedLyrics, preferWordTimedLyrics, defaultLyricSource, dynamicBackground, dynamicColor, audioReactive,
   coverBlurBg, coverBlurAmount, coverBlurDarken,
   neteaseQuality, qqMusicQuality, youtubeQuality, biliQuality,
   youtubePlaybackSource, neteaseAutoSourceSwitch, neteaseLocalSourceFallback,
   bypassProxy, internationalizationEnabled, exploreSearchHistoryEnabled,
   backgroundImageUri, backgroundImageBlur, backgroundImageAlpha,
+  enhancedAdvancedBlur, enhancedAdvancedBlurRadius,
   devModeEnabled, logToFile, logLevel,
   maxCacheSize, downloadNameTemplate, downloadDir,
   downloadParallelism, downloadAutoFillMetadata, downloadEmbedLyrics,
@@ -138,6 +143,17 @@ const youtubePlaybackSourceOptions = computed(() => YOUTUBE_PLAYBACK_SOURCES.map
   label: t(`settings.youtube_source_${value}`),
 })))
 const youtubePlaybackSourceDescription = computed(() => t(`settings.youtube_source_${youtubePlaybackSource.value}_desc`))
+
+const defaultLyricSourceOptions = computed(() => DEFAULT_LYRIC_SOURCES.map(value => ({
+  value,
+  label: t(`settings.lyric_source_${value}`),
+})))
+const defaultLyricSourceDescription = computed(() => t(`settings.lyric_source_${defaultLyricSource.value}_desc`))
+
+function changeDefaultLyricSource(value: string) {
+  const source = DEFAULT_LYRIC_SOURCES.find(source => source === value)
+  if (source) defaultLyricSource.value = source
+}
 
 function changeYouTubePlaybackSource(value: string) {
   const source = YOUTUBE_PLAYBACK_SOURCES.find(source => source === value)
@@ -1624,6 +1640,32 @@ useEscapeClose(
         </div>
           <input type="range" class="m3-slider" v-model.number="backgroundImageAlpha" min="0" max="1" step="0.05" />
         </div>
+
+        <div class="setting-card sub-card">
+          <div class="setting-info">
+            <div class="setting-title">{{ t('settings.enhanced_advanced_blur') }}</div>
+            <div class="setting-desc">{{ t('settings.enhanced_advanced_blur_desc') }}</div>
+          </div>
+          <label class="m3-switch"><input type="checkbox" v-model="enhancedAdvancedBlur" /><span class="track"><span class="thumb"><span v-if="enhancedAdvancedBlur" class="material-symbols-rounded" style="font-size: 14px">check</span></span></span></label>
+        </div>
+
+        <div v-if="enhancedAdvancedBlur" class="setting-card sub-card">
+          <div class="setting-info">
+            <div class="setting-title">{{ t('settings.enhanced_advanced_blur_radius') }}</div>
+            <EditableRangeValue
+              v-model="enhancedAdvancedBlurRadius"
+              class="setting-desc"
+              :min="ENHANCED_BLUR_RADIUS_MIN"
+              :max="ENHANCED_BLUR_RADIUS_MAX"
+              :step="ENHANCED_BLUR_RADIUS_STEP"
+              :display-value="`${enhancedAdvancedBlurRadius}px`"
+              input-suffix="px"
+              :aria-label="t('settings.enhanced_advanced_blur_radius')"
+            />
+          </div>
+          <input type="range" class="m3-slider" v-model.number="enhancedAdvancedBlurRadius"
+            :min="ENHANCED_BLUR_RADIUS_MIN" :max="ENHANCED_BLUR_RADIUS_MAX" :step="ENHANCED_BLUR_RADIUS_STEP" />
+        </div>
       </template>
     </div></Transition>
         </div>
@@ -2006,6 +2048,27 @@ useEscapeClose(
         <div class="setting-desc">{{ t('settings.show_romanization_desc') }}</div>
       </div>
       <label class="m3-switch"><input type="checkbox" v-model="showRomanization" /><span class="track"><span class="thumb"><span v-if="showRomanization" class="material-symbols-rounded" style="font-size: 14px">check</span></span></span></label>
+    </div>
+
+    <!-- 来源偏好（对齐 Android SettingsLyricSourceSection） -->
+    <div class="setting-card">
+      <div class="setting-icon-wrap"><span class="material-symbols-rounded">timer</span></div>
+      <div class="setting-info">
+        <div class="setting-title">{{ t('settings.prefer_word_timed_lyrics') }}</div>
+        <div class="setting-desc">{{ t('settings.prefer_word_timed_lyrics_desc') }}</div>
+      </div>
+      <label class="m3-switch"><input type="checkbox" v-model="preferWordTimedLyrics" /><span class="track"><span class="thumb"><span v-if="preferWordTimedLyrics" class="material-symbols-rounded" style="font-size: 14px">check</span></span></span></label>
+    </div>
+
+    <div class="setting-card setting-card--select">
+      <div class="setting-icon-wrap"><span class="material-symbols-rounded">source</span></div>
+      <div class="setting-info">
+        <div class="setting-title">{{ t('settings.default_lyric_source') }}</div>
+        <div class="setting-desc">{{ t('settings.default_lyric_source_desc') }}</div>
+        <div class="setting-desc">{{ defaultLyricSourceDescription }}</div>
+      </div>
+      <CustomSelect class="settings-select" :model-value="defaultLyricSource" :options="defaultLyricSourceOptions"
+        :label="t('settings.default_lyric_source')" @update:model-value="changeDefaultLyricSource" />
     </div>
 
     <div class="setting-card">
