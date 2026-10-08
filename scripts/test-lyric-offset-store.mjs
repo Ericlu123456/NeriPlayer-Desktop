@@ -93,6 +93,17 @@ await regression('the default follows the source of the lyrics on screen', async
   assert.equal(store.offsetSourceFor(youtube), 'lrclib')
 })
 
+await regression('a NetEase default borrowed for unknown lyrics is reported as a guess', async () => {
+  const { store } = await runtime()
+  const bili = track('bilibili:1')
+  assert.equal(store.offsetSourceFor(bili), 'netease')
+  assert.equal(store.offsetSourceIsGuessed(bili), true, 'B 站歌词没记来源，网易云默认只是兜底')
+  sourceModule.rememberLyricSource(bili, 'KUGOU')
+  assert.equal(store.offsetSourceIsGuessed(bili), false)
+  const netease = track('netease:9')
+  assert.equal(store.offsetSourceIsGuessed(netease), false, '网易云曲目来源未知时就是网易云的歌词')
+})
+
 await regression('editing the absolute offset stores the Android delta', async () => {
   const { store, player } = await runtime()
   const song = track('netease:2')

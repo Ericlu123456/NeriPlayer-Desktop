@@ -388,6 +388,7 @@
     "lyric_source_kugou": "酷狗",
     "lyric_source_local": "本機歌詞檔",
     "lyric_source_edited": "手動編輯",
+    "lyric_source_unknown_as": "未知來源（按{source}）",
     "font_scale": "歌詞字型大小",
     "font_preview": "歌詞預覽文字",
     "audio_effects": "音訊效果",

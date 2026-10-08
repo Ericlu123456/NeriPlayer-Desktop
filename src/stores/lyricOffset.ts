@@ -11,6 +11,7 @@ import {
   clampLyricOffsetMs,
   LYRIC_OFFSET_SOURCES,
   lyricUserOffsetStorageKey,
+  normalizeLyricSource,
   readSyncedUserOffsetMs,
   rebaseLyricUserOffsetMs,
   resolveLyricDefaultOffsetMs,
@@ -190,6 +191,18 @@ export const useLyricOffsetStore = defineStore('lyricOffset', () => {
     return lyricOffsetSourceFor(track)
   }
 
+  /// offsetSourceFor 的结果只是兜底猜的：B 站、YouTube、本地曲目的歌词没记下来源时，
+  /// 和 Android 一样按网易云默认算，但歌词并不一定来自网易云
+  function offsetSourceIsGuessed(track: OffsetTrack): boolean {
+    const key = lyricUserOffsetStorageKey(track)
+    const recorded = key && getUserOffsetMs(track) !== 0 ? songMeta.value[key]?.source : undefined
+    if (recorded && recorded !== 'none') return false
+    const shown = normalizeLyricSource(lyricSourceOf(track))
+    if (shown && shown !== 'none') return false
+    const playback = playbackSourceOf(track)
+    return playback !== 'netease' && playback !== 'qq'
+  }
+
   function defaultOffsetMs(source: LyricOffsetSource | null): number {
     return resolveLyricDefaultOffsetMs(source, defaults())
   }
@@ -312,6 +325,7 @@ export const useLyricOffsetStore = defineStore('lyricOffset', () => {
     setUserOffsetMs,
     replaceFromSync,
     offsetSourceFor,
+    offsetSourceIsGuessed,
     defaultOffsetMs,
     effectiveOffsetMs,
     setEffectiveOffsetMs,

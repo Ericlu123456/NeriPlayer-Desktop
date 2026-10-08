@@ -1635,6 +1635,9 @@ function resetLyricOffsetToDefault() {
 
 // 当前歌词来源的名字，用于「网易云 · 默认 +1000ms」；没有可调默认的来源也标出来
 const currentLyricSourceLabel = computed(() => {
+  if (currentLyricOffsetSource.value === 'netease' && lyricOffsetStore.offsetSourceIsGuessed(player.currentTrack)) {
+    return t('player.lyric_source_unknown_as', { source: t('player.source_netease') })
+  }
   switch (currentLyricOffsetSource.value) {
     case 'netease': return t('player.source_netease')
     case 'qq': return t('player.source_qq')

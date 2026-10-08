@@ -388,6 +388,7 @@
     "lyric_source_kugou": "Kugou",
     "lyric_source_local": "Local lyrics file",
     "lyric_source_edited": "Edited by you",
+    "lyric_source_unknown_as": "Unknown source (using {source})",
     "font_scale": "Lyrics Font Size",
     "font_preview": "Sample lyrics text",
     "audio_effects": "Audio Effects",

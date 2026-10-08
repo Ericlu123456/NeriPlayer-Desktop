@@ -388,6 +388,7 @@
     "lyric_source_kugou": "Kugou",
     "lyric_source_local": "ローカルの歌詞ファイル",
     "lyric_source_edited": "手動で編集",
+    "lyric_source_unknown_as": "出典不明（{source} 扱い）",
     "font_scale": "歌詞フォントサイズ",
     "font_preview": "歌詞プレビューテキスト",
     "audio_effects": "オーディオエフェクト",
