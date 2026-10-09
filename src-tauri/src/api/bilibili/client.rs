@@ -393,6 +393,78 @@ impl BiliClient {
         ])).await
     }
 
+    /// 评论写操作要求网页登录态（SESSDATA + bili_jct）
+    fn comment_csrf(&self) -> Option<String> {
+        let jar = self.cookie_jar.as_ref()?;
+        bili_cookie_value(jar, "SESSDATA")?;
+        bili_cookie_value(jar, "bili_jct")
+    }
+
+    pub fn has_comment_login(&self) -> bool {
+        self.comment_csrf().is_some()
+    }
+
+    /// 发表评论 / 楼中楼回复（对齐 Android BiliCommentApi.sendVideoComment）：
+    /// 返回原始响应交给调用方按业务码分类；没有幂等键，只发一次
+    pub async fn send_video_comment(
+        &self,
+        aid: u64,
+        message: &str,
+        reply: Option<(u64, u64)>,
+    ) -> AppResult<Value> {
+        let Some(csrf) = self.comment_csrf() else {
+            return Ok(serde_json::json!({ "code": -101 }));
+        };
+        let (root, parent) = reply.unwrap_or((0, 0));
+        let form = [
+            ("type", "1".to_string()),
+            ("oid", aid.to_string()),
+            ("message", message.to_string()),
+            ("root", root.to_string()),
+            ("parent", parent.to_string()),
+            ("plat", "1".to_string()),
+            ("statistics", r#"{"appId":100,"platform":5}"#.to_string()),
+            ("gaia_source", "main_web".to_string()),
+            ("csrf", csrf),
+        ];
+        let response = self
+            .http
+            .send_once(|client| {
+                client
+                    .post("https://api.bilibili.com/x/v2/reply/add")
+                    .header("User-Agent", USER_AGENT)
+                    .header("Referer", "https://www.bilibili.com")
+                    .form(&form)
+            })
+            .await?;
+        parse_json_response(response, "bilibili reply add").await
+    }
+
+    /// 评论点赞 / 取消点赞（对齐 Android BiliCommentApi.setVideoCommentLiked）
+    pub async fn set_video_comment_liked(&self, aid: u64, rpid: u64, liked: bool) -> AppResult<Value> {
+        let Some(csrf) = self.comment_csrf() else {
+            return Ok(serde_json::json!({ "code": -101 }));
+        };
+        let form = [
+            ("type", "1".to_string()),
+            ("oid", aid.to_string()),
+            ("rpid", rpid.to_string()),
+            ("action", if liked { "1" } else { "0" }.to_string()),
+            ("csrf", csrf),
+        ];
+        let response = self
+            .http
+            .send_once(|client| {
+                client
+                    .post("https://api.bilibili.com/x/v2/reply/action")
+                    .header("User-Agent", USER_AGENT)
+                    .header("Referer", "https://www.bilibili.com")
+                    .form(&form)
+            })
+            .await?;
+        parse_json_response(response, "bilibili reply action").await
+    }
+
     /// 获取视频分 P 列表
     pub async fn get_video_pages(&self, bvid: &str) -> AppResult<Value> {
         let mut params = BTreeMap::new();

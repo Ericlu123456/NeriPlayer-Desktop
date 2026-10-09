@@ -310,6 +310,12 @@ let _interpSpeed = 1.0          // 当前播放速度快照
 let _interpIsPlaying = false    // 当前播放状态快照
 let _interpDurationMs = 0       // 当前时长快照
 let _interpLoopStarted = false  // rAF 循环是否已启动
+let _interpLastTickTime = 0     // 上一帧 tick 的 performance.now()
+// 播放中后端位置与渲染值的偏差在此范围内只做平滑追赶，不硬跳；
+// 硬跳的毫秒数在短歌上对应的像素位移更大，会让进度条明显一顿一顿
+const POSITION_HARD_RESYNC_MS = 1500
+// 平滑追赶的时间常数：偏差约按 e^(-t/τ) 收敛
+const POSITION_SLEW_TAU_MS = 300
 const SEEK_EVENT_GUARD_MS = 900
 const SEEK_SETTLE_TIMEOUT_MS = 4500
 const SEEK_BACKWARD_TOLERANCE_MS = 600
@@ -986,7 +992,8 @@ export const usePlayerStore = defineStore('player', () => {
     _interpAnchorTime = performance.now()
     _interpDurationMs = Math.max(durationMs.value || _interpDurationMs, safePositionMs)
     // 播放中也允许后端时钟校准插值，保证歌词与倍速同步
-    if (!_interpIsPlaying || forceRendered || isClockJump || Math.abs(safePositionMs - renderedMs) > 80) {
+    if (!_interpIsPlaying || forceRendered || isClockJump
+      || Math.abs(safePositionMs - renderedMs) > POSITION_HARD_RESYNC_MS) {
       _interpRenderedMs = safePositionMs
       interpolatedPositionMs.value = safePositionMs
     }
@@ -1129,6 +1136,7 @@ export const usePlayerStore = defineStore('player', () => {
   function _startInterpolationLoop() {
     if (_interpLoopStarted) return
     _interpLoopStarted = true
+    _interpLastTickTime = 0
 
     function tick() {
       // 空闲（未播放且无 pendingSeek）时渲染一次最终位置后停表，避免常驻逐帧唤醒
@@ -1139,24 +1147,28 @@ export const usePlayerStore = defineStore('player', () => {
       }
       requestAnimationFrame(tick)
 
+      const now = performance.now()
+      const dt = _interpLastTickTime ? now - _interpLastTickTime : 0
+      _interpLastTickTime = now
+
       // seek 等待后端确认期间冻结进度条，避免「seek 完成仍空转」
       if (pendingSeek) {
         interpolatedPositionMs.value = Math.round(pendingSeek.targetMs)
         _interpRenderedMs = pendingSeek.targetMs
         _interpAnchorMs = pendingSeek.targetMs
-        _interpAnchorTime = performance.now()
+        _interpAnchorTime = now
         return
       }
 
-      const now = performance.now()
-      const elapsed = (now - _interpAnchorTime) * _interpSpeed
-      const predicted = _interpAnchorMs + elapsed
+      const predicted = _interpAnchorMs + (now - _interpAnchorTime) * _interpSpeed
       const clamped = Math.max(0, Math.min(predicted, _interpDurationMs))
 
-      // 普通进度同步不允许把 UI 时间轴拉回，真正回跳只走 seek
-      if (clamped >= _interpRenderedMs - 24) {
-        _interpRenderedMs = Math.max(_interpRenderedMs, clamped)
-      }
+      // 按自然速度推进，同时把与后端预测值的偏差按指数平滑收敛：
+      // 落后时略快、超前时略慢（超前太多则停住等后端追上），从不往回拉
+      const error = clamped - _interpRenderedMs
+      const correction = error * Math.min(1, dt / POSITION_SLEW_TAU_MS)
+      const step = Math.max(0, dt * _interpSpeed + correction)
+      _interpRenderedMs = Math.min(_interpRenderedMs + step, Math.max(_interpRenderedMs, _interpDurationMs))
 
       interpolatedPositionMs.value = Math.round(_interpRenderedMs)
     }

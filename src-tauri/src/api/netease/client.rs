@@ -526,6 +526,54 @@ impl NeteaseClient {
         self.weapi_post(&format!("{}/weapi/resource/comment/floor/get", BASE_URL), &params).await
     }
 
+    /// 评论写操作要求网页登录态（MUSIC_U）
+    pub fn has_comment_login(&self) -> bool {
+        self.has_login()
+    }
+
+    /// 发表评论 / 回复（对齐 Android sendSongComment）：没有幂等键，只发一次，结果不确定时交给用户核对
+    pub async fn send_song_comment(
+        &self,
+        song_id: u64,
+        content: &str,
+        reply_to: Option<u64>,
+        check_token: &str,
+    ) -> AppResult<Value> {
+        let mut params = json!({
+            "threadId": format!("R_SO_4_{song_id}"),
+            "content": content,
+            "checkToken": check_token,
+            "csrf_token": self.csrf_token(),
+        });
+        let path = match reply_to {
+            Some(comment_id) => {
+                params["commentId"] = json!(comment_id.to_string());
+                "weapi/v1/resource/comments/reply"
+            }
+            None => "weapi/resource/comments/add",
+        };
+        self.weapi_post_write(&format!("{BASE_URL}/{path}"), &params).await
+    }
+
+    /// 评论点赞 / 取消点赞（对齐 Android setSongCommentLiked）
+    pub async fn set_song_comment_liked(
+        &self,
+        song_id: u64,
+        comment_id: u64,
+        liked: bool,
+        check_token: &str,
+    ) -> AppResult<Value> {
+        let params = json!({
+            "threadId": format!("R_SO_4_{song_id}"),
+            "commentId": comment_id.to_string(),
+            "like": liked,
+            "checkToken": check_token,
+            "csrf_token": self.csrf_token(),
+        });
+        let action = if liked { "like" } else { "unlike" };
+        self.weapi_post_write(&format!("{BASE_URL}/weapi/v1/comment/{action}"), &params).await
+    }
+
     /// 搜索歌曲
     pub async fn search(&self, keyword: &str, limit: u32, offset: u32) -> AppResult<Vec<NeteaseSearchResult>> {
         let params = json!({

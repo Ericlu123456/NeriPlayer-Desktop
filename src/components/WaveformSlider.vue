@@ -36,17 +36,23 @@ let looping = false
 
 let pathActive: SVGPathElement | null = null
 let pathInactive: SVGPathElement | null = null
+let thumbTrack: HTMLDivElement | null = null
 let thumbDiv: HTMLDivElement | null = null
 
 const currentProgress = computed(() => isDragging.value ? dragProgress.value : props.progress)
 
+function waveY(x: number, cy: number): number {
+  return cy + Math.sin(x * WAVE_FREQ + phase) * currentAmp
+}
+
+// 中间采样点固定在偶数网格上，只有两端跟随进度；否则采样点随进度整体平移，波形会抖
 function wavePath(startX: number, endX: number, cy: number): string {
   if (startX >= endX) return `M ${startX} ${cy}`
-  let d = `M ${startX} ${cy + Math.sin(startX * WAVE_FREQ + phase) * currentAmp}`
-  for (let x = startX + 2; x <= endX; x += 2) {
-    d += ` L ${x} ${cy + Math.sin(x * WAVE_FREQ + phase) * currentAmp}`
+  let d = `M ${startX} ${waveY(startX, cy)}`
+  for (let x = Math.floor(startX / 2) * 2 + 2; x < endX; x += 2) {
+    d += ` L ${x} ${waveY(x, cy)}`
   }
-  return d
+  return `${d} L ${endX} ${waveY(endX, cy)}`
 }
 
 function animate(timestamp: number) {
@@ -69,13 +75,13 @@ function animate(timestamp: number) {
   if (pathInactive) pathInactive.setAttribute('d', wavePath(px, 500, 4))
   if (pathActive) pathActive.setAttribute('d', wavePath(0, px, 4))
 
-  // thumb 用 HTML div，按百分比定位（不受 SVG preserveAspectRatio=none 影响）
-  if (thumbDiv) {
-    const waveY = Math.sin(px * WAVE_FREQ + phase) * currentAmp
-    // waveY 范围 [-2,2]，映射到容器高度百分比
-    const yPercent = 50 + (waveY / 4) * 50
-    thumbDiv.style.left = `${p * 100}%`
-    thumbDiv.style.top = `${yPercent}%`
+  // thumb 用 HTML div（不受 SVG preserveAspectRatio=none 影响），只改 transform：
+  // left/top 定位会被按整像素绘制，进度走得快（短歌）时 thumb 一跳一跳地和线头错位
+  if (thumbTrack && thumbDiv) {
+    // viewBox 高 8 正好对应容器 8px，波形纵向偏移可直接当 px 用
+    const offsetY = waveY(px, 0)
+    thumbTrack.style.transform = `translate3d(${p * 100}%, 0, 0)`
+    thumbDiv.style.transform = `translate3d(-50%, calc(-50% + ${offsetY}px), 0)`
     thumbDiv.style.width = thumbDiv.style.height = isDragging.value ? '12px' : '8px'
   }
 
@@ -100,6 +106,7 @@ onMounted(() => {
   const svg = svgRef.value!
   pathInactive = svg.querySelector('.wave-inactive')
   pathActive = svg.querySelector('.wave-active')
+  thumbTrack = containerRef.value!.querySelector('.thumb-track') as HTMLDivElement
   thumbDiv = containerRef.value!.querySelector('.thumb') as HTMLDivElement
   startLoop()
 })
@@ -171,8 +178,10 @@ function clamp01(v: number) { return Math.max(0, Math.min(1, v)) }
       <path class="wave-inactive" fill="none" stroke-width="2" stroke-linecap="round" />
       <path class="wave-active" fill="none" stroke-width="3" stroke-linecap="round" />
     </svg>
-    <!-- thumb 独立于 SVG，不受拉伸影响 -->
-    <div class="thumb" />
+    <!-- thumb 独立于 SVG，不受拉伸影响；外层与容器同宽，translateX 百分比即进度 -->
+    <div class="thumb-track">
+      <div class="thumb" />
+    </div>
   </div>
 </template>
 
@@ -213,19 +222,27 @@ function clamp01(v: number) { return Math.max(0, Math.min(1, v)) }
   transition: stroke 0.72s cubic-bezier(0.22, 1, 0.36, 1);
 }
 
+.thumb-track {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 1;
+  will-change: transform;
+}
+
 .thumb {
   position: absolute;
+  left: 0;
+  top: 50%;
   width: 8px;
   height: 8px;
   border-radius: 50%;
   background: var(--waveform-thumb-color, #fff);
-  transform: translate(-50%, -50%);
+  transform: translate3d(-50%, -50%, 0);
   transition: width 150ms, height 150ms,
               background 0.72s cubic-bezier(0.22, 1, 0.36, 1),
               box-shadow 0.72s cubic-bezier(0.22, 1, 0.36, 1);
   box-shadow: 0 0 4px rgba(255, 255, 255, 0.3);
-  pointer-events: none;
-  z-index: 1;
-  will-change: left, top;
+  will-change: transform;
 }
 </style>
