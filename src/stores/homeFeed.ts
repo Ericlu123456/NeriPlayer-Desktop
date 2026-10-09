@@ -104,8 +104,9 @@ export const useHomeFeedStore = defineStore('homeFeed', () => {
     refreshing = null
   }
 
+  /// 只看代次：离开首页不作废已发出的请求，回来时直接用上结果，不必整页重拉
   function isCurrent(request: SectionRequest): boolean {
-    return activated && request.generation === generation
+    return request.generation === generation
   }
 
   async function loadSection(request: SectionRequest) {
@@ -152,10 +153,17 @@ export const useHomeFeedStore = defineStore('homeFeed', () => {
 
   function refresh(nextLoggedIn: boolean, accountKey: string, force = false): Promise<void> {
     const nextContext = nextLoggedIn ? `account:${accountKey.trim()}` : 'guest'
-    if (activated && hasContext && context === nextContext && !force) {
-      if (refreshing) return refreshing
+    if (hasRefreshed && hasContext && context === nextContext && !force) {
+      // 同一账号回到首页：接着跑没完成的请求，只补拉过期或失败的分区，已有内容原样保留
+      activated = true
       const running = [...pendingRequests, ...activeRequests].filter(isCurrent)
-      if (running.length) return Promise.all(running.map(request => request.promise)).then(() => {})
+      const runningSources = new Set(running.map(request => request.source))
+      const requests = NETEASE_HOME_SECTIONS
+        .filter(section => (!section.requiresLogin || loggedIn) && !runningSources.has(section.key) && !isFresh(section.key))
+        .map(section => queueSection(section.key))
+      drainRequests()
+      const all = [...running, ...requests]
+      return all.length ? Promise.all(all.map(request => request.promise)).then(() => {}) : Promise.resolve()
     }
     const firstRefresh = !hasRefreshed
     const contextChanged = hasContext && context !== nextContext
@@ -191,12 +199,13 @@ export const useHomeFeedStore = defineStore('homeFeed', () => {
     return request.promise
   }
 
+  /// 离开首页只暂停派发排队的请求；账号上下文变了才作废进行中的请求并清空
   function deactivate(nextLoggedIn?: boolean, accountKey = '') {
     activated = false
-    cancelPending()
     if (nextLoggedIn === undefined) return
     const nextContext = nextLoggedIn ? `account:${accountKey.trim()}` : 'guest'
     if (!hasContext || context !== nextContext) {
+      cancelPending()
       sections.value = initialSections()
       fetchedAt.clear()
     }

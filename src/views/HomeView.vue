@@ -68,9 +68,10 @@ watch(continueGridRef, element => {
   updateLimit()
 }, { flush: 'post' })
 
+/// 已有内容时静默刷新：切回首页不再闪加载态、转刷新按钮
 async function loadContinuePlaylists() {
   const request = ++continueRequest
-  continueLoading.value = true
+  continueLoading.value = continuePlaylists.value.length === 0
   continueError.value = false
   try {
     const [usage, local] = await Promise.allSettled([
@@ -220,7 +221,7 @@ function openPlatformPlaylist(pl: any) {
 
 // 启动时恢复上次扫描 + 拉取推荐
 onMounted(() => {
-  if (library.tracks.length === 0) library.restoreLastScan()
+  void library.ensureStarted()
   if (auth.netease.loggedIn) void recommend.ensureUserPlaylists('netease')
   if (auth.bilibili.loggedIn) void recommend.ensureUserPlaylists('bilibili')
 })
@@ -280,6 +281,7 @@ function formatNotifTime(ts: number): string {
 
         <!-- 通知历史面板 -->
         <Teleport to="body">
+          <Transition name="notif-pop">
           <div v-if="showNotifications" class="notif-overlay" @click="showNotifications = false">
             <div class="notif-panel" @click.stop>
               <div class="notif-header">
@@ -310,6 +312,7 @@ function formatNotifTime(ts: number): string {
               </div>
             </div>
           </div>
+          </Transition>
         </Teleport>
       </div>
     </header>
@@ -826,13 +829,19 @@ function formatNotifTime(ts: number): string {
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  animation: notif-in 180ms var(--ease-decelerate, ease-out);
+  transform-origin: top right;
   z-index: 401;
 }
 
-@keyframes notif-in {
-  from { opacity: 0; transform: translateY(-8px) scale(0.97); }
-  to { opacity: 1; transform: translateY(0) scale(1); }
+/* 开合都走 transition，连点通知按钮时从当前状态反向，不会闪 */
+.notif-pop-enter-active, .notif-pop-leave-active {
+  transition: background-color 180ms ease;
+  .notif-panel { transition: opacity 180ms var(--ease-decelerate, ease-out), transform 200ms var(--ease-emphasized-decel, ease-out); }
+}
+.notif-pop-leave-active .notif-panel { transition-duration: 120ms; transition-timing-function: var(--ease-accelerate, ease-in); }
+.notif-pop-enter-from, .notif-pop-leave-to {
+  background-color: transparent;
+  .notif-panel { opacity: 0; transform: translateY(-8px) scale(0.97); }
 }
 
 .notif-header {

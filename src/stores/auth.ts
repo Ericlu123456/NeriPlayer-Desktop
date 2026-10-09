@@ -27,6 +27,10 @@ export interface AuthStatusResponse {
 
 const emptyAuth = (): PlatformAuth => ({ loggedIn: false, nickname: null, avatarUrl: null })
 
+function sameAuth(a: PlatformAuth, b: PlatformAuth): boolean {
+  return a.loggedIn === b.loggedIn && a.nickname === b.nickname && a.avatarUrl === b.avatarUrl
+}
+
 /** 后端 snake_case -> 前端 camelCase */
 function mapAuth(raw: any): PlatformAuth {
   return {
@@ -56,9 +60,11 @@ export const useAuthStore = defineStore('auth', () => {
   async function checkStatus() {
     try {
       const status = await invoke<any>('check_auth_status')
-      netease.value = mapAuth(status.netease)
-      bilibili.value = mapAuth(status.bilibili)
-      youtube.value = mapAuth(status.youtube)
+      // 账号没变就保留原对象：页面按对象身份判断换号，设置页、同步后的例行检查不能让首页整页重载
+      for (const [target, raw] of [[netease, status.netease], [bilibili, status.bilibili], [youtube, status.youtube]] as const) {
+        const next = mapAuth(raw)
+        if (!sameAuth(target.value, next)) target.value = next
+      }
       if (needsYoutubeProfileRefresh(youtube.value)) {
         void refreshYoutubeProfile()
       }
@@ -85,7 +91,7 @@ export const useAuthStore = defineStore('auth', () => {
     try {
       const info = await invoke<any>('refresh_youtube_profile')
       const mapped = mapAuth(info)
-      if (mapped.loggedIn) {
+      if (mapped.loggedIn && !sameAuth(youtube.value, mapped)) {
         youtube.value = mapped
       }
     } catch (e) {

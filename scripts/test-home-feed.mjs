@@ -187,9 +187,12 @@ try {
       return index < 3 ? blockers[index].promise : rawFor(source)
     } })
     const running = r.store.refresh(true, 'account-a'); await flush(); assert.equal(r.calls.length, 3)
-    r.store.deactivate(); assert.ok(Object.values(r.store.sections).every(s => !s.loading))
-    blockers.forEach((b, i) => b.resolve(rawFor(sources[i]))); await running; await flush()
-    assert.equal(r.calls.length, 3); assert.ok(Object.values(r.store.sections).every(s => s.songs.length + s.playlists.length === 0))
+    r.store.deactivate()
+    blockers.forEach((b, i) => b.resolve(rawFor(sources[i]))); await flush()
+    assert.equal(r.calls.length, 3, '离开首页后不再派发排队的分区请求')
+    assert.ok(sources.slice(0, 3).every(s => r.store.sections[s].songs.length + r.store.sections[s].playlists.length > 0), '离开首页前已发出的请求结果必须保留，回来时不整页重拉')
+    await r.store.refresh(true, 'account-a'); await running
+    assert.equal(r.calls.length, sources.length, '回到首页只补拉还没拿到的分区')
   }
   {
     const blockers = [deferred(), deferred(), deferred()], r = await runtime({ invoke: async (_command, { source }) => {
