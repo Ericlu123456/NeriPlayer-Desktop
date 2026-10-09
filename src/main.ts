@@ -13,12 +13,17 @@ import './styles/global.scss'
 // 在 DOM 挂载前应用主题（class 已在 index.html 内联脚本中预设）
 initTheme()
 
-const isDesktopLyrics = new URLSearchParams(window.location.search).get('window') === 'desktop-lyrics'
+const windowKind = new URLSearchParams(window.location.search).get('window')
 
 async function mountWindow() {
-  if (isDesktopLyrics) {
+  if (windowKind === 'desktop-lyrics') {
     const { default: DesktopLyricsView } = await import('./views/DesktopLyricsView.vue')
     createApp(DesktopLyricsView).use(i18n).mount('#app')
+    return
+  }
+  if (windowKind === 'tray-popup') {
+    const { default: TrayPopupView } = await import('./views/TrayPopupView.vue')
+    createApp(TrayPopupView).use(i18n).mount('#app')
     return
   }
 
@@ -51,6 +56,11 @@ async function mountWindow() {
   // 崩溃收集才有前端现场可看
   const crashLog = createLogger('frontend-crash')
   window.addEventListener('error', (event) => {
+    // ResizeObserver 回调内改动被观察元素尺寸时，浏览器必然报一次
+    // "loop completed with undelivered notifications"（规范行为，下一帧自愈，
+    // 无实际危害）。歌词字号是视口相对值，窗口/面板尺寸变化时极易触发，
+    // 误报成崩溃只会污染日志，此处过滤
+    if (event.message === 'ResizeObserver loop completed with undelivered notifications.') return
     crashLog.error('uncaught error:', event.message, event.filename, `${event.lineno}:${event.colno}`)
   })
   window.addEventListener('unhandledrejection', (event) => {

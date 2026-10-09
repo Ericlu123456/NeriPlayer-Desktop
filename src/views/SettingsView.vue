@@ -52,6 +52,7 @@ import {
   ENHANCED_BLUR_RADIUS_MIN,
   ENHANCED_BLUR_RADIUS_STEP,
   useSettingsStore,
+  type ColorMode,
 } from '@/stores/settings'
 import { useAuthStore } from '@/stores/auth'
 import { useSyncStore, type SyncFrequency } from '@/stores/sync'
@@ -91,14 +92,14 @@ const lt = useListenTogetherStore()
 const toast = useToastStore()
 const {
   darkMode, themeColor: selectedColor, coverStyle,
-  defaultScreen, showCoverBadge, showNowPlayingTitle, showToolbarDock,
+  defaultScreen, closeToTray, showCoverBadge, showNowPlayingTitle, showToolbarDock,
   showQualitySwitch, lyricFontScale,
   normalizeVolume, multichannelDrc, volumeBalance, audioOutputDevice,
   fadeIn, fadeInDuration, fadeOutDuration,
   crossfadeNext, crossfadeInDuration, crossfadeOutDuration,
   keepProgress, rememberLongFormProgress, keepPlaybackMode,
   showTranslation, showRomanization, lyricBlur, lyricBlurAmount,
-  advancedLyrics, preferWordTimedLyrics, defaultLyricSource, dynamicBackground, dynamicColor, audioReactive,
+  advancedLyrics, preferWordTimedLyrics, defaultLyricSource, dynamicBackground, colorMode, audioReactive,
   coverBlurBg, coverBlurAmount, coverBlurDarken,
   neteaseQuality, qqMusicQuality, youtubeQuality, biliQuality,
   youtubePlaybackSource, neteaseAutoSourceSwitch, neteaseLocalSourceFallback,
@@ -320,6 +321,12 @@ const darkModeThumbIndex = computed(() => {
 const darkModeThumbStyle = computed(() => ({
   transform: `translateX(${darkModeThumbIndex.value * 38}px)`,
 }))
+
+const colorModeOptions = computed<{ value: ColorMode; label: string; desc: string }[]>(() => [
+  { value: 'default', label: t('settings.color_mode_default'), desc: t('settings.color_mode_default_desc') },
+  { value: 'cover', label: t('settings.color_mode_cover'), desc: t('settings.color_mode_cover_desc') },
+  { value: 'system', label: t('settings.color_mode_system'), desc: t('settings.color_mode_system_desc') },
+])
 
 function handleDarkModeSwitch(mode: ThemeMode, event: MouseEvent) {
   const rect = (event.currentTarget as HTMLElement).getBoundingClientRect()
@@ -723,7 +730,8 @@ async function importConfig() {
   const result = await syncStore.importConfig()
   if (!result?.success) return
   applyTheme(darkMode.value, false)
-  if (!dynamicColor.value) applyThemeColor(selectedColor.value, undefined, false)
+  // 三态取色：仅「默认取色」需要按预设主题色重刷，system/cover 由动态取色路径接管
+  if (colorMode.value === 'default') applyThemeColor(selectedColor.value, undefined, false)
   lt.reloadIdentity()
   await player.applyPersistedSettings()
 }
@@ -1459,7 +1467,7 @@ useEscapeClose(
       </div>
       <div class="setting-info">
         <div class="setting-title">{{ t('settings.theme_color') }}</div>
-        <div class="color-row" :style="dynamicColor ? { opacity: 0.4, pointerEvents: 'none' } : undefined">
+        <div class="color-row" :style="colorMode !== 'default' ? { opacity: 0.4, pointerEvents: 'none' } : undefined">
           <button
             v-for="c in presetColors" :key="c.key"
             class="color-dot"
@@ -1473,14 +1481,24 @@ useEscapeClose(
       </div>
     </div>
 
-    <!-- 动态取色 -->
+    <!-- 取色方式 -->
     <div class="setting-card">
       <div class="setting-icon-wrap"><span class="material-symbols-rounded">colorize</span></div>
       <div class="setting-info">
-        <div class="setting-title">{{ t('settings.dynamic_color') }}</div>
-        <div class="setting-desc">{{ t('settings.dynamic_color_desc') }}</div>
+        <div class="setting-title">{{ t('settings.color_mode') }}</div>
+        <div class="setting-desc">{{ colorModeOptions.find(o => o.value === colorMode)?.desc }}</div>
       </div>
-      <label class="m3-switch"><input type="checkbox" v-model="dynamicColor" /><span class="track"><span class="thumb"><span v-if="dynamicColor" class="material-symbols-rounded" style="font-size: 14px">check</span></span></span></label>
+      <div class="chip-row" role="radiogroup" :aria-label="t('settings.color_mode')">
+        <button
+          v-for="o in colorModeOptions"
+          :key="o.value"
+          class="m3-chip"
+          :class="{ active: colorMode === o.value }"
+          role="radio"
+          :aria-checked="colorMode === o.value"
+          @click="colorMode = o.value"
+        >{{ o.label }}</button>
+      </div>
     </div>
 
     <!-- 个性化 -->
@@ -1500,6 +1518,14 @@ useEscapeClose(
         <div class="chip-row">
           <button v-for="o in defaultScreenOptions" :key="o.value" class="m3-chip" :class="{ active: defaultScreen === o.value }" @click="defaultScreen = o.value as any">{{ o.label }}</button>
         </div>
+      </div>
+      <div class="setting-card">
+        <div class="setting-icon-wrap"><span class="material-symbols-rounded">tab_inactive</span></div>
+        <div class="setting-info">
+          <div class="setting-title">{{ t('settings.close_to_tray') }}</div>
+          <div class="setting-desc">{{ t('settings.close_to_tray_desc') }}</div>
+        </div>
+        <label class="m3-switch"><input type="checkbox" v-model="closeToTray" /><span class="track"><span class="thumb"><span v-if="closeToTray" class="material-symbols-rounded" style="font-size: 14px">check</span></span></span></label>
       </div>
 
       <div class="setting-card">

@@ -50,3 +50,5 @@ docs-private/
 .report/
 docs/
 
+# Arch 打包工作目录（makepkg 产物与本地 PKGBUILD）
+/build/

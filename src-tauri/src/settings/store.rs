@@ -31,6 +31,8 @@ pub struct AppSettings {
     pub theme_color: String,
     pub locale: String,
     pub default_screen: String,
+    /// 关闭主窗口时收进托盘继续播放；关掉后关闭即退出
+    pub close_to_tray: bool,
     pub show_cover_badge: bool,
     pub show_now_playing_title: bool,
     pub show_toolbar_dock: bool,
@@ -86,6 +88,10 @@ pub struct AppSettings {
     pub prefer_word_timed_lyrics: bool,
     /// 播放时优先尝试的歌词源，找不到时回退自动（对齐 Android default_lyric_source）
     pub default_lyric_source: String,
+    /// 取色方式：system=跟随系统取色 / default=默认主题色 / cover=跟随封面动态取色
+    pub color_mode: String,
+    /// 旧版字段（封面取色开关），仅用于迁移，导出配置时不序列化
+    #[serde(default, skip_serializing)]
     pub dynamic_color: bool,
     pub dynamic_background: bool,
     pub audio_reactive: bool,
@@ -182,6 +188,7 @@ impl Default for AppSettings {
             theme_color: "purple".into(),
             locale: "zh-CN".into(),
             default_screen: "home".into(),
+            close_to_tray: true,
             show_cover_badge: true,
             show_now_playing_title: true,
             show_toolbar_dock: true,
@@ -220,6 +227,7 @@ impl Default for AppSettings {
             advanced_lyrics: true,
             prefer_word_timed_lyrics: true,
             default_lyric_source: "automatic".into(),
+            color_mode: "default".into(),
             dynamic_color: false,
             dynamic_background: true,
             audio_reactive: true,
@@ -415,6 +423,18 @@ impl AppSettings {
             &["off", "error", "warn", "info", "debug", "trace"],
             "info",
         );
+
+        // 取色方式：旧版 dynamic_color（封面取色开关）迁移到 color_mode；
+        // Android 导入语义不同（dynamic_color=true=跟随系统），由导入路径直接写 color_mode
+        if self.dynamic_color && (self.color_mode.is_empty() || self.color_mode == "default") {
+            self.color_mode = "cover".into();
+        }
+        self.color_mode = normalize_choice(
+            &self.color_mode,
+            &["system", "default", "cover"],
+            "default",
+        );
+        self.dynamic_color = false;
 
         self.background_image_uri = self.background_image_uri.trim().into();
         self.download_name_template = non_empty_or_default(

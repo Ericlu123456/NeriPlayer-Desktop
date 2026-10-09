@@ -8,6 +8,7 @@ import { usePlayerStore, displayAlbum } from '@/stores/player'
 import { usePlaybackStatsStore } from '@/stores/playbackStats'
 import { installGlobalShortcuts } from '@/modules/shortcuts/globalShortcuts'
 import { installDesktopLyricsBridge } from '@/modules/desktopLyrics/bridge'
+import { installTrayBridge, quitApp } from '@/modules/tray/bridge'
 import { syncFrequencyDelayMs, useSyncStore } from '@/stores/sync'
 import { useAuthStore } from '@/stores/auth'
 import { useRecommendStore } from '@/stores/recommend'
@@ -29,7 +30,7 @@ import { useToastStore } from '@/stores/toast'
 import { applyTheme } from '@/utils/theme'
 import { applyThemeColor } from '@/utils/themeColor'
 import { getTrackCoverUrl } from '@/utils/trackCover'
-import { applyDynamicColorFromCover, clearDynamicColor } from '@/utils/colorExtractor'
+import { applyDynamicColorFromCover, applyDynamicColorFromSeed, clearDynamicColor, resolveSystemAccentSeed } from '@/utils/colorExtractor'
 import { createLogger } from '@/utils/logger'
 import { hasVisiblePlaybackSession } from '@/modules/playback/playbackRequest'
 import { useUpcomingLyricsPrefetch } from '@/composables/useUpcomingLyricsPrefetch'
@@ -251,6 +252,7 @@ let periodicSyncTimer: ReturnType<typeof setInterval> | null = null
 let unlistenPlaylistChanged: UnlistenFn | null = null
 let unlistenPlaylistUsage: UnlistenFn | null = null
 let unlistenCloseRequested: UnlistenFn | null = null
+let uninstallTray: (() => void) | null = null
 
 function handleBeforeUnload() {
   void player.flushPlayerState()
@@ -258,24 +260,26 @@ function handleBeforeUnload() {
   void usePlaybackStatsStore().flushFinal()
 }
 
-// 关窗流程标志位：flush 完成后 destroy，二次进入直接放行避免死循环
-let closeFlushDone = false
+function flushBeforeExit() {
+  return Promise.allSettled([player.flushPlayerState(), usePlaybackStatsStore().flushFinal()])
+}
 
+// 关窗流程进行中：重复的关闭请求不再触发落盘
+let closeFlushing = false
+
+// 主窗口的隐藏由 Rust 侧完成（关闭 = 收进托盘）；这里必须 preventDefault，
+// 否则 JS 侧会接着 destroy 窗口。关闭即退出时落盘后再结束进程
 async function handleCloseRequested(event: { preventDefault: () => void }) {
-  if (closeFlushDone) return
   event.preventDefault()
-  closeFlushDone = true
+  if (closeFlushing) return
+  closeFlushing = true
   try {
-    // 等待播放器状态与统计都落库后再真正关窗
-    await Promise.allSettled([player.flushPlayerState(), usePlaybackStatsStore().flushFinal()])
+    if (settingsStore.closeToTray) await flushBeforeExit()
+    else await quitApp(flushBeforeExit)
   } catch {
-    // 落盘失败不阻塞退出
-  }
-  try {
-    await getCurrentWindow().destroy()
-  } catch {
-    // destroy 不可用时退回 close（此时标志位已放行）
-    void getCurrentWindow().close().catch(() => {})
+    // 落盘失败不阻塞
+  } finally {
+    closeFlushing = false
   }
 }
 
@@ -371,22 +375,51 @@ function resolveDynamicIsDark(): boolean {
   return window.matchMedia('(prefers-color-scheme: dark)').matches
 }
 
-// 开关、深浅色或封面变化时重算；关闭或无封面则还原预设主题色
+let systemAccentRequest = 0
+let appliedSystemAccent = ''
+
+/** 跟随系统强调色；探测是异步的，期间切了取色方式或又发起新探测时丢弃旧结果 */
+async function applySystemAccent() {
+  const request = ++systemAccentRequest
+  const seed = await resolveSystemAccentSeed()
+  if (request !== systemAccentRequest || settingsStore.colorMode !== 'system') return
+  if (document.documentElement.classList.contains('theme-ripple-active')) return
+  const dark = resolveDynamicIsDark()
+  const key = seed ? `${seed.join(',')}|${dark}` : ''
+  if (key && key === appliedSystemAccent) return
+  appliedSystemAccent = key
+  // 引擎不支持解析系统强调色时回退默认取色
+  if (seed) applyDynamicColorFromSeed(seed, dark)
+  else clearDynamicColor(dark)
+}
+
+// 切回窗口时重新读一次，用户在系统设置里换了强调色能跟上
+function handleWindowFocus() {
+  if (settingsStore.colorMode === 'system') void applySystemAccent()
+}
+
+// 取色方式、深浅色或封面变化时重算；default 或无封面则还原预设主题色
 watch(
   () => [
-    settingsStore.dynamicColor,
+    settingsStore.colorMode,
     settingsStore.darkMode,
-    player.hasPlaybackSession ? getTrackCoverUrl(player.currentTrack) : '',
+    settingsStore.colorMode === 'cover' && player.hasPlaybackSession ? getTrackCoverUrl(player.currentTrack) : '',
   ] as const,
-  ([enabled, , cover]) => {
+  ([mode, , cover]) => {
+    systemAccentRequest++
+    appliedSystemAccent = ''
     // 圆形扩散中由 theme 路径同步重算，避免圆外提前换色
     if (document.documentElement.classList.contains('theme-ripple-active')) return
-    const dark = resolveDynamicIsDark()
-    if (!enabled || !cover) {
-      clearDynamicColor(dark)
+    if (mode === 'system') {
+      void applySystemAccent()
       return
     }
-    void applyDynamicColorFromCover(cover as string, dark)
+    const dark = resolveDynamicIsDark()
+    if (mode === 'cover' && cover) {
+      void applyDynamicColorFromCover(cover, dark)
+      return
+    }
+    clearDynamicColor(dark)
   },
 )
 
@@ -398,6 +431,10 @@ onMounted(async () => {
       // 带上时间戳：已经在设置页时也能再次跳到桌面歌词分区
       void router.push({ name: 'settings', query: { section: 'lyrics', focus: 'desktop-lyrics', at: String(Date.now()) } })
     },
+  })
+  uninstallTray = installTrayBridge({
+    openNowPlaying: () => void openNowPlaying(),
+    flushBeforeQuit: flushBeforeExit,
   })
   const syncStore = useSyncStore()
   const authStore = useAuthStore()
@@ -463,10 +500,13 @@ onMounted(async () => {
   applyTheme(settingsStore.darkMode, false)
   applyThemeColor(settingsStore.themeColor, undefined, false)
   // 首屏在预设主题之后应用动态取色，避免被 applyThemeColor 覆盖
-  if (settingsStore.dynamicColor) {
+  if (settingsStore.colorMode === 'cover') {
     const cover = player.hasPlaybackSession ? getTrackCoverUrl(player.currentTrack) : ''
     if (cover) void applyDynamicColorFromCover(cover, resolveDynamicIsDark())
+  } else if (settingsStore.colorMode === 'system') {
+    void applySystemAccent()
   }
+  window.addEventListener('focus', handleWindowFocus)
   setLocale(settingsStore.locale, false)
   void adoptManagedBackgroundImage()
   await player.applyPersistedSettings()
@@ -527,6 +567,7 @@ onUnmounted(() => {
   uninstallShortcuts = null
   window.removeEventListener('beforeunload', handleBeforeUnload)
   window.removeEventListener('pagehide', handleBeforeUnload)
+  window.removeEventListener('focus', handleWindowFocus)
   resetFlipState()
   if (nowPlayingMotionTimer) clearTimeout(nowPlayingMotionTimer)
   if (debounceSyncTimer) clearTimeout(debounceSyncTimer)
@@ -538,6 +579,8 @@ onUnmounted(() => {
   if (unlistenPlaylistChanged) unlistenPlaylistChanged()
   if (unlistenPlaylistUsage) unlistenPlaylistUsage()
   if (unlistenCloseRequested) unlistenCloseRequested()
+  uninstallTray?.()
+  uninstallTray = null
 })
 </script>
 

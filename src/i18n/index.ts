@@ -3,6 +3,12 @@ import zhCN from './zh-CN.json'
 import zhTW from './zh-TW.json'
 import en from './en.json'
 import ja from './ja.json'
+import { detectPlatform } from '@/modules/shortcuts/platform'
+
+// WebKitGTK 的 View Transition 实现不稳定：语言切换会整树重渲染，在 Linux
+// 上曾导致 WebKit 主循环内 SEGV 崩溃（GTK 主循环 -> WebKit 回调 -> JSC）。
+// Linux 走平滑降级路径（直接切 locale），Windows/macOS 保留过渡动画
+export const VIEW_TRANSITION_SUPPORTED = detectPlatform() !== 'linux'
 
 export const SUPPORTED_LOCALES = [
   { code: 'zh-CN', label: '简体中文' },
@@ -46,7 +52,7 @@ export function setLocale(locale: string, persist = true) {
 
 /** 带 View Transition 动画的语言切换 */
 export async function setLocaleWithTransition(locale: string, x?: number, y?: number, persist = true) {
-  if (!(document as any).startViewTransition || !x || !y) {
+  if (!(document as any).startViewTransition || !x || !y || !VIEW_TRANSITION_SUPPORTED) {
     setLocale(locale, persist)
     return
   }

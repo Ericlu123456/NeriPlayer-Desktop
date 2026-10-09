@@ -4,14 +4,15 @@ use neri_player_desktop::audio::analyzer::SharedAudioLevel;
 use neri_player_desktop::audio::media_session::{MediaAction, MediaSessionController};
 use neri_player_desktop::auth;
 use neri_player_desktop::commands::{
-    auth_cmd, cache_cmd, debug_cmd, desktop_lyrics_cmd, download_cmd, image_cmd, library_cmd, local_files_cmd,
-    listen_together_cmd, lyrics_cmd, player_cmd, playback_fallback_cmd, recommend_cmd, search_cmd, settings_cmd,
-    stats_cmd, storage_cmd, sync_cmd, user_data_cmd,
+    auth_cmd, cache_cmd, debug_cmd, desktop_lyrics_cmd, download_cmd, image_cmd, library_cmd,
+    local_files_cmd, listen_together_cmd, lyrics_cmd, player_cmd, playback_fallback_cmd,
+    recommend_cmd, search_cmd, settings_cmd, stats_cmd, storage_cmd, sync_cmd, tray_cmd,
+    user_data_cmd,
 };
 use neri_player_desktop::state::AppState;
 use std::sync::mpsc;
 use std::time::Duration;
-use tauri::{Emitter, Manager};
+use tauri::{Emitter, Manager, WindowEvent};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PlaybackFinishState {
@@ -68,11 +69,7 @@ fn main() {
         // 重复发号 token 造成跨设备同步静默数据损坏，playlists/stats 等
         // 落盘文件也会互相覆盖。二次启动改为聚焦已有窗口
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            if let Some(win) = app.get_webview_window("main") {
-                let _ = win.unminimize();
-                let _ = win.show();
-                let _ = win.set_focus();
-            }
+            tray_cmd::show_main_window(app);
         }))
         .plugin(neri_player_desktop::logging::build_plugin(
             log_cfg.log_to_file,
@@ -150,6 +147,9 @@ fn main() {
                     }
                 }
             }
+
+            // 系统托盘：关闭主窗口后收进托盘继续播放
+            tray_cmd::setup(app)?;
 
             // 恢复持久化的登录 Cookie
             {
@@ -285,28 +285,36 @@ fn main() {
                     // 快速快照（锁持有 <1μs）
                     let snapshot = {
                         let player = state.player.lock();
-                        if player.current_path.is_none() {
-                            last_ended = false;
-                            // 空闲时也更新 media session 状态
-                            if !last_media_track_id.is_empty() {
-                                if let Some(ref ms) = media_session {
-                                    ms.stop();
-                                }
-                                last_media_track_id.clear();
-                            }
-                            continue;
-                        }
-                        (
-                            player.is_playing,
-                            player.position_ms(),
-                            player.duration_ms,
-                            player.loaded_generation().unwrap_or(0),
-                            player.shared_audio_level.clone(),
-                        )
+                        player.current_path.is_some().then(|| {
+                            (
+                                player.is_playing,
+                                player.position_ms(),
+                                player.duration_ms,
+                                player.loaded_generation().unwrap_or(0),
+                                player.shared_audio_level.clone(),
+                            )
+                        })
                     }; // <- 锁在此释放
 
-                    let (snap_playing, snap_pos, snap_dur, snap_generation, shared_level) =
-                        snapshot;
+                    // 托盘更新会等主线程执行，必须在 player 锁外调用
+                    tray_cmd::sync_playing(
+                        &handle_ticker,
+                        snapshot.as_ref().is_some_and(|snapshot| snapshot.0),
+                    );
+
+                    let Some((snap_playing, snap_pos, snap_dur, snap_generation, shared_level)) =
+                        snapshot
+                    else {
+                        last_ended = false;
+                        // 空闲时也更新 media session 状态
+                        if !last_media_track_id.is_empty() {
+                            if let Some(ref ms) = media_session {
+                                ms.stop();
+                            }
+                            last_media_track_id.clear();
+                        }
+                        continue;
+                    };
 
                     // 发射事件（无锁）
                     if snap_playing || snap_pos > 0 {
@@ -538,6 +546,7 @@ fn main() {
             settings_cmd::save_file_bytes,
             settings_cmd::set_bypass_proxy,
             settings_cmd::get_build_info,
+            settings_cmd::get_system_accent_color,
             settings_cmd::probe_platform_connectivity,
             debug_cmd::get_recent_logs,
             debug_cmd::audio_engine_stats,
@@ -636,6 +645,11 @@ fn main() {
             cache_cmd::cache_get,
             cache_cmd::cache_put,
             cache_cmd::cache_remove,
+            tray_cmd::publish_tray_snapshot,
+            tray_cmd::get_tray_popup_state,
+            tray_cmd::tray_popup_ready,
+            tray_cmd::tray_popup_action,
+            tray_cmd::quit_app,
             ]);
             move |invoke: tauri::ipc::Invoke<tauri::Wry>| {
                 let label = invoke.message.webview().label().to_string();
@@ -655,26 +669,46 @@ fn main() {
         })
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
-        .run(|app_handle, event| {
-            if let tauri::RunEvent::WindowEvent {
+        .run(|app_handle, event| match event {
+            tauri::RunEvent::ExitRequested { .. } => {
+                // 退出前 flush 一次轮转 Cookie：60s 定时器之外，退出前最后一窗口的
+                // Set-Cookie 轮换令牌若不落盘，下次启动会重放旧令牌导致偶发掉登录（AU-05）
+                let state = app_handle.state::<AppState>();
+                auth_cmd::persist_rotated_cookies(app_handle, state.inner());
+            }
+            tauri::RunEvent::WindowEvent {
                 label,
-                event: tauri::WindowEvent::Destroyed,
+                event: WindowEvent::CloseRequested { api, .. },
                 ..
-            } = &event {
-                if label == "main" {
-                    if let Some(window) =
-                        app_handle.get_webview_window(desktop_lyrics_cmd::WINDOW_LABEL)
-                    {
+            } if label == "main" => {
+                // 关闭主窗口 = 收进托盘，播放继续；是否改为退出由前端按设置决定（quit_app）。
+                // prevent_close 在 GTK 层真正取消 delete-event，不会重发；前端若在 JS 侧
+                // hide()/close() 回退会与平台关闭状态互扰，在 WebKitGTK 下造成
+                // CloseRequested 死循环并拖垮 GPU 上下文。桌面歌词、托盘面板照常关闭销毁
+                api.prevent_close();
+                tray_cmd::hide_main_window(app_handle);
+            }
+            tauri::RunEvent::WindowEvent {
+                label,
+                event: WindowEvent::Focused(true),
+                ..
+            } if label == "main" => tray_cmd::main_window_focused(app_handle),
+            tauri::RunEvent::WindowEvent {
+                label,
+                event: WindowEvent::Destroyed,
+                ..
+            } if label == "main" => {
+                // 主窗口销毁时一并关闭桌面歌词窗口与托盘面板
+                for child in [desktop_lyrics_cmd::WINDOW_LABEL, tray_cmd::POPUP_LABEL] {
+                    if let Some(window) = app_handle.get_webview_window(child) {
                         let _ = window.close();
                     }
                 }
             }
-            // 退出前 flush 一次轮转 Cookie：60s 定时器之外，退出前最后一窗口的
-            // Set-Cookie 轮换令牌若不落盘，下次启动会重放旧令牌导致偶发掉登录（AU-05）
-            if let tauri::RunEvent::ExitRequested { .. } = event {
-                let state = app_handle.state::<AppState>();
-                auth_cmd::persist_rotated_cookies(app_handle, state.inner());
-            }
+            // 主窗口收进托盘后点 Dock 图标恢复
+            #[cfg(target_os = "macos")]
+            tauri::RunEvent::Reopen { .. } => tray_cmd::show_main_window(app_handle),
+            _ => {}
         });
 }
 
@@ -718,13 +752,19 @@ fn pause_rendering_while_minimized(window: tauri::WebviewWindow) {
     });
 }
 
-/// 桌面歌词窗口只能读自己的快照、报告解锁按钮位置、把工具栏操作转给主窗口
+/// 桌面歌词窗口只能读自己的快照、报告解锁按钮位置、把工具栏操作转给主窗口；
+/// 托盘面板只能读自己的状态、报告就绪、发出菜单动作
 fn window_command_allowed(label: &str, command: &str) -> bool {
     label == "main"
         || (label == desktop_lyrics_cmd::WINDOW_LABEL
             && matches!(
                 command,
                 "get_desktop_lyrics_snapshot" | "desktop_lyrics_action" | "desktop_lyrics_hit_region"
+            ))
+        || (label == tray_cmd::POPUP_LABEL
+            && matches!(
+                command,
+                "get_tray_popup_state" | "tray_popup_ready" | "tray_popup_action"
             ))
 }
 
@@ -750,6 +790,17 @@ mod tests {
         assert!(!super::window_command_allowed(
             "youtube-login", "get_desktop_lyrics_snapshot",
         ));
+    }
+
+    #[test]
+    fn tray_popup_only_reads_its_state_and_sends_actions() {
+        assert!(super::window_command_allowed("tray-popup", "get_tray_popup_state"));
+        assert!(super::window_command_allowed("tray-popup", "tray_popup_ready"));
+        assert!(super::window_command_allowed("tray-popup", "tray_popup_action"));
+        assert!(!super::window_command_allowed("tray-popup", "publish_tray_snapshot"));
+        assert!(!super::window_command_allowed("tray-popup", "quit_app"));
+        assert!(!super::window_command_allowed("tray-popup", "play_url"));
+        assert!(!super::window_command_allowed("desktop-lyrics", "tray_popup_action"));
     }
 
     #[test]

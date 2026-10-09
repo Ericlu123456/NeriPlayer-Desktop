@@ -47,6 +47,7 @@ let layoutFrameId = 0
 let layoutSyncToken = 0
 let lastFrameAt = 0
 let lastSyncedTime = Number.NaN
+let lastFeedAt = 0
 let resizeObserver: ResizeObserver | null = null
 let lastHostWidth = 0
 let lastHostHeight = 0
@@ -63,6 +64,9 @@ const SIZE_EPSILON = 0.5
 // 覆盖 AMLL 弹簧（posY/scale）从任意位移收敛所需的时长
 const IDLE_FRAME_GRACE_MS = 2500
 const WAKE_EVENTS = ['wheel', 'pointerdown', 'touchstart', 'keydown'] as const
+// 播放中后端插值时钟每帧都变，逐帧 setCurrentTime 会让 AMLL 每帧重算整棵歌词状态树；
+// 30ms 粒度下行切换/逐字误差不可感知，弹簧与词遮罩动画各自走时钟，不受喂入频率影响
+const TIME_FEED_INTERVAL_MS = 30
 
 interface PlayerRubyWord {
   startMs: number
@@ -290,6 +294,10 @@ function syncCurrentTime(forceSeek = false): void {
   // 每次回拉歌词都猛抖一下——「一抖一抖」就是它。500ms 以内直接喂时间，
   // AMLL 按连续播放自行平滑，行切换粒度是秒级，不会因此卡错行。
   if (!forceSeek && drift >= 500) forceSeek = true
+
+  const now = performance.now()
+  if (!forceSeek && props.isPlaying && now - lastFeedAt < TIME_FEED_INTERVAL_MS) return
+  lastFeedAt = now
 
   lyricPlayer.setCurrentTime(time, forceSeek)
   lastSyncedTime = time

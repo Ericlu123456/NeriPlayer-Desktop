@@ -8,6 +8,8 @@ const log = createLogger('settings')
 
 export type ThemeMode = 'system' | 'dark' | 'light'
 export type CoverStyle = 'disc' | 'card'
+export type ColorMode = 'system' | 'default' | 'cover'
+
 export const YOUTUBE_PLAYBACK_SOURCES = [
   'automatic', 'visionos', 'android_vr', 'web_remix', 'tv_html5', 'web_creator',
 ] as const
@@ -24,6 +26,8 @@ export interface AppSettings {
   themeColor: string
   locale: string
   defaultScreen: string
+  /** 关闭主窗口时收进托盘继续播放；关掉后关闭即退出 */
+  closeToTray: boolean
   showCoverBadge: boolean
   showNowPlayingTitle: boolean
   showToolbarDock: boolean
@@ -66,7 +70,7 @@ export interface AppSettings {
   /** 播放时优先尝试的歌词源，找不到时回退自动（Android default_lyric_source） */
   defaultLyricSource: DefaultLyricSource
   dynamicBackground: boolean
-  dynamicColor: boolean
+  colorMode: ColorMode
   audioReactive: boolean
   coverBlurBg: boolean
   coverBlurAmount: number
@@ -158,6 +162,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   themeColor: 'purple',
   locale: detectLocale(),
   defaultScreen: 'home',
+  closeToTray: true,
   showCoverBadge: true,
   showNowPlayingTitle: true,
   showToolbarDock: true,
@@ -197,7 +202,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   preferWordTimedLyrics: true,
   defaultLyricSource: 'automatic',
   dynamicBackground: true,
-  dynamicColor: false,
+  colorMode: 'default',
   audioReactive: true,
   coverBlurBg: false,
   coverBlurAmount: 1.5,
@@ -403,6 +408,10 @@ function normalizeSnapshot(input: unknown): AppSettings {
 
   if (!['system', 'dark', 'light'].includes(result.darkMode)) result.darkMode = DEFAULT_SETTINGS.darkMode
   if (!['disc', 'card'].includes(result.coverStyle)) result.coverStyle = DEFAULT_SETTINGS.coverStyle
+  // 旧版只有「封面动态取色」开关
+  const legacyDynamicColor = (source as { dynamicColor?: unknown }).dynamicColor
+  if (!('colorMode' in source) && legacyDynamicColor === true) result.colorMode = 'cover'
+  if (!['system', 'default', 'cover'].includes(result.colorMode)) result.colorMode = DEFAULT_SETTINGS.colorMode
   if (!['home', 'explore', 'library'].includes(result.defaultScreen)) result.defaultScreen = DEFAULT_SETTINGS.defaultScreen
   if (!['zh-CN', 'zh-TW', 'en', 'ja'].includes(result.locale)) result.locale = DEFAULT_SETTINGS.locale
   if (!['off', 'error', 'warn', 'info', 'debug', 'trace'].includes(result.logLevel)) result.logLevel = DEFAULT_SETTINGS.logLevel
@@ -532,6 +541,7 @@ export const useSettingsStore = defineStore('settings', () => {
   const themeColor = ref(initial.themeColor)
   const locale = ref(initial.locale)
   const defaultScreen = ref(initial.defaultScreen)
+  const closeToTray = ref(initial.closeToTray)
   const showCoverBadge = ref(initial.showCoverBadge)
   const showNowPlayingTitle = ref(initial.showNowPlayingTitle)
   const showToolbarDock = ref(initial.showToolbarDock)
@@ -571,7 +581,7 @@ export const useSettingsStore = defineStore('settings', () => {
   const preferWordTimedLyrics = ref(initial.preferWordTimedLyrics)
   const defaultLyricSource = ref<DefaultLyricSource>(initial.defaultLyricSource)
   const dynamicBackground = ref(initial.dynamicBackground)
-  const dynamicColor = ref(initial.dynamicColor)
+  const colorMode = ref<ColorMode>(initial.colorMode)
   const audioReactive = ref(initial.audioReactive)
   const coverBlurBg = ref(initial.coverBlurBg)
   const coverBlurAmount = ref(initial.coverBlurAmount)
@@ -620,7 +630,7 @@ export const useSettingsStore = defineStore('settings', () => {
   const desktopLyrics = ref<DesktopLyricsStyle>(initial.desktopLyrics)
 
   const settingRefs: SettingRefs = {
-    darkMode, themeColor, locale, defaultScreen, showCoverBadge,
+    darkMode, themeColor, locale, defaultScreen, closeToTray, showCoverBadge,
     showNowPlayingTitle, showToolbarDock, showQualitySwitch, showAudioCodec,
     showAudioSpec, lyricFontScale, crossfade, normalizeVolume, multichannelDrc, volumeBalance, fadeIn,
     showAudioBitrate, showAudioFormat, showAudioChannels, showAudioSampleRate, showAudioBitDepth,
@@ -628,7 +638,7 @@ export const useSettingsStore = defineStore('settings', () => {
     crossfadeOutDuration, keepProgress, rememberLongFormProgress, keepPlaybackMode, showTranslation,
     showRomanization, lyricBlur, lyricBlurAmount, cloudMusicOffset, qqMusicOffset, kugouOffset, lrclibOffset,
     amllTtmlOffset, coverStyle,
-    advancedLyrics, preferWordTimedLyrics, defaultLyricSource, dynamicBackground, dynamicColor, audioReactive, coverBlurBg,
+    advancedLyrics, preferWordTimedLyrics, defaultLyricSource, dynamicBackground, colorMode, audioReactive, coverBlurBg,
     coverBlurAmount, coverBlurDarken, neteaseQuality, qqMusicQuality,
     youtubeQuality, biliQuality, bypassProxy, internationalizationEnabled, exploreSearchHistoryEnabled,
     youtubePlaybackSource, neteaseAutoSourceSwitch, neteaseLocalSourceFallback,
@@ -718,7 +728,7 @@ export const useSettingsStore = defineStore('settings', () => {
   return {
     isHydrated, hydrate, snapshot, applySnapshot,
     darkMode, themeColor, locale, coverStyle,
-    defaultScreen, showCoverBadge, showNowPlayingTitle, showToolbarDock,
+    defaultScreen, closeToTray, showCoverBadge, showNowPlayingTitle, showToolbarDock,
     showQualitySwitch, showAudioCodec, showAudioSpec, lyricFontScale,
     showAudioBitrate, showAudioFormat, showAudioChannels, showAudioSampleRate, showAudioBitDepth,
     crossfade, normalizeVolume, multichannelDrc, volumeBalance, fadeIn, fadeInDuration, fadeOutDuration,
@@ -727,7 +737,7 @@ export const useSettingsStore = defineStore('settings', () => {
     lyricBlur, lyricBlurAmount,
     cloudMusicOffset, qqMusicOffset, kugouOffset, lrclibOffset, amllTtmlOffset,
     advancedLyrics, preferWordTimedLyrics, defaultLyricSource, dynamicBackground,
-    dynamicColor, audioReactive, coverBlurBg, coverBlurAmount, coverBlurDarken,
+    colorMode, audioReactive, coverBlurBg, coverBlurAmount, coverBlurDarken,
     neteaseQuality, qqMusicQuality, youtubeQuality, biliQuality, bypassProxy,
     youtubePlaybackSource, neteaseAutoSourceSwitch, neteaseLocalSourceFallback,
     internationalizationEnabled, exploreSearchHistoryEnabled, backgroundImageUri, backgroundImageBlur,

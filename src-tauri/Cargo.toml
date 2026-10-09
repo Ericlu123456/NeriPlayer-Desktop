@@ -9,7 +9,7 @@ tauri-build = { version = "2", features = [] }
 cc = "1"
 
 [dependencies]
-tauri = { version = "2", features = ["protocol-asset"] }
+tauri = { version = "2", features = ["protocol-asset", "tray-icon"] }
 tauri-plugin-opener = "2.5.4"
 tauri-plugin-store = "2"
 tauri-plugin-dialog = "2"
@@ -66,6 +66,8 @@ rusqlite = { version = "0.40", features = ["bundled"] }
 [target.'cfg(windows)'.dependencies]
 # 最小化时把 WebView2 控制器设为不可见；版本跟随 tauri 使用的 webview2-com
 webview2-com = "0.38"
+# 读取系统强调色（跟随系统取色）
+winreg = "0.55"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"

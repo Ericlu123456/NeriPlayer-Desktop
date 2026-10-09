@@ -14,6 +14,7 @@ import TrackSelectionToolbar from '@/components/TrackSelectionToolbar.vue'
 import LocateTrackFab from '@/components/LocateTrackFab.vue'
 import { useTrackSelection } from '@/composables/useTrackSelection'
 import { useLocateCurrentTrack } from '@/composables/useLocateCurrentTrack'
+import { useIncrementalList } from '@/composables/useIncrementalList'
 import {
   createContextMenuItem,
   type ContextMenuActionItem,
@@ -90,6 +91,10 @@ const filteredTracks = computed(() => {
   )
 })
 
+// 大歌单分块渲染（网易云歌单可达上千行，一次性渲染在 WebKitGTK 上卡顿）
+const { visibleItems: visibleTracks, onScroll: onTrackListScroll, ensureIndex: ensureTrackIndex } =
+  useIncrementalList(() => filteredTracks.value)
+
 const {
   selectionMode,
   selectedIds,
@@ -120,6 +125,10 @@ const { fabVisible: locateFabVisible, locate: locateCurrentTrack } = useLocateCu
   containerRef: viewRef,
   currentKey: currentRowKey,
   suppressed: selectionMode,
+  ensureRendered: key => {
+    const index = filteredTracks.value.findIndex(item => item.id === key)
+    return ensureTrackIndex(index)
+  },
 })
 
 function formatTotalDuration(ms: number): string {
@@ -406,7 +415,7 @@ onMounted(() => {
 </script>
 
 <template>
-  <div ref="viewRef" class="detail-view">
+  <div ref="viewRef" class="detail-view" @scroll="onTrackListScroll">
     <header class="detail-header">
       <button class="back-btn" @click="router.back()">
         <span class="material-symbols-rounded">arrow_back</span>
@@ -488,7 +497,7 @@ onMounted(() => {
         />
         <div class="track-list">
         <div
-          v-for="(track, index) in filteredTracks"
+          v-for="(track, index) in visibleTracks"
           :key="track.id"
           class="track-item"
           :class="{ active: player.currentTrack?.id === track.id, selected: selectionMode && selectedIds.has(track.id), 'selection-mode': selectionMode }"
