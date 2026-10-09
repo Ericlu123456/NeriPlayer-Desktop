@@ -48,6 +48,7 @@ async function runtime(cache = null) {
     } },
     './toast': { useToastStore: () => ({ success() {}, error: message => toasts.push(message) }) },
     '@/utils/logger': { createLogger: () => ({ error: (...args) => errors.push(args), warn() {} }) },
+    '@/utils/neteaseCover': { resolveNeteaseCover: (...values) => values.find(value => typeof value === 'string' && value) || '' },
     '@/modules/youtube/youtubePlaylistParse': {
       parseYouTubeLibraryPlaylists: data => data.playlists, parseYouTubeHomeFeed: () => [],
     },

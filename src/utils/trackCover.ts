@@ -1,3 +1,11 @@
+/// 网易云等接口常返回 http:// 封面，CSP 只放行 https 图片，不升级就整片加载失败。
+/// Windows 上本地文件经 convertFileSrc 变成 http://asset.localhost，不能动
+export function toHttpsImageUrl(value: string): string {
+  if (value.startsWith('//')) return `https:${value}`
+  if (/^http:\/\/asset\.localhost\//i.test(value)) return value
+  return value.replace(/^http:\/\//i, 'https://')
+}
+
 export interface TrackCoverSource {
   coverUrl?: unknown
   cover_url?: unknown
@@ -48,7 +56,8 @@ export function getTrackCoverUrl(track: TrackCoverSource | null | undefined): st
   ]
   const value = candidates.find(candidate => typeof candidate === 'string' && candidate.trim())
   if (typeof value !== 'string') return ''
-  return upgradeYouTubeThumbnailUrl(value.trim())
+  // 同步来的网易云曲目常带 http:// 封面，CSP 只放行 https 图片
+  return upgradeYouTubeThumbnailUrl(toHttpsImageUrl(value.trim()))
 }
 
 function isGoogleImageHost(url: string): boolean {

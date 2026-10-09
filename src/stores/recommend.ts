@@ -3,6 +3,7 @@ import { ref } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { useToastStore } from './toast'
 import { createLogger } from '@/utils/logger'
+import { resolveNeteaseCover } from '@/utils/neteaseCover'
 import { parseYouTubeLibraryPlaylists as parseYouTubeLibraryPlaylistsShared, parseYouTubeHomeFeed } from '@/modules/youtube/youtubePlaylistParse'
 
 const log = createLogger('recommend')
@@ -240,7 +241,7 @@ export const useRecommendStore = defineStore('recommend', () => {
       recommendedPlaylists.value = result.map((p: any) => ({
         id: p.id,
         name: p.name,
-        coverUrl: p.picUrl || p.coverImgUrl || '',
+        coverUrl: resolveNeteaseCover(p.picUrl, p.coverImgUrl),
         trackCount: p.trackCount || 0,
         description: p.copywriter || '',
       }))
@@ -340,7 +341,7 @@ export const useRecommendStore = defineStore('recommend', () => {
         playlists = list.map((p: any) => ({
           id: p.id,
           name: p.name,
-          coverUrl: p.coverImgUrl || '',
+          coverUrl: resolveNeteaseCover(p.coverImgUrl, p.picUrl),
           trackCount: p.trackCount || 0,
           creator: p.creator?.nickname || '',
         }))
@@ -409,7 +410,7 @@ export const useRecommendStore = defineStore('recommend', () => {
       return list.map((p: any) => ({
         id: p.id,
         name: p.name,
-        coverUrl: p.coverImgUrl || '',
+        coverUrl: resolveNeteaseCover(p.coverImgUrl, p.picUrl),
         trackCount: p.trackCount || 0,
         description: p.description || '',
         creator: p.creator?.nickname || '',
@@ -486,7 +487,7 @@ export const useRecommendStore = defineStore('recommend', () => {
         const albums = list.map((a: any) => ({
           id: a.id,
           name: a.name,
-          coverUrl: a.picUrl || '',
+          coverUrl: resolveNeteaseCover(a.picUrl, a.blurPicUrl),
           artist: a.artists?.map((ar: any) => ar.name).join(', ') || '',
           trackCount: a.size || 0,
         }))

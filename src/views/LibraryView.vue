@@ -31,6 +31,7 @@ import {
   type LocalArtistSummary,
 } from '@/modules/library/localArtists'
 import { createLogger } from '@/utils/logger'
+import { toHttpsImageUrl } from '@/utils/trackCover'
 import {
   isEmptyLocalFilesPlaylist,
   isFavoritesPlaylist,
@@ -68,15 +69,16 @@ const toast = useToastStore()
 // 喜欢的歌曲计数
 const likedCount = computed(() => recommend.likedSongIds.size)
 
-const tabs = computed(() => [
+interface LibraryTab { label: string; key: string; icon?: string; brandIcon?: string }
+const tabs = computed<LibraryTab[]>(() => [
   { label: t('library.tab_local'), icon: 'folder_open', key: 'local' },
   { label: t('library.tab_favorites'), icon: 'favorite', key: 'favorites' },
   { label: t('library.tab_downloads'), icon: 'download', key: 'downloads' },
   // 网易云歌单与专辑合成一个板块，内部再分类（对齐 Android
   // LibraryTab.NETEASEALBUM.asVisibleLibraryTab() == NETEASE）
-  { label: t('library.tab_netease'), icon: 'queue_music', key: 'netease' },
-  { label: t('library.bilibili_favorites'), icon: 'video_library', key: 'bilibili_favorites' },
-  { label: 'YouTube Music', icon: 'subscriptions', key: 'youtube_playlists' },
+  { label: t('library.tab_netease'), brandIcon: '/icons/ic_netease.svg', key: 'netease' },
+  { label: t('library.bilibili_favorites'), brandIcon: '/icons/ic_bilibili.svg', key: 'bilibili_favorites' },
+  { label: 'YouTube Music', brandIcon: '/icons/ic_youtube.svg', key: 'youtube_playlists' },
 ])
 // 根据路由 query 参数设置初始标签；旧的 netease_albums / netease_playlists 仍可用
 const tabKeyToIndex: Record<string, number> = {
@@ -230,7 +232,8 @@ function isBilibiliCover(url?: string | null): boolean {
 
 function toDisplayableLibraryCoverUrl(value?: string | null): string {
   if (!value) return ''
-  if (/^(https?:|asset:|data:|blob:)/i.test(value)) return value
+  if (/^(https?:)?\/\//i.test(value)) return toHttpsImageUrl(value)
+  if (/^(asset:|data:|blob:)/i.test(value)) return value
   return convertFileSrc(value)
 }
 
@@ -817,7 +820,8 @@ onUnmounted(() => {
         :class="{ active: activeTab === i }"
         @click="activeTab = i"
       >
-        <span class="material-symbols-rounded" :class="{ filled: activeTab === i }" style="font-size: 18px">{{ tab.icon }}</span>
+        <span v-if="tab.brandIcon" class="tab-brand-icon" :style="{ maskImage: `url('${tab.brandIcon}')` }" aria-hidden="true" />
+        <span v-else class="material-symbols-rounded" :class="{ filled: activeTab === i }" style="font-size: 18px">{{ tab.icon }}</span>
         <span>{{ tab.label }}</span>
       </button>
     </div>
@@ -1258,6 +1262,7 @@ onUnmounted(() => {
               v-if="npl.coverUrl && !isLibraryCoverFailed('netease-playlist', npl.id, npl.coverUrl)"
               :src="toDisplayableLibraryCoverUrl(npl.coverUrl)"
               referrerpolicy="no-referrer"
+              loading="lazy"
               class="pl-cover-img"
               @error="markLibraryCoverFailed('netease-playlist', npl.id, npl.coverUrl)"
             />
@@ -1989,6 +1994,17 @@ onUnmounted(() => {
 
   &.bilibili { --platform-color: #00a1d6; }
   &.youtube { --platform-color: #ff0033; }
+}
+
+.tab-brand-icon {
+  display: inline-block;
+  flex-shrink: 0;
+  width: 18px;
+  height: 18px;
+  background: currentColor;
+  mask-size: contain;
+  mask-repeat: no-repeat;
+  mask-position: center;
 }
 
 .platform-icon-mask {

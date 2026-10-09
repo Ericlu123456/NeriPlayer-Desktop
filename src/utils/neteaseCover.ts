@@ -1,3 +1,5 @@
+import { toHttpsImageUrl } from './trackCover'
+
 /** 网易云封面字段兼容：picUrl / blurPicUrl / coverImgUrl / pic 数字 ID */
 export function resolveNeteaseCover(...candidates: unknown[]): string {
   for (const raw of candidates) {
@@ -5,9 +7,7 @@ export function resolveNeteaseCover(...candidates: unknown[]): string {
     if (typeof raw === 'string') {
       const value = raw.trim()
       if (!value) continue
-      if (value.startsWith('http://') || value.startsWith('https://') || value.startsWith('//')) {
-        return value.startsWith('//') ? `https:${value}` : value
-      }
+      if (/^(https?:)?\/\//i.test(value)) return toHttpsImageUrl(value)
       // 少数接口只返回 pic 哈希/数字串
       if (/^[A-Za-z0-9_-]+$/.test(value) && value.length >= 8) {
         return `https://p1.music.126.net/${value}.jpg`
