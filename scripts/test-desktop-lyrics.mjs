@@ -262,10 +262,9 @@ try {
     '@/stores/lyricOffset': { useLyricOffsetStore: () => ({ effectiveOffsetMs: () => 0 }) },
     '@/modules/lyrics/lyricOffset': { readSyncedLyricSource: () => null },
     '@/modules/lyrics/lyricsFetch': {
-      fetchLyrics: () => new Promise(resolve => { fetchRelease = fetched => resolve({ source: 'netease', lines: fetched }) }),
+      fetchAutomaticLyrics: () => new Promise(resolve => { fetchRelease = fetched => resolve({ source: 'netease', lines: fetched }) }),
       fetchWordTimedLyrics: async () => ({ source: null, lines: [] }),
       preferredLyricMatchSource: () => null,
-      prefersWordTimedLyricsFirst: () => false,
       fetchPreferredSourceLyrics: async () => null,
     },
     '@/modules/lyrics/lyricSource': { rememberLyricSource() {} },

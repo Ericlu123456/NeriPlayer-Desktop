@@ -483,6 +483,12 @@ export const usePlayerStore = defineStore('player', () => {
   // 音频分析数据
   const audioLevel = ref(0)
   const beatImpulse = ref(0)
+  // 后端只在播放中推电平；不清零的话暂停后背景律动会定格在最后一拍
+  watch(isPlaying, (playing) => {
+    if (playing) return
+    audioLevel.value = 0
+    beatImpulse.value = 0
+  })
 
   // 插值后的播放位置（rAF 驱动，60fps 平滑）
   const interpolatedPositionMs = ref(0)
@@ -3129,7 +3135,7 @@ export const usePlayerStore = defineStore('player', () => {
     applyPersistedSettings, decoderCapabilities,
     startSleepTimer, startSleepTimerEndOfTrack, startSleepTimerEndOfQueue, cancelSleepTimer,
     playAll, shufflePlay, addToQueueNext, addToQueueEnd, removeFromQueue, clearQueue,
-    prefetchPlaybackTracks, prefetchIntent,
+    prefetchPlaybackTracks, prefetchIntent, upcomingTrack: () => nextPrefetchTracks()[0] ?? null,
     updateCurrentTrackInfo, patchCurrentTrackSyncPayload, restoreOriginalTrackInfo, hasOriginalTrackInfo,
     handleDownloadedFileRemoved, withReleasedAudioFile, replayWithQuality,
   }

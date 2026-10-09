@@ -32,6 +32,7 @@ import { getTrackCoverUrl } from '@/utils/trackCover'
 import { applyDynamicColorFromCover, clearDynamicColor } from '@/utils/colorExtractor'
 import { createLogger } from '@/utils/logger'
 import { hasVisiblePlaybackSession } from '@/modules/playback/playbackRequest'
+import { useUpcomingLyricsPrefetch } from '@/composables/useUpcomingLyricsPrefetch'
 
 type CoverSnapshot = {
   rect: { left: number; top: number; width: number; height: number }
@@ -52,6 +53,7 @@ const settingsStore = useSettingsStore()
 const likedSongs = useLikedSongsStore()
 const route = useRoute()
 const router = useRouter()
+useUpcomingLyricsPrefetch()
 const isNowPlayingOpen = ref(false)
 // 静音前的音量，取消静音时还原
 let volumeBeforeMute = 0.5

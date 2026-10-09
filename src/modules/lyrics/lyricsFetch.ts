@@ -4,6 +4,7 @@ import type { LyricLine } from '@/stores/player'
 import type { DefaultLyricSource } from '@/stores/settings'
 import { mapBackendLyrics, toEditableRomanizationText } from './lyricsFormat'
 import { defaultLyricMatchKeyword, matchLyrics, type LyricMatchSource } from './lyricMatch'
+import { hasWordTimedLyrics } from './lyricsRequest'
 
 export interface FetchedLyrics {
   /** 没找到歌词时为空 */
@@ -34,6 +35,47 @@ function fromBackend(raw: BackendFetchedLyrics | null | undefined): FetchedLyric
 /** 多源瀑布取歌词（平台 id、LRCLIB、搜索匹配、YouTube 原生、AMLL/酷狗兜底） */
 export async function fetchLyrics(args: FetchLyricsArgs): Promise<FetchedLyrics> {
   return fromBackend(await invoke<BackendFetchedLyrics>('fetch_lyrics', { ...args }))
+}
+
+interface AutomaticLyricsTrack {
+  id: string
+  title: string
+  artist: string
+  durationMs?: number | null
+  audioUrl?: string | null
+}
+
+export function fetchLyricsArgsFor(track: AutomaticLyricsTrack): FetchLyricsArgs {
+  const neteaseId = track.id.startsWith('netease:') ? Number.parseInt(track.id.slice('netease:'.length), 10) : NaN
+  return {
+    title: track.title,
+    artist: track.artist,
+    // 换歌瞬间 player.durationMs 仍是上一首的值, 会误触发后端时长硬门槛拒掉正确
+    // 歌词。只用曲目自带时长，未知时传 0（后端对 0 不设门槛）（LY-12）
+    durationSecs: Math.floor((track.durationMs || 0) / 1000),
+    audioPath: track.audioUrl || null,
+    neteaseId: Number.isFinite(neteaseId) && neteaseId > 0 ? neteaseId : null,
+    qqSongMid: track.id.startsWith('qq:') ? track.id.slice('qq:'.length) || null : null,
+    youtubeVideoId: track.id.startsWith('youtube:') ? track.id.slice('youtube:'.length) || null : null,
+  }
+}
+
+/**
+ * 自动取词的在线部分（同步载荷、本地缓存、默认歌词源都没给出结果之后）。
+ * 正在播放页、桌面歌词、下一首预取共用，经 loadLyricsSingleFlight 合并时三处拿到的是同一种结果
+ */
+export async function fetchAutomaticLyrics(
+  track: AutomaticLyricsTrack,
+  playbackSource: string | null | undefined,
+  preferWordTimed: boolean,
+): Promise<FetchedLyrics> {
+  if (prefersWordTimedLyricsFirst(playbackSource, preferWordTimed)) {
+    const wordTimed = await fetchWordTimedLyrics({
+      title: track.title, artist: track.artist, durationMs: track.durationMs || 0,
+    }).catch(() => null)
+    if (wordTimed && hasWordTimedLyrics(wordTimed.lines)) return wordTimed
+  }
+  return fetchLyrics(fetchLyricsArgsFor(track))
 }
 
 const PREFERRED_MATCH_SOURCES: Record<Exclude<DefaultLyricSource, 'automatic'>, LyricMatchSource> = {

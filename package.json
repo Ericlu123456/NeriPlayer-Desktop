@@ -48,6 +48,7 @@
     "test:playback-failure": "node scripts/test-playback-failure.mjs",
     "test:youtube-seek-policy": "node scripts/test-youtube-seek-policy.mjs",
     "test:lyrics-cache": "node scripts/test-lyrics-cache.mjs",
+    "test:lyrics-prefetch": "node scripts/test-lyrics-prefetch.mjs",
     "test:local-artists": "node scripts/test-local-artists.mjs",
     "test:local-scan-preview": "node scripts/test-local-scan-preview.mjs",
     "test:local-scan-store": "node scripts/test-local-scan-store.mjs",

@@ -50,12 +50,12 @@ import {
   readSyncedLyricSource,
 } from '@/modules/lyrics/lyricOffset'
 import {
+  fetchAutomaticLyrics,
   fetchLyrics,
   fetchNeteaseRomanization,
   fetchPreferredSourceLyrics,
   fetchWordTimedLyrics,
   preferredLyricMatchSource,
-  prefersWordTimedLyricsFirst,
 } from '@/modules/lyrics/lyricsFetch'
 import { lyricSourceOf, rememberLyricSource } from '@/modules/lyrics/lyricSource'
 import { isEditableTarget } from '@/modules/shortcuts/platform'
@@ -1026,43 +1026,10 @@ watch(nowPlayingTrackKey, async (trackKey) => {
       return
     }
 
-    const neteaseId = track.id.startsWith('netease:')
-      ? parseInt(track.id.replace('netease:', ''))
-      : undefined
-    const qqSongMid = track.id.startsWith('qq:')
-      ? track.id.replace('qq:', '')
-      : undefined
-    const youtubeVideoId = track.id.startsWith('youtube:')
-      ? track.id.replace('youtube:', '')
-      : undefined
-
     const { lines: nextLyrics } = await loadLyricsSingleFlight(track, async () => {
       const invokeStarted = performance.now()
       log.info('lyrics backend invoke:', { requestId, trackId: track.id })
-      if (prefersWordTimedLyricsFirst(getPlaybackSourceKind(track), settings.preferWordTimedLyrics)) {
-        const wordTimed = await fetchWordTimedLyrics({
-          title: track.title, artist: track.artist, durationMs: track.durationMs || 0,
-        }).catch((error) => {
-          log.warn('word timed lyrics unavailable, falling back:', summarizeLogError(error))
-          return null
-        })
-        if (wordTimed && hasWordTimedLyrics(wordTimed.lines)) {
-          rememberLyricSource(track, wordTimed.source)
-          cacheLyricsForTrack(track, wordTimed.lines)
-          return wordTimed
-        }
-      }
-      const fetched = await fetchLyrics({
-        title: track.title,
-        artist: track.artist,
-        // 换歌瞬间 player.durationMs 仍是上一首的值, 会误触发后端时长硬门槛拒掉正确
-        // 歌词。未知时长传 0（后端对 0 不设门槛）（LY-12）
-        durationSecs: Math.floor((track.durationMs || 0) / 1000),
-        audioPath: track.audioUrl || null,
-        neteaseId: neteaseId || null,
-        qqSongMid: qqSongMid || null,
-        youtubeVideoId: youtubeVideoId || null,
-      })
+      const fetched = await fetchAutomaticLyrics(track, getPlaybackSourceKind(track), settings.preferWordTimedLyrics)
       if (fetched.lines.length > 0) {
         rememberLyricSource(track, fetched.source)
         cacheLyricsForTrack(track, fetched.lines)
@@ -1134,18 +1101,28 @@ const DISC_RPM = 2.4         // 每秒转过的度数 = 360 / 25s ≈ 14.4 deg/s
 const DEG_PER_MS = 360 / 25000
 
 function animateDisc(timestamp: number) {
+  // 暂停或卡片封面时停表，角度留在原处；恢复由 startDiscLoop 接上
+  if (!player.isPlaying || !discRef.value) {
+    discAnimFrame = 0
+    discLastTime = 0
+    return
+  }
   if (!discLastTime) discLastTime = timestamp
-  const dt = timestamp - discLastTime
+  const dt = Math.min(64, timestamp - discLastTime)
   discLastTime = timestamp
 
-  if (player.isPlaying) {
-    discAngle = (discAngle + DEG_PER_MS * dt) % 360
-  }
-  if (discRef.value) {
-    discRef.value.style.transform = `rotate(${discAngle}deg)`
-  }
+  discAngle = (discAngle + DEG_PER_MS * dt) % 360
+  discRef.value.style.transform = `rotate(${discAngle}deg)`
   discAnimFrame = requestAnimationFrame(animateDisc)
 }
+
+function startDiscLoop() {
+  if (discAnimFrame) return
+  if (discRef.value) discRef.value.style.transform = `rotate(${discAngle}deg)`
+  discAnimFrame = requestAnimationFrame(animateDisc)
+}
+
+watch([() => player.isPlaying, discRef], startDiscLoop, { flush: 'post' })
 
 // ESC 分层关闭: 每次只收起最上层, 全部收起后才由 App 全局回退关闭本页 (对齐 Android 返回语义)
 function handleEscapeLayered(event: KeyboardEvent) {
@@ -1173,7 +1150,7 @@ function handleEscapeLayered(event: KeyboardEvent) {
 }
 
 onMounted(() => {
-  discAnimFrame = requestAnimationFrame(animateDisc)
+  startDiscLoop()
   document.addEventListener('keydown', handleEscapeLayered)
 })
 onUnmounted(() => {
@@ -2063,7 +2040,11 @@ function addAudioInfoPart(
 function normalizeAudioDisplayToken(value?: string, local = false) {
   if (!value) return ''
   const raw = value.trim()
-  const lower = raw.toLowerCase()
+  // 在线流的 format 常是 MIME（audio/mp4; codecs="mp4a.40.2"），按编码参数或子类型识别
+  const [essence, params = ''] = raw.toLowerCase().split(';')
+  const isMime = /^(audio|video)\//.test(essence)
+  const lower = /codecs\s*=\s*"?([^",]+)/.exec(params)?.[1]?.trim()
+    || (isMime ? essence.trim().replace(/^(audio|video)\/(x-)?/, '') : raw.toLowerCase())
   if (local && lower === 'mpeg') return 'MPEG'
   // 占位词直接丢掉
   if (isHiddenAudioInfoToken(raw)) return ''
@@ -2073,16 +2054,19 @@ function normalizeAudioDisplayToken(value?: string, local = false) {
     mpeg: 'MP3',
     aac: 'AAC',
     mp4a: 'AAC',
+    mp4: 'MP4',
     m4a: 'M4A',
+    webm: 'WebM',
     opus: 'Opus',
     ogg: 'OGG',
     vorbis: 'Vorbis',
     wav: 'WAV',
     aiff: 'AIFF',
-    'ec-3': 'EC-3',
+    'ec-3': 'E-AC-3',
+    eac3: 'E-AC-3',
     ac3: 'AC-3',
   }
-  return tokenMap[lower] ?? tokenMap[lower.split('.')[0]] ?? raw
+  return tokenMap[lower] ?? tokenMap[lower.split('.')[0]] ?? (isMime ? lower.toUpperCase() : raw)
 }
 
 function isHiddenAudioInfoToken(value?: string) {
@@ -2221,6 +2205,7 @@ const sliderActiveColor = computed(() => {
     />
     <HyperBackground
       v-else-if="shouldRenderDynamicBackground"
+      :playing="player.isPlaying"
       :music-level="settings.audioReactive ? player.audioLevel : 0"
       :beat-impulse="settings.audioReactive ? player.beatImpulse : 0"
       :colors="extractedColors"

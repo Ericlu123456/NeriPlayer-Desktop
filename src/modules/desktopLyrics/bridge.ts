@@ -6,12 +6,11 @@ import { useSettingsStore } from '@/stores/settings'
 import { useLyricOffsetStore } from '@/stores/lyricOffset'
 import { readSyncedLyricSource } from '@/modules/lyrics/lyricOffset'
 import {
-  fetchLyrics,
+  fetchAutomaticLyrics,
   fetchNeteaseRomanization,
   fetchPreferredSourceLyrics,
   fetchWordTimedLyrics,
   preferredLyricMatchSource,
-  prefersWordTimedLyricsFirst,
 } from '@/modules/lyrics/lyricsFetch'
 import { rememberLyricSource } from '@/modules/lyrics/lyricSource'
 import { getCachedLyrics, saveCachedLyrics } from '@/modules/lyrics/lyricsCache'
@@ -311,22 +310,9 @@ export function installDesktopLyricsBridge(options: DesktopLyricsBridgeOptions =
             return preferred.lines
           }
         }
-        if (prefersWordTimedLyricsFirst(source(track), settings.preferWordTimedLyrics)) {
-          const wordTimed = await fetchWordTimedLyrics({
-            title: track.title, artist: track.artist, durationMs: track.durationMs || 0,
-          }).catch(() => null)
-          if (wordTimed && hasWordTimedLyrics(wordTimed.lines)) {
-            rememberLyricSource(track, wordTimed.source)
-            return wordTimed.lines
-          }
-        }
-        const fetched = await loadLyricsSingleFlight(track, () => fetchLyrics({
-          title: track.title, artist: track.artist,
-          durationSecs: Math.floor((track.durationMs || 0) / 1000), audioPath: track.audioUrl || null,
-          neteaseId: source(track) === 'netease' ? Number(track.id.slice(8)) || null : null,
-          qqSongMid: source(track) === 'qq' ? track.id.slice(3) : null,
-          youtubeVideoId: source(track) === 'youtube' ? track.id.slice(8) : null,
-        }))
+        const fetched = await loadLyricsSingleFlight(track, () => fetchAutomaticLyrics(
+          track, source(track), settings.preferWordTimedLyrics,
+        ))
         if (fetched.lines.length) rememberLyricSource(track, fetched.source)
         return fetched.lines
       },
