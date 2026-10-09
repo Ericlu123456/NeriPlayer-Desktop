@@ -229,6 +229,53 @@ onBeforeUnmount(stopRecording)
   gap: 10px;
 }
 
+/* 与设置页的卡片 / 胶囊按钮同款：那边是 scoped 样式，进不了子组件 */
+.setting-card {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 14px 16px;
+  border-radius: var(--radius-lg);
+  background: var(--md-surface-container);
+  transition: background var(--duration-short);
+  &:hover { background: var(--md-surface-container-high); }
+}
+
+.setting-icon-wrap {
+  width: 40px;
+  height: 40px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-md);
+  background: var(--md-surface-container-high);
+  color: var(--md-on-surface-variant);
+}
+
+.setting-info { flex: 1; min-width: 0; }
+.setting-title { font-size: 14px; font-weight: 500; }
+.setting-desc { margin-top: 2px; font-size: 12px; color: var(--md-on-surface-variant); }
+
+.m3-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 12px;
+  border: 1px solid var(--md-outline-variant);
+  border-radius: var(--radius-full);
+  background: var(--md-surface-container-highest);
+  color: var(--md-on-surface-variant);
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background var(--duration-short) var(--ease-standard), opacity var(--duration-short) var(--ease-standard);
+  &:hover:not(:disabled) { background: var(--md-surface-variant); }
+  &:disabled { opacity: 0.45; cursor: default; }
+}
+
 .shortcut-toolbar {
   display: flex;
   align-items: center;
