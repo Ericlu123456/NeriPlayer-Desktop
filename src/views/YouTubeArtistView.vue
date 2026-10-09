@@ -23,6 +23,7 @@ const error = ref('')
 const sectionLoading = ref('')
 const queueLoading = ref(false)
 const query = ref('')
+const descriptionExpanded = ref(false)
 const sectionPages = ref<Record<string, { items: YouTubeArtistItem[]; continuation: string }>>({})
 let generation = 0
 // detail 当前属于哪位创作者
@@ -60,6 +61,7 @@ async function load() {
   })
   sectionPages.value = {}
   query.value = ''
+  descriptionExpanded.value = false
   loading.value = true
   sectionLoading.value = ''
   queueLoading.value = false
@@ -165,10 +167,12 @@ onUnmounted(() => { generation++ })
       <div class="creator-identity">
         <div class="creator-avatar"><BilibiliCoverImage v-if="header.coverUrl" :src="header.coverUrl" /><span v-else class="material-symbols-rounded">account_circle</span></div>
         <div class="creator-name"><h1>{{ header.name }}</h1><p>{{ [header.subtitle, header.subscribers, header.listeners].filter(Boolean).join(' · ') }}</p></div>
+      </div>
+      <div class="creator-actions">
+        <button class="play-all-btn" :disabled="!firstPlayableSection || queueLoading" @click="firstPlayableSection && playSection(firstPlayableSection)"><span class="material-symbols-rounded filled">play_arrow</span>{{ t(queueLoading ? 'common.loading' : 'player.play_all') }}</button>
         <button class="creator-follow" :class="{ active: following }" :disabled="changing || !header.name" @click="toggleFollow"><span class="material-symbols-rounded">{{ following ? 'check' : 'person_add' }}</span>{{ t(following ? 'player.artist_unsubscribe' : 'player.artist_subscribe') }}</button>
       </div>
-      <p v-if="header.description" class="creator-description">{{ header.description }}</p>
-      <button class="play-all-btn" :disabled="!firstPlayableSection || queueLoading" @click="firstPlayableSection && playSection(firstPlayableSection)"><span class="material-symbols-rounded filled">play_arrow</span>{{ t(queueLoading ? 'common.loading' : 'player.play_all') }}</button>
+      <button v-if="header.description" type="button" class="creator-description" :class="{ expanded: descriptionExpanded }" :aria-expanded="descriptionExpanded" @click="descriptionExpanded = !descriptionExpanded">{{ header.description }}</button>
     </section>
     <div v-if="loading && !detail" class="state-center"><span class="material-symbols-rounded spinning">progress_activity</span></div>
     <div v-else-if="error && !detail" class="state-center"><p>{{ error }}</p><button class="retry-btn" @click="load()">{{ t('player.retry') }}</button></div>

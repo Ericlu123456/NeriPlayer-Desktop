@@ -28,6 +28,8 @@ const loadingMore = ref(false)
 const error = ref('')
 const failedLoadMore = ref(false)
 const activeTab = ref<'videos' | 'collections' | 'series'>('videos')
+const descriptionExpanded = ref(false)
+watch(mid, () => { descriptionExpanded.value = false })
 const contents = ref<ArtistContents | null>(null)
 const loadingContents = ref(false)
 const contentsError = ref('')
@@ -199,10 +201,12 @@ onUnmounted(() => { generation++; contentsGeneration++; collectionGeneration++ }
       <div class="creator-identity">
         <div class="creator-avatar"><BilibiliCoverImage v-if="header.coverUrl" :src="header.coverUrl" /><span v-else class="material-symbols-rounded">account_circle</span></div>
         <div class="creator-name"><h1>{{ header.name }}</h1><p>{{ t('player.source_bilibili') }} · {{ t('player.track_count', { count: detail?.total || tracks.length }) }}</p></div>
+      </div>
+      <div class="creator-actions">
+        <button class="play-all-btn" :disabled="!activeTracks.length" @click="player.playAll(activeTracks)"><span class="material-symbols-rounded filled">play_arrow</span>{{ t('player.play_all') }}</button>
         <button class="creator-follow" :class="{ active: following }" :disabled="changing || !header.name" @click="toggleFollow"><span class="material-symbols-rounded">{{ following ? 'check' : 'person_add' }}</span>{{ t(following ? 'player.artist_unsubscribe' : 'player.artist_subscribe') }}</button>
       </div>
-      <p v-if="header.description" class="creator-description">{{ header.description }}</p>
-      <button class="play-all-btn" :disabled="!activeTracks.length" @click="player.playAll(activeTracks)"><span class="material-symbols-rounded filled">play_arrow</span>{{ t('player.play_all') }}</button>
+      <button v-if="header.description" type="button" class="creator-description" :class="{ expanded: descriptionExpanded }" :aria-expanded="descriptionExpanded" @click="descriptionExpanded = !descriptionExpanded">{{ header.description }}</button>
     </section>
     <div class="artist-tabs">
       <button v-for="tab in (['videos', 'collections', 'series'] as const)" :key="tab" class="artist-tab" :class="{ active: activeTab === tab }" @click="selectTab(tab)">

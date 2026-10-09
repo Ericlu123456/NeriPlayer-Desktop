@@ -206,12 +206,22 @@ function handleQueueContextMenuClick(item: ContextMenuActionItem) {
   display: flex;
   flex-direction: column;
   box-shadow: -4px 0 24px rgba(0, 0, 0, 0.3);
-  animation: slide-in 250ms var(--ease-decelerate);
 }
 
-@keyframes slide-in {
-  from { transform: translateX(100%); }
-  to { transform: translateX(0); }
+/* 由父级 <Transition name="queue-sheet"> 驱动：开合都是 transition，半路反向会从当前位置收回 */
+.queue-overlay.queue-sheet-enter-active,
+.queue-overlay.queue-sheet-leave-active {
+  transition: background-color 260ms var(--ease-standard);
+  .queue-panel { transition: transform 300ms var(--ease-emphasized-decel); }
+}
+.queue-overlay.queue-sheet-leave-active .queue-panel {
+  transition-duration: 200ms;
+  transition-timing-function: var(--ease-emphasized-accel);
+}
+.queue-overlay.queue-sheet-enter-from,
+.queue-overlay.queue-sheet-leave-to {
+  background-color: transparent;
+  .queue-panel { transform: translateX(100%); }
 }
 
 .queue-header {

@@ -321,7 +321,9 @@ defineExpose({
 
     <!-- 队列面板（Teleport 到 body，避免被 .mini-player 的 backdrop-filter 包含块限制） -->
     <Teleport to="body">
-      <QueuePanel v-if="showQueue" @close="showQueue = false" />
+      <Transition name="queue-sheet">
+        <QueuePanel v-if="showQueue" @close="showQueue = false" />
+      </Transition>
     </Teleport>
 
     <!-- 一起听弹窗（组件内部自带 Teleport） -->
