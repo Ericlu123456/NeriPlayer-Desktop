@@ -101,7 +101,7 @@ const {
   showTranslation, showRomanization, lyricBlur, lyricBlurAmount,
   advancedLyrics, preferWordTimedLyrics, defaultLyricSource, dynamicBackground, colorMode, audioReactive,
   coverBlurBg, coverBlurAmount, coverBlurDarken,
-  neteaseQuality, qqMusicQuality, youtubeQuality, biliQuality,
+  neteaseQuality, youtubeQuality, biliQuality,
   youtubePlaybackSource, neteaseAutoSourceSwitch, neteaseLocalSourceFallback,
   bypassProxy, internationalizationEnabled, exploreSearchHistoryEnabled,
   backgroundImageUri, backgroundImageBlur, backgroundImageAlpha,
@@ -109,7 +109,7 @@ const {
   devModeEnabled, logToFile, logLevel,
   maxCacheSize, downloadNameTemplate, downloadDir,
   downloadParallelism, downloadAutoFillMetadata, downloadEmbedLyrics,
-  downloadFollowPlaybackQuality, downloadNeteaseQuality, downloadQqMusicQuality,
+  downloadFollowPlaybackQuality, downloadNeteaseQuality,
   downloadYoutubeQuality, downloadBiliQuality,
   ltServerUrl, ltNickname, ltAllowMemberControl, ltAutoPauseOnMemberChange, ltShareAudioLinks,
   locale: settingLocale,
@@ -365,13 +365,6 @@ const neteaseQualityOptions = computed(() => [
 
 const downloadNeteaseQualityOptions = neteaseQualityOptions
 
-// 与播放页音质列表同一套文案：QQ 的 high 档是「高」而不是网易云的「较高」
-const qqQualityOptions = computed(() => [
-  { value: 'standard', label: t('settings.q_standard') },
-  { value: 'high', label: t('settings.q_high_yt') },
-  { value: 'lossless', label: t('settings.q_lossless') },
-])
-
 const youtubeQualityOptions = computed(() => [
   { value: 'low', label: t('settings.q_low') },
   { value: 'medium', label: t('settings.q_medium') },
@@ -388,19 +381,17 @@ const biliQualityOptions = computed(() => [
   { value: 'dolby', label: t('settings.q_dolby') },
 ])
 
-type OnlineQualitySource = 'netease' | 'qq' | 'youtube' | 'bilibili'
+type OnlineQualitySource = 'netease' | 'youtube' | 'bilibili'
 const qualitySwitching = ref(false)
 
 function qualityForSource(source: OnlineQualitySource): string {
   if (source === 'netease') return neteaseQuality.value
-  if (source === 'qq') return qqMusicQuality.value
   if (source === 'youtube') return youtubeQuality.value
   return biliQuality.value
 }
 
 function setQualityForSource(source: OnlineQualitySource, value: string) {
   if (source === 'netease') neteaseQuality.value = value
-  else if (source === 'qq') qqMusicQuality.value = value
   else if (source === 'youtube') youtubeQuality.value = value
   else biliQuality.value = value
 }
@@ -2545,16 +2536,6 @@ useEscapeClose(
       </div>
 
       <div class="setting-card quality-card">
-        <div class="setting-icon-wrap"><span class="material-symbols-rounded">library_music</span></div>
-        <div class="setting-info">
-          <div class="setting-title">{{ t('settings.qq_quality') }}</div>
-          <div class="chip-wrap">
-            <button v-for="o in qqQualityOptions" :key="o.value" class="m3-chip sm" :class="{ active: qqMusicQuality === o.value }" :disabled="qualitySwitching" @click="handleQualityChange('qq', o.value)">{{ o.label }}</button>
-          </div>
-        </div>
-      </div>
-
-      <div class="setting-card quality-card">
         <div class="setting-icon-wrap"><span class="material-symbols-rounded">smart_display</span></div>
         <div class="setting-info">
           <div class="setting-title">{{ t('settings.youtube_quality') }}</div>
@@ -2659,10 +2640,6 @@ useEscapeClose(
         <div class="setting-card sub-card">
           <div class="setting-info"><div class="setting-title">{{ t('settings.netease_quality') }}</div></div>
           <CustomSelect v-model="downloadNeteaseQuality" :options="downloadNeteaseQualityOptions" :label="t('settings.netease_quality')" />
-        </div>
-        <div class="setting-card sub-card">
-          <div class="setting-info"><div class="setting-title">{{ t('settings.qq_quality') }}</div></div>
-          <CustomSelect v-model="downloadQqMusicQuality" :options="qqQualityOptions" :label="t('settings.qq_quality')" />
         </div>
         <div class="setting-card sub-card">
           <div class="setting-info"><div class="setting-title">{{ t('settings.youtube_quality') }}</div></div>
@@ -3011,6 +2988,7 @@ useEscapeClose(
 
     <!-- GitHub 两阶段配置对话框 -->
     <Teleport to="body">
+      <Transition name="settings-dialog">
       <div v-if="showGitHubDialog" class="dialog-overlay" @click.self="showGitHubDialog = false">
         <div class="dialog-card" style="width: 420px">
           <h3 class="dialog-title">{{ t('settings.github_sync_config') }}</h3>
@@ -3081,10 +3059,12 @@ useEscapeClose(
           </div>
         </div>
       </div>
+      </Transition>
     </Teleport>
 
     <!-- WebDAV 配置对话框 -->
     <Teleport to="body">
+      <Transition name="settings-dialog">
       <div v-if="showWebDavDialog" class="dialog-overlay" @click.self="showWebDavDialog = false">
         <div class="dialog-card">
           <h3 class="dialog-title">{{ t('settings.webdav_sync') }}</h3>
@@ -3114,10 +3094,12 @@ useEscapeClose(
           </div>
         </div>
       </div>
+      </Transition>
     </Teleport>
 
     <!-- 退出登录确认对话框 -->
     <Teleport to="body">
+      <Transition name="settings-dialog">
       <div v-if="showLogoutConfirm" class="dialog-overlay" @click.self="showLogoutConfirm = false">
         <div class="dialog-card" style="width: 340px">
           <h3 class="dialog-title">{{ t('settings.logout_confirm_title') }}</h3>
@@ -3128,10 +3110,12 @@ useEscapeClose(
           </div>
         </div>
       </div>
+      </Transition>
     </Teleport>
 
     <!-- 清除 GitHub 配置确认 -->
     <Teleport to="body">
+      <Transition name="settings-dialog">
       <div v-if="showClearGitHubConfirm" class="dialog-overlay" @click.self="showClearGitHubConfirm = false">
         <div class="dialog-card" style="width: 340px">
           <h3 class="dialog-title">{{ t('settings.clear_config_title') }}</h3>
@@ -3142,10 +3126,12 @@ useEscapeClose(
           </div>
         </div>
       </div>
+      </Transition>
     </Teleport>
 
     <!-- 旧客户端无法读取升级后的归档，写入前需明确确认 -->
     <Teleport to="body">
+      <Transition name="settings-dialog">
       <div v-if="syncStore.pendingProtocolUpgrade && !hideProtocolUpgrade" class="dialog-overlay" @click.self="hideProtocolUpgrade = true">
         <div class="dialog-card" style="width: 380px">
           <div class="dialog-icon warning">
@@ -3164,10 +3150,12 @@ useEscapeClose(
           </div>
         </div>
       </div>
+      </Transition>
     </Teleport>
 
     <!-- 一起听身份重置确认 -->
     <Teleport to="body">
+      <Transition name="settings-dialog">
       <div v-if="showResetLtIdentityConfirm" class="dialog-overlay" @click.self="showResetLtIdentityConfirm = false">
         <div class="dialog-card" style="width: 380px">
           <div class="dialog-icon warning">
@@ -3181,10 +3169,12 @@ useEscapeClose(
           </div>
         </div>
       </div>
+      </Transition>
     </Teleport>
 
     <!-- 配置导出敏感信息确认 -->
     <Teleport to="body">
+      <Transition name="settings-dialog">
       <div v-if="showConfigExportWarning" class="dialog-overlay" @click.self="showConfigExportWarning = false">
         <div class="dialog-card config-warning-dialog">
           <div class="dialog-icon danger">
@@ -3203,10 +3193,12 @@ useEscapeClose(
           </div>
         </div>
       </div>
+      </Transition>
     </Teleport>
 
     <!-- 下载文件名格式编辑对话框 -->
     <Teleport to="body">
+      <Transition name="settings-dialog">
       <div v-if="showDownloadTemplateDialog" class="dialog-overlay" @click.self="showDownloadTemplateDialog = false">
         <div class="dialog-card" style="width: 420px">
           <h3 class="dialog-title">{{ t('settings.download_format') }}</h3>
@@ -3227,6 +3219,7 @@ useEscapeClose(
           </div>
         </div>
       </div>
+      </Transition>
     </Teleport>
 
     <StorageManagementDialog
@@ -4083,12 +4076,6 @@ useEscapeClose(
   align-items: center;
   justify-content: center;
   backdrop-filter: blur(4px);
-  animation: overlay-fade-in 200ms ease;
-}
-
-@keyframes overlay-fade-in {
-  from { opacity: 0; }
-  to { opacity: 1; }
 }
 
 .dialog-card {
@@ -4098,13 +4085,21 @@ useEscapeClose(
   width: 380px;
   max-width: 90vw;
   box-shadow: 0 8px 32px rgba(0, 0, 0, 0.2);
-  animation: dialog-scale-in 250ms cubic-bezier(0.05, 0.7, 0.1, 1);
   transform-origin: center;
 }
 
-@keyframes dialog-scale-in {
-  from { opacity: 0; transform: scale(0.92); }
-  to { opacity: 1; transform: scale(1); }
+/* 开合都走 transition：关闭有退场，半路重新打开从当前状态反向 */
+.settings-dialog-enter-active,
+.settings-dialog-leave-active {
+  transition: opacity 200ms ease;
+  .dialog-card { transition: opacity 200ms ease, transform 250ms cubic-bezier(0.05, 0.7, 0.1, 1); }
+}
+.settings-dialog-leave-active { transition-duration: 150ms; }
+.settings-dialog-leave-active .dialog-card { transition-duration: 150ms; transition-timing-function: var(--ease-accelerate); }
+.settings-dialog-enter-from,
+.settings-dialog-leave-to {
+  opacity: 0;
+  .dialog-card { opacity: 0; transform: scale(0.92); }
 }
 
 .dialog-title {
