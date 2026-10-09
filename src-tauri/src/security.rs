@@ -16,8 +16,9 @@ pub const WEBDAV_PASSWORD_KEY: &str = "webdav-password-v1";
 
 /// 从当前构建配置的凭据存储读取秘密值
 ///
-/// Release 首选加密文件；读不到时回退旧 Keychain 并就地迁移——
-/// 老用户升级后第一次读取还会碰一次 Keychain，此后彻底不再触发系统弹窗。
+/// Release 只读加密文件。旧 Keychain 凭据在整个安装生命周期里只迁移一次
+/// （见 [`migrate_legacy_keychain_once`]）：以前每次读不到文件都回落 Keychain，
+/// 没配置过的 WebDAV/GitHub 凭据永远读不到，ad-hoc 签名的新版本每次启动都会弹授权框。
 pub fn get_secret(key: &str) -> Option<String> {
     #[cfg(debug_assertions)]
     {
@@ -29,13 +30,36 @@ pub fn get_secret(key: &str) -> Option<String> {
         if let Some(value) = encrypted_secret_storage::get(key) {
             return Some(value);
         }
-        let legacy = get_keyring_secret(key)?;
+        if migrate_legacy_keychain_once() {
+            return encrypted_secret_storage::get(key);
+        }
+        None
+    }
+}
+
+/// 把旧 Keychain 里的全部已知凭据一次性迁入加密文件，并写下标记永不再碰 Keychain。
+/// 返回本次是否真的执行了迁移（已迁移过则为 false）
+#[cfg(not(debug_assertions))]
+fn migrate_legacy_keychain_once() -> bool {
+    static MIGRATION: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = MIGRATION.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if encrypted_secret_storage::legacy_keychain_migrated() {
+        return false;
+    }
+    for key in [AUTH_STATE_KEY, GITHUB_TOKEN_KEY, WEBDAV_PASSWORD_KEY] {
+        if encrypted_secret_storage::get(key).is_some() {
+            continue;
+        }
+        let Some(legacy) = get_keyring_secret(key).filter(|value| !value.is_empty()) else {
+            continue;
+        };
         if encrypted_secret_storage::set(key, &legacy) {
             let _ = delete_keyring_secret(key);
             log::info!(target: "security", "credential migrated off the keychain: {key}");
         }
-        Some(legacy)
     }
+    encrypted_secret_storage::mark_legacy_keychain_migrated();
+    true
 }
 
 /// 写入当前构建配置的凭据存储，失败时返回 false
@@ -60,10 +84,9 @@ pub fn delete_secret(key: &str) -> bool {
 
     #[cfg(not(debug_assertions))]
     {
-        let removed = encrypted_secret_storage::delete(key);
-        // 旧 Keychain 里可能还留着迁移前的副本，一并清理
-        let _ = delete_keyring_secret(key);
-        removed
+        // 先完成一次性迁移，确保 Keychain 里不会残留一份删不掉、下次又被迁回来的旧副本
+        migrate_legacy_keychain_once();
+        encrypted_secret_storage::delete(key)
     }
 }
 
@@ -133,6 +156,20 @@ mod encrypted_secret_storage {
             path.push("secure");
             path
         }
+    }
+
+    fn legacy_keychain_marker_path() -> PathBuf {
+        store_dir().join("legacy-keychain-migrated")
+    }
+
+    #[cfg_attr(test, allow(dead_code))]
+    pub(super) fn legacy_keychain_migrated() -> bool {
+        legacy_keychain_marker_path().exists()
+    }
+
+    #[cfg_attr(test, allow(dead_code))]
+    pub(super) fn mark_legacy_keychain_migrated() {
+        let _ = crate::fsutil::atomic_write_private(legacy_keychain_marker_path(), b"1");
     }
 
     fn secret_path(key: &str) -> PathBuf {
@@ -338,6 +375,7 @@ mod encrypted_secret_storage {
         Ok((plain, legacy))
     }
 
+    #[cfg(test)]
     fn decode_blob(key: &str, blob: &[u8]) -> Result<(String, bool), &'static str> {
         decode_blob_with_identity(key, blob, machine_identity())
     }
