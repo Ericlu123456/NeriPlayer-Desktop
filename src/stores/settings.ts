@@ -3,6 +3,7 @@ import { ref, watch, type Ref } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { createLogger } from '@/utils/logger'
 import { normalizeDesktopLyricsStyle, type DesktopLyricsStyle } from '@/modules/desktopLyrics/style'
+import { normalizeShortcutBindings, type ShortcutBindings } from '@/modules/shortcuts/bindings'
 
 const log = createLogger('settings')
 
@@ -121,6 +122,10 @@ export interface AppSettings {
   equalizerPresetId: string
   equalizerBands: number[]
   desktopLyrics: DesktopLyricsStyle
+  /** 快捷键改键，只存与默认不同的项 */
+  shortcutBindings: ShortcutBindings
+  /** 系统级全局快捷键总开关 */
+  globalShortcutsEnabled: boolean
 }
 
 interface SettingsLoadResult {
@@ -252,6 +257,8 @@ const DEFAULT_SETTINGS: AppSettings = {
   equalizerPresetId: 'flat',
   equalizerBands: [0, 0, 0, 0, 0],
   desktopLyrics: normalizeDesktopLyricsStyle(null),
+  shortcutBindings: { local: {}, global: {} },
+  globalShortcutsEnabled: false,
 }
 
 const LEGACY_KEYS: Partial<Record<SettingKey, string>> = {
@@ -479,6 +486,7 @@ function normalizeSnapshot(input: unknown): AppSettings {
   result.equalizerBands = result.equalizerBands.slice(0, 5).map(value => clamp(Math.round(value), -1500, 1500))
   while (result.equalizerBands.length < 5) result.equalizerBands.push(0)
   result.desktopLyrics = normalizeDesktopLyricsStyle(result.desktopLyrics)
+  result.shortcutBindings = normalizeShortcutBindings(result.shortcutBindings)
   return result
 }
 
@@ -633,6 +641,8 @@ export const useSettingsStore = defineStore('settings', () => {
   const equalizerPresetId = ref(initial.equalizerPresetId)
   const equalizerBands = ref([...initial.equalizerBands])
   const desktopLyrics = ref<DesktopLyricsStyle>(initial.desktopLyrics)
+  const shortcutBindings = ref<ShortcutBindings>(initial.shortcutBindings)
+  const globalShortcutsEnabled = ref(initial.globalShortcutsEnabled)
 
   const settingRefs: SettingRefs = {
     darkMode, themeColor, locale, defaultScreen, closeToTray, showCoverBadge,
@@ -656,7 +666,7 @@ export const useSettingsStore = defineStore('settings', () => {
     downloadYoutubeQuality, downloadBiliQuality,
     ltAllowMemberControl, ltAutoPauseOnMemberChange, ltShareAudioLinks, volume, audioOutputDevice,
     playbackSpeed, loudnessGainMb, equalizerEnabled, equalizerPresetId,
-    equalizerBands, desktopLyrics,
+    equalizerBands, desktopLyrics, shortcutBindings, globalShortcutsEnabled,
   }
 
   const isHydrated = ref(false)
@@ -754,5 +764,6 @@ export const useSettingsStore = defineStore('settings', () => {
     downloadYoutubeQuality, downloadBiliQuality,
     ltAutoPauseOnMemberChange, ltShareAudioLinks, volume, audioOutputDevice, playbackSpeed,
     loudnessGainMb, equalizerEnabled, equalizerPresetId, equalizerBands, desktopLyrics,
+    shortcutBindings, globalShortcutsEnabled,
   }
 })

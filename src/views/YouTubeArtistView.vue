@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { filterAndRank, searchValue } from '@/modules/search/textMatcher'
 import { computed, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
@@ -39,8 +40,8 @@ const firstPlayableSection = computed(() => detail.value?.sections.find(section 
 function sectionKey(section: YouTubeArtistSection) { return `${section.title}:${section.moreEndpoint?.browseId || ''}:${section.moreEndpoint?.params || ''}` }
 function sectionItems(section: YouTubeArtistSection) { return sectionPages.value[sectionKey(section)]?.items || section.items }
 function filteredItems(section: YouTubeArtistSection) {
-  const search = query.value.trim().toLocaleLowerCase()
-  return sectionItems(section).filter(item => !search || `${item.title} ${item.subtitle} ${item.artist}`.toLocaleLowerCase().includes(search))
+  return filterAndRank(query.value, sectionItems(section), item =>
+    [searchValue(item.title, 0), searchValue(item.artist, 4), searchValue(item.subtitle, 6)])
 }
 function canLoadSection(section: YouTubeArtistSection) {
   const page = sectionPages.value[sectionKey(section)]

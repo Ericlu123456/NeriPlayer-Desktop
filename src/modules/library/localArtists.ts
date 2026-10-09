@@ -5,6 +5,7 @@
 
 import { invoke } from '@tauri-apps/api/core'
 import { normalizeTrack, type TrackInfo } from '@/stores/player'
+import { filterAndRank, searchValue } from '@/modules/search/textMatcher'
 
 export type LocalArtistSortMode = 'name' | 'song_count' | 'recent'
 
@@ -89,17 +90,12 @@ export function filterLocalArtists(
   artists: readonly LocalArtistSummary[],
   query: string,
 ): LocalArtistSummary[] {
-  const trimmed = query.trim().toLowerCase()
-  if (!trimmed) return [...artists]
-  return artists.filter(
-    (artist) =>
-      artist.name.toLowerCase().includes(trimmed) ||
-      artist.tracks.some(
-        (track) =>
-          track.title.toLowerCase().includes(trimmed) ||
-          (track.album ?? '').toLowerCase().includes(trimmed),
-      ),
-  )
+  // 歌手名命中排在前面，其次是旗下歌曲 / 专辑命中（支持拼音、首字母）
+  return filterAndRank(query, [...artists], artist => [
+    searchValue(artist.name, 0),
+    searchValue(artist.tracks.map(track => track.title), 8),
+    searchValue(artist.tracks.map(track => track.album ?? ''), 12),
+  ])
 }
 
 

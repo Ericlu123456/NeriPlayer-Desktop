@@ -4,6 +4,7 @@ import { setImmediate } from 'node:timers/promises'
 import ts from 'typescript'
 import * as Vue from 'vue'
 import { compileScript, parse } from 'vue/compiler-sfc'
+import { createRequire } from 'node:module'
 
 const { createRenderer, defineComponent, h, nextTick, reactive, ref } = Vue
 const renderer = createRenderer({
@@ -41,6 +42,11 @@ function song(id, name, artist = 'Artist', album = 'Album') {
 function album(id, name, year) {
   return { id, name, picUrl: '', publishTime: Date.UTC(year, 6, 1), size: 2 }
 }
+
+const matcher = {}
+new Function('require', 'exports', ts.transpileModule(await readFile(new URL('../src/modules/search/textMatcher.ts', import.meta.url), 'utf8'), {
+  compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+}).outputText)(createRequire(import.meta.url), matcher)
 const fixture = {
   songs: [
     ...Array.from({ length: 120 }, (_, index) => song(index + 1, `Song ${index + 1}`)),
@@ -58,6 +64,7 @@ async function mountArtist(data = fixture) {
   const route = reactive({ params: { id: '12' }, query: { name: 'Artist' } })
   const played = [], opened = [], calls = []
   const imports = {
+    ...matcher,
     useRoute: () => route,
     useRouter: () => ({ push: location => opened.push(location), back() {} }),
     useI18n: () => ({ t: key => key }),

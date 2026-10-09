@@ -75,7 +75,9 @@ import {
 } from '@/utils/storage'
 import { applyTheme, switchThemeWithRipple, type ThemeMode } from '@/utils/theme'
 import { THEME_COLORS, getSwatchColor, applyThemeColor, getSavedThemeColor, switchThemeColorWithRipple } from '@/utils/themeColor'
-import { shortcutDescriptors } from '@/modules/shortcuts/globalShortcuts'
+import ShortcutSettings from '@/components/settings/ShortcutSettings.vue'
+import { SETTINGS_SEARCH_INDEX } from '@/modules/settings/searchIndex'
+import { filterAndRank, searchValue } from '@/modules/search/textMatcher'
 import { useEscapeClose } from '@/composables/useEscapeClose'
 import { createLogger } from '@/utils/logger'
 
@@ -247,7 +249,126 @@ function onExpandAfterLeave(el: Element) {
 // 此时元素已占位但尚未淡入完成，不会产生可见的滚动跳动；
 // 若在旧面板离场期间恢复，scrollHeight 不足会导致 scrollTop 被截断
 function onPanelEnter() {
+  if (pendingSearchFocus) {
+    const target = pendingSearchFocus
+    pendingSearchFocus = null
+    void nextTick(() => focusSettingsItem(target.section, target.title))
+    return
+  }
   void restoreSettingsScrollPosition(activeSettingsSection.value)
+}
+
+// ---------- 设置搜索（对齐 Android 设置页搜索框）----------
+
+interface SettingsSearchResult {
+  key: string
+  section: SettingsSectionId
+  title: string
+  desc: string
+  keywords: string[]
+  isSection: boolean
+}
+
+/** 每个分区里需要展开的折叠分组，跳转到具体设置项前先全部展开 */
+const SECTION_COLLAPSE_KEYS: Partial<Record<SettingsSectionId, string[]>> = {
+  playback: ['playback'],
+  quality: ['quality'],
+  motion: ['effects'],
+  lyrics: ['lyrics'],
+  desktop_lyrics: ['desktop_lyrics'],
+  storage: ['storage'],
+  backup: ['backup'],
+  listen_together: ['listen_together'],
+  about: ['about'],
+}
+
+const settingsQuery = ref('')
+const settingsSearchInput = ref<HTMLInputElement | null>(null)
+let pendingSearchFocus: { section: SettingsSectionId; title: string } | null = null
+
+const settingsSearchResults = computed<SettingsSearchResult[]>(() => {
+  const query = settingsQuery.value.trim()
+  if (!query) return []
+  const navItems = settingsNavGroups.value.flatMap(group => group.items)
+  const sectionLabel = (id: string) => navItems.find(item => item.id === id)?.label ?? ''
+  const entries: SettingsSearchResult[] = [
+    ...navItems.map(item => ({
+      key: `section:${item.id}`, section: item.id, title: item.label, desc: item.description, keywords: [], isSection: true,
+    })),
+    ...SETTINGS_SEARCH_INDEX
+      .filter(entry => SETTINGS_SECTION_IDS.includes(entry.section as SettingsSectionId))
+      .map(entry => ({
+        key: `${entry.section}:${entry.title}`,
+        section: entry.section as SettingsSectionId,
+        title: t(entry.title),
+        desc: entry.desc ? t(entry.desc) : '',
+        keywords: entry.keywords ?? [],
+        isSection: false,
+      })),
+  ]
+  return filterAndRank(query, entries, entry => [
+    searchValue(entry.title, 0),
+    searchValue(entry.keywords, 4),
+    searchValue(sectionLabel(entry.section), 10),
+    searchValue(entry.desc, 14),
+  ]).slice(0, 50)
+})
+
+function sectionIcon(id: SettingsSectionId): string {
+  return settingsNavGroups.value.flatMap(group => group.items).find(item => item.id === id)?.icon ?? 'settings'
+}
+
+function sectionTitle(id: SettingsSectionId): string {
+  return settingsNavGroups.value.flatMap(group => group.items).find(item => item.id === id)?.label ?? ''
+}
+
+function openSettingsSearchResult(result: SettingsSearchResult | undefined) {
+  if (!result) return
+  settingsQuery.value = ''
+  const collapseKeys = SECTION_COLLAPSE_KEYS[result.section] ?? []
+  if (collapseKeys.length) {
+    expandedSections.value = new Set([...expandedSections.value, ...collapseKeys])
+    persistSettingsUiState()
+  }
+  if (result.isSection) {
+    selectSettingsSection(result.section)
+    return
+  }
+  if (result.section === activeSettingsSection.value) {
+    void nextTick(() => focusSettingsItem(result.section, result.title))
+    return
+  }
+  pendingSearchFocus = { section: result.section, title: result.title }
+  selectSettingsSection(result.section)
+}
+
+/// 找到标题文字一致的设置卡片，滚到可视区中间并闪一下
+function focusSettingsItem(section: SettingsSectionId, title: string, attempt = 0) {
+  const panel = settingsContentRef.value?.querySelector(`.settings-section-panel[data-section="${section}"]`)
+  const titleEl = [...(panel?.querySelectorAll<HTMLElement>('.setting-title') ?? [])]
+    .find(element => element.textContent?.trim() === title)
+  const card = titleEl?.closest<HTMLElement>('.setting-card')
+  if (!card) {
+    // 折叠分组的展开动画还没把内容插进来时稍后再找
+    if (attempt < 6) setTimeout(() => focusSettingsItem(section, title, attempt + 1), 80)
+    return
+  }
+  card.scrollIntoView({ block: 'center', behavior: 'smooth' })
+  card.classList.remove('search-highlight')
+  void card.offsetWidth
+  card.classList.add('search-highlight')
+  setTimeout(() => card.classList.remove('search-highlight'), 1800)
+}
+
+function onSettingsSearchKeydown(event: KeyboardEvent) {
+  if (event.key === 'Enter') {
+    event.preventDefault()
+    openSettingsSearchResult(settingsSearchResults.value[0])
+  } else if (event.key === 'Escape' && settingsQuery.value) {
+    event.preventDefault()
+    event.stopPropagation()
+    settingsQuery.value = ''
+  }
 }
 
 const presetColors = THEME_COLORS.map(c => ({
@@ -419,23 +540,31 @@ async function handleQualityChange(source: OnlineQualitySource, value: string) {
 
 type SettingsSectionId =
   | 'accounts'
-  | 'personalization'
+  | 'general'
+  | 'shortcuts'
+  | 'language'
   | 'playback'
-  | 'playback_sources'
+  | 'audio'
   | 'quality'
+  | 'playback_sources'
+  | 'appearance'
+  | 'now_playing'
+  | 'background'
   | 'motion'
   | 'lyrics'
-  | 'network'
+  | 'desktop_lyrics'
+  | 'downloads'
   | 'storage'
+  | 'network'
   | 'backup'
   | 'listen_together'
-  | 'language'
   | 'about'
 
 const SETTINGS_UI_STATE_KEY = 'neri:settings-ui-state'
 const SETTINGS_SECTION_IDS: SettingsSectionId[] = [
-  'accounts', 'playback', 'playback_sources', 'quality', 'storage', 'personalization', 'motion', 'lyrics', 'network',
-  'backup', 'listen_together', 'language', 'about',
+  'accounts', 'general', 'shortcuts', 'language', 'playback', 'audio', 'quality', 'playback_sources',
+  'appearance', 'now_playing', 'background', 'motion', 'lyrics', 'desktop_lyrics',
+  'downloads', 'storage', 'network', 'backup', 'listen_together', 'about',
 ]
 
 type SettingsUiState = {
@@ -459,10 +588,10 @@ const expandedSections = ref<Set<string>>(
   new Set(savedSettingsUiState.expandedSections || ['personal']),
 )
 const visitedSettingsSections = ref<Set<string>>(
-  new Set(savedSettingsUiState.visitedSections || ['personalization']),
+  new Set(savedSettingsUiState.visitedSections || ['appearance']),
 )
 const activeSettingsSection = ref<SettingsSectionId>(
-  savedSettingsUiState.activeSection || 'personalization',
+  savedSettingsUiState.activeSection || 'appearance',
 )
 const sectionScrollPositions = ref<Record<string, number>>(savedSettingsUiState.scrollPositions || {})
 const settingsRootRef = ref<HTMLElement | null>(null)
@@ -507,99 +636,64 @@ async function restoreSettingsScrollPosition(section: SettingsSectionId) {
   })
 }
 
-const settingsNavGroups = computed(() => [
+interface SettingsNavItem {
+  id: SettingsSectionId
+  label: string
+  description: string
+  icon: string
+}
+
+const settingsNavGroups = computed<{ items: SettingsNavItem[] }[]>(() => [
   {
     items: [
-      {
-        id: 'accounts' as SettingsSectionId,
-        label: t('settings.accounts'),
-        description: t('settings.nav_accounts_desc'),
-        icon: 'account_circle',
-      },
+      { id: 'accounts', label: t('settings.accounts'), description: t('settings.nav_accounts_desc'), icon: 'account_circle' },
     ],
   },
   {
     items: [
-      {
-        id: 'playback' as SettingsSectionId,
-        label: t('settings.playback'),
-        description: t('settings.nav_playback_desc'),
-        icon: 'play_circle',
-      },
-      {
-        id: 'quality' as SettingsSectionId,
-        label: t('settings.audio_quality'),
-        description: t('settings.audio_quality_desc'),
-        icon: 'high_quality',
-      },
-      {
-        id: 'playback_sources' as SettingsSectionId,
-        label: t('settings.playback_sources'),
-        description: t('settings.playback_sources_desc'),
-        icon: 'alt_route',
-      },
-      {
-        id: 'storage' as SettingsSectionId,
-        label: t('settings.storage'),
-        description: t('settings.nav_storage_desc'),
-        icon: 'storage',
-      },
+      { id: 'general', label: t('settings.general'), description: t('settings.nav_general_desc'), icon: 'settings' },
+      { id: 'shortcuts', label: t('shortcuts.title'), description: t('settings.nav_shortcuts_desc'), icon: 'keyboard' },
+      { id: 'language', label: t('settings.language'), description: t('settings.language_desc'), icon: 'translate' },
     ],
   },
   {
     items: [
-      {
-        id: 'personalization' as SettingsSectionId,
-        label: t('settings.personalization'),
-        description: t('settings.nav_personalization_desc'),
-        icon: 'tune',
-      },
-      {
-        id: 'motion' as SettingsSectionId,
-        label: t('settings.motion'),
-        description: t('settings.motion_desc'),
-        icon: 'bolt',
-      },
-      {
-        id: 'lyrics' as SettingsSectionId,
-        label: t('settings.lyrics'),
-        description: t('settings.nav_lyrics_desc'),
-        icon: 'lyrics',
-      },
-      {
-        id: 'network' as SettingsSectionId,
-        label: t('settings.network'),
-        description: t('settings.nav_network_desc'),
-        icon: 'router',
-      },
+      { id: 'playback', label: t('settings.playback'), description: t('settings.nav_playback_desc'), icon: 'play_circle' },
+      { id: 'audio', label: t('settings.audio_processing'), description: t('settings.nav_audio_desc'), icon: 'graphic_eq' },
+      { id: 'quality', label: t('settings.audio_quality'), description: t('settings.audio_quality_desc'), icon: 'high_quality' },
+      { id: 'playback_sources', label: t('settings.playback_sources'), description: t('settings.playback_sources_desc'), icon: 'alt_route' },
     ],
   },
   {
     items: [
-      {
-        id: 'backup' as SettingsSectionId,
-        label: t('settings.backup'),
-        description: t('settings.nav_backup_desc'),
-        icon: 'sync',
-      },
-      {
-        id: 'listen_together' as SettingsSectionId,
-        label: t('listen_together.title'),
-        description: t('settings.nav_listen_together_desc'),
-        icon: 'cloud',
-      },
-      {
-        id: 'language' as SettingsSectionId,
-        label: t('settings.language'),
-        description: t('settings.language_desc'),
-        icon: 'translate',
-      },
-      {
-        id: 'about' as SettingsSectionId,
-        label: t('settings.about'),
-        description: t('settings.about_desc'),
-        icon: 'info',
-      },
+      { id: 'appearance', label: t('settings.appearance'), description: t('settings.nav_appearance_desc'), icon: 'palette' },
+      { id: 'now_playing', label: t('settings.now_playing_section'), description: t('settings.nav_now_playing_desc'), icon: 'album' },
+      { id: 'background', label: t('settings.background_section'), description: t('settings.nav_background_desc'), icon: 'wallpaper' },
+      { id: 'motion', label: t('settings.motion'), description: t('settings.motion_desc'), icon: 'bolt' },
+    ],
+  },
+  {
+    items: [
+      { id: 'lyrics', label: t('settings.lyrics'), description: t('settings.nav_lyrics_desc'), icon: 'lyrics' },
+      { id: 'desktop_lyrics', label: t('desktop_lyrics.title'), description: t('settings.nav_desktop_lyrics_desc'), icon: 'subtitles' },
+    ],
+  },
+  {
+    items: [
+      { id: 'downloads', label: t('settings.downloads_section'), description: t('settings.nav_downloads_desc'), icon: 'download' },
+      { id: 'storage', label: t('settings.storage'), description: t('settings.nav_storage_desc'), icon: 'storage' },
+      { id: 'network', label: t('settings.network'), description: t('settings.nav_network_desc'), icon: 'router' },
+    ],
+  },
+  {
+    items: [
+      { id: 'backup', label: t('settings.backup'), description: t('settings.nav_backup_desc'), icon: 'sync' },
+      { id: 'listen_together', label: t('listen_together.title'), description: t('settings.nav_listen_together_desc'), icon: 'cloud' },
+    ],
+  },
+  {
+    items: [
+      { id: 'about', label: t('settings.about'), description: t('settings.about_desc'), icon: 'info' },
     ],
   },
 ])
@@ -615,17 +709,24 @@ function selectSettingsSection(id: SettingsSectionId) {
   if (!visitedSettingsSections.value.has(id)) {
     const defaults: Record<SettingsSectionId, string[]> = {
       accounts: [],
-      personalization: ['personal'],
+      general: [],
+      shortcuts: [],
+      language: [],
       playback: ['playback'],
-      playback_sources: [],
+      audio: [],
       quality: ['quality'],
+      playback_sources: [],
+      appearance: [],
+      now_playing: [],
+      background: [],
       motion: ['effects'],
       lyrics: ['lyrics'],
-      network: [],
+      desktop_lyrics: ['desktop_lyrics'],
+      downloads: [],
       storage: ['storage'],
+      network: [],
       backup: ['backup'],
       listen_together: ['listen_together'],
-      language: [],
       about: [],
     }
     expandedSections.value = new Set([...expandedSections.value, ...defaults[id]])
@@ -931,14 +1032,6 @@ async function handleIntlToggle(val: boolean) {
     intlChecking.value = false
   }
 }
-
-// 键盘快捷键说明（修饰键按平台自动切换 ⌘ / Ctrl）
-const keyboardShortcuts = computed(() =>
-  shortcutDescriptors().map((item) => ({
-    ...item,
-    label: t(`shortcuts.${item.id}`),
-  })),
-)
 
 // 封面样式选项
 const coverStyleOptions = computed(() => [
@@ -1293,7 +1386,48 @@ useEscapeClose(
     <div class="settings-layout">
       <aside class="settings-sidebar">
         <h1 class="page-title">{{ t('settings.title') }}</h1>
-        <nav class="settings-nav" :aria-label="t('settings.title')">
+        <label class="settings-search">
+          <span class="material-symbols-rounded" aria-hidden="true">search</span>
+          <input
+            ref="settingsSearchInput"
+            v-model="settingsQuery"
+            type="search"
+            :placeholder="t('settings.search_hint')"
+            :aria-label="t('settings.search_hint')"
+            @keydown="onSettingsSearchKeydown"
+          />
+          <button
+            v-if="settingsQuery"
+            type="button"
+            class="settings-search-clear"
+            :aria-label="t('common.clear')"
+            @click="settingsQuery = ''; settingsSearchInput?.focus()"
+          >
+            <span class="material-symbols-rounded">close</span>
+          </button>
+        </label>
+        <Transition name="fade" mode="out-in">
+        <div v-if="settingsQuery.trim()" key="search" class="settings-search-results settings-nav-group" role="listbox" :aria-label="t('settings.search_hint')">
+          <TransitionGroup name="settings-result">
+            <button
+              v-for="result in settingsSearchResults"
+              :key="result.key"
+              type="button"
+              role="option"
+              class="settings-nav-item settings-search-result"
+              @click="openSettingsSearchResult(result)"
+            >
+              <span class="settings-nav-icon material-symbols-rounded">{{ result.isSection ? sectionIcon(result.section) : 'tune' }}</span>
+              <span class="settings-nav-copy">
+                <strong>{{ result.title }}</strong>
+                <small>{{ result.isSection ? result.desc : sectionTitle(result.section) }}</small>
+              </span>
+              <span class="material-symbols-rounded settings-nav-arrow">chevron_right</span>
+            </button>
+          </TransitionGroup>
+          <p v-if="!settingsSearchResults.length" class="settings-search-empty">{{ t('settings.search_empty') }}</p>
+        </div>
+        <nav v-else key="nav" class="settings-nav" :aria-label="t('settings.title')">
           <div v-for="(group, groupIndex) in settingsNavGroups" :key="groupIndex" class="settings-nav-group">
             <button
               v-for="item in group.items"
@@ -1313,6 +1447,7 @@ useEscapeClose(
             </button>
           </div>
         </nav>
+        </Transition>
       </aside>
 
       <main class="settings-content">
@@ -1328,7 +1463,7 @@ useEscapeClose(
         <Transition name="fade" mode="out-in" @enter="onPanelEnter">
         <div :key="activeSettingsSection" class="settings-panels">
 
-        <div v-show="activeSettingsSection === 'accounts'" class="settings-section-panel">
+        <div v-show="activeSettingsSection === 'accounts'" class="settings-section-panel" data-section="accounts">
     <div class="section-label">
       <span class="material-symbols-rounded" style="font-size: 18px">account_circle</span>
       <span>{{ t('settings.accounts') }}</span>
@@ -1390,7 +1525,25 @@ useEscapeClose(
     </div>
         </div>
 
-        <div v-show="activeSettingsSection === 'personalization'" class="settings-section-panel">
+        <div v-show="activeSettingsSection === 'general'" class="settings-section-panel" data-section="general">
+      <div class="setting-card">
+        <div class="setting-icon-wrap"><span class="material-symbols-rounded">home</span></div>
+        <div class="setting-info">
+          <div class="setting-title">{{ t('settings.default_screen') }}</div>
+          <div class="setting-desc">{{ defaultScreenOptions.find(o => o.value === defaultScreen)?.label }}</div>
+        </div>
+        <div class="chip-row">
+          <button v-for="o in defaultScreenOptions" :key="o.value" class="m3-chip" :class="{ active: defaultScreen === o.value }" @click="defaultScreen = o.value as any">{{ o.label }}</button>
+        </div>
+      </div>
+      <div class="setting-card">
+        <div class="setting-icon-wrap"><span class="material-symbols-rounded">tab_inactive</span></div>
+        <div class="setting-info">
+          <div class="setting-title">{{ t('settings.close_to_tray') }}</div>
+          <div class="setting-desc">{{ t('settings.close_to_tray_desc') }}</div>
+        </div>
+        <label class="m3-switch"><input type="checkbox" v-model="closeToTray" /><span class="track"><span class="thumb"><span v-if="closeToTray" class="material-symbols-rounded" style="font-size: 14px">check</span></span></span></label>
+      </div>
 
     <!-- YouTube 国际化 -->
     <div class="setting-card">
@@ -1420,7 +1573,10 @@ useEscapeClose(
       <label class="m3-switch"><input type="checkbox" v-model="exploreSearchHistoryEnabled" /><span class="track"><span class="thumb"><span v-if="exploreSearchHistoryEnabled" class="material-symbols-rounded" style="font-size: 14px">check</span></span></span></label>
     </div>
 
+        </div>
+
     <!-- 外观 -->
+        <div v-show="activeSettingsSection === 'appearance'" class="settings-section-panel" data-section="appearance">
     <div class="section-label">
       <span class="material-symbols-rounded" style="font-size: 18px">palette</span>
       <span>{{ t('settings.appearance') }}</span>
@@ -1492,31 +1648,19 @@ useEscapeClose(
       </div>
     </div>
 
-    <!-- 个性化 -->
-    <div class="section-label clickable" @click="toggleSection('personal')">
-      <span class="material-symbols-rounded" style="font-size: 18px">tune</span>
-      <span>{{ t('settings.personalization') }}</span>
-      <span class="material-symbols-rounded section-arrow" :class="{ expanded: isExpanded('personal') }">expand_more</span>
-    </div>
+        </div>
 
-    <Transition @enter="onExpandEnter" @after-enter="onExpandAfterEnter" @leave="onExpandLeave" @after-leave="onExpandAfterLeave"><div v-if="isExpanded('personal')">
+    <!-- 播放页 -->
+        <div v-show="activeSettingsSection === 'now_playing'" class="settings-section-panel" data-section="now_playing">
+      <!-- 封面样式 -->
       <div class="setting-card">
-        <div class="setting-icon-wrap"><span class="material-symbols-rounded">home</span></div>
+        <div class="setting-icon-wrap"><span class="material-symbols-rounded">album</span></div>
         <div class="setting-info">
-          <div class="setting-title">{{ t('settings.default_screen') }}</div>
-          <div class="setting-desc">{{ defaultScreenOptions.find(o => o.value === defaultScreen)?.label }}</div>
+          <div class="setting-title">{{ t('settings.cover_style') }}</div>
         </div>
         <div class="chip-row">
-          <button v-for="o in defaultScreenOptions" :key="o.value" class="m3-chip" :class="{ active: defaultScreen === o.value }" @click="defaultScreen = o.value as any">{{ o.label }}</button>
+          <button v-for="o in coverStyleOptions" :key="o.value" class="m3-chip" :class="{ active: coverStyle === o.value }" @click="coverStyle = o.value as any">{{ o.label }}</button>
         </div>
-      </div>
-      <div class="setting-card">
-        <div class="setting-icon-wrap"><span class="material-symbols-rounded">tab_inactive</span></div>
-        <div class="setting-info">
-          <div class="setting-title">{{ t('settings.close_to_tray') }}</div>
-          <div class="setting-desc">{{ t('settings.close_to_tray_desc') }}</div>
-        </div>
-        <label class="m3-switch"><input type="checkbox" v-model="closeToTray" /><span class="track"><span class="thumb"><span v-if="closeToTray" class="material-symbols-rounded" style="font-size: 14px">check</span></span></span></label>
       </div>
 
       <div class="setting-card">
@@ -1535,22 +1679,6 @@ useEscapeClose(
           <div class="setting-desc">{{ t('settings.np_title_desc') }}</div>
         </div>
         <label class="m3-switch"><input type="checkbox" v-model="showNowPlayingTitle" /><span class="track"><span class="thumb"><span v-if="showNowPlayingTitle" class="material-symbols-rounded" style="font-size: 14px">check</span></span></span></label>
-      </div>
-
-      <div class="setting-card shortcut-card">
-        <div class="setting-icon-wrap"><span class="material-symbols-rounded">keyboard</span></div>
-        <div class="setting-info">
-          <div class="setting-title">{{ t('shortcuts.title') }}</div>
-          <div class="setting-desc">{{ t('shortcuts.desc') }}</div>
-          <ul class="shortcut-list">
-            <li v-for="item in keyboardShortcuts" :key="item.id" class="shortcut-row">
-              <span class="shortcut-label">{{ item.label }}</span>
-              <span class="shortcut-keys">
-                <kbd v-for="key in item.keys" :key="key">{{ key }}</kbd>
-              </span>
-            </li>
-          </ul>
-        </div>
       </div>
 
       <div class="setting-card">
@@ -1580,36 +1708,10 @@ useEscapeClose(
         <label class="m3-switch"><input type="checkbox" v-model="settings[option.key]" /><span class="track"><span class="thumb"><span v-if="settings[option.key]" class="material-symbols-rounded" style="font-size: 14px">check</span></span></span></label>
       </div>
 
-      <div class="setting-card">
-        <div class="setting-icon-wrap"><span class="material-symbols-rounded">format_size</span></div>
-        <div class="setting-info">
-          <div class="setting-title">{{ t('settings.lyric_font_size') }}</div>
-          <EditableRangeValue
-            v-model="lyricFontScale"
-            class="setting-desc"
-            :min="LYRIC_FONT_SCALE_MIN"
-            :max="LYRIC_FONT_SCALE_MAX"
-            :step="LYRIC_FONT_SCALE_STEP"
-            :display-value="`${Math.round(lyricFontScale * 100)}%`"
-            :input-scale="100"
-            input-suffix="%"
-            :aria-label="t('settings.lyric_font_size')"
-          />
         </div>
-        <input type="range" class="m3-slider" v-model.number="lyricFontScale" :min="LYRIC_FONT_SCALE_MIN" :max="LYRIC_FONT_SCALE_MAX" :step="LYRIC_FONT_SCALE_STEP" />
-      </div>
 
-      <!-- 封面样式 -->
-      <div class="setting-card">
-        <div class="setting-icon-wrap"><span class="material-symbols-rounded">album</span></div>
-        <div class="setting-info">
-          <div class="setting-title">{{ t('settings.cover_style') }}</div>
-        </div>
-        <div class="chip-row">
-          <button v-for="o in coverStyleOptions" :key="o.value" class="m3-chip" :class="{ active: coverStyle === o.value }" @click="coverStyle = o.value as any">{{ o.label }}</button>
-        </div>
-      </div>
-
+    <!-- 背景 -->
+        <div v-show="activeSettingsSection === 'background'" class="settings-section-panel" data-section="background">
       <!-- 自定义背景图 -->
       <div class="setting-card">
         <div class="setting-icon-wrap"><span class="material-symbols-rounded">wallpaper</span></div>
@@ -1701,11 +1803,15 @@ useEscapeClose(
             :min="ENHANCED_BLUR_RADIUS_MIN" :max="ENHANCED_BLUR_RADIUS_MAX" :step="ENHANCED_BLUR_RADIUS_STEP" />
         </div>
       </template>
-    </div></Transition>
+        </div>
+
+    <!-- 快捷键 -->
+        <div v-show="activeSettingsSection === 'shortcuts'" class="settings-section-panel" data-section="shortcuts">
+          <ShortcutSettings />
         </div>
 
     <!-- 播放 -->
-        <div v-show="activeSettingsSection === 'playback'" class="settings-section-panel">
+        <div v-show="activeSettingsSection === 'audio'" class="settings-section-panel" data-section="audio">
     <div class="setting-card setting-card--select">
       <div class="setting-icon-wrap"><span class="material-symbols-rounded">speaker</span></div>
       <div class="setting-info">
@@ -1716,12 +1822,6 @@ useEscapeClose(
         :model-value="audioOutputDevice" :options="audioOutputOptions" :label="t('settings.audio_output')"
         :disabled="audioOutputSwitching" @open="loadAudioOutputDevices" @update:model-value="changeAudioOutputDevice" />
     </div>
-    <div class="section-label clickable" @click="toggleSection('playback')">
-      <span class="material-symbols-rounded" style="font-size: 18px">play_circle</span>
-      <span>{{ t('settings.playback') }}</span>
-      <span class="material-symbols-rounded section-arrow" :class="{ expanded: isExpanded('playback') }">expand_more</span>
-    </div>
-
     <div class="setting-card">
       <div class="setting-icon-wrap"><span class="material-symbols-rounded">graphic_eq</span></div>
       <div class="setting-info">
@@ -1731,7 +1831,6 @@ useEscapeClose(
       <label class="m3-switch"><input type="checkbox" v-model="normalizeVolume" /><span class="track"><span class="thumb"><span v-if="normalizeVolume" class="material-symbols-rounded" style="font-size: 14px">check</span></span></span></label>
     </div>
 
-    <Transition @enter="onExpandEnter" @after-enter="onExpandAfterEnter" @leave="onExpandLeave" @after-leave="onExpandAfterLeave"><div v-if="isExpanded('playback')">
       <div class="setting-card">
         <div class="setting-icon-wrap"><span class="material-symbols-rounded">balance</span></div>
         <div class="setting-info">
@@ -1758,6 +1857,17 @@ useEscapeClose(
         </div>
         <label class="m3-switch"><input type="checkbox" v-model="multichannelDrc" /><span class="track"><span class="thumb"><span v-if="multichannelDrc" class="material-symbols-rounded" style="font-size: 14px">check</span></span></span></label>
       </div>
+        </div>
+
+    <!-- 播放 -->
+        <div v-show="activeSettingsSection === 'playback'" class="settings-section-panel" data-section="playback">
+    <div class="section-label clickable" @click="toggleSection('playback')">
+      <span class="material-symbols-rounded" style="font-size: 18px">play_circle</span>
+      <span>{{ t('settings.playback') }}</span>
+      <span class="material-symbols-rounded section-arrow" :class="{ expanded: isExpanded('playback') }">expand_more</span>
+    </div>
+
+    <Transition @enter="onExpandEnter" @after-enter="onExpandAfterEnter" @leave="onExpandLeave" @after-leave="onExpandAfterLeave"><div v-if="isExpanded('playback')">
       <div class="setting-card">
         <div class="setting-icon-wrap"><span class="material-symbols-rounded">volume_up</span></div>
         <div class="setting-info">
@@ -1876,7 +1986,7 @@ useEscapeClose(
         </div>
 
     <!-- 网络 -->
-        <div v-show="activeSettingsSection === 'network'" class="settings-section-panel">
+        <div v-show="activeSettingsSection === 'network'" class="settings-section-panel" data-section="network">
     <div class="section-label">
       <span class="material-symbols-rounded" style="font-size: 18px">wifi</span>
       <span>{{ t('settings.network') }}</span>
@@ -1896,7 +2006,7 @@ useEscapeClose(
         </div>
 
     <!-- 一起听 -->
-        <div v-show="activeSettingsSection === 'listen_together'" class="settings-section-panel">
+        <div v-show="activeSettingsSection === 'listen_together'" class="settings-section-panel" data-section="listen_together">
     <div class="section-label clickable" @click="toggleSection('listen_together')">
       <span class="material-symbols-rounded" style="font-size: 18px">group</span>
       <span>{{ t('listen_together.title') }}</span>
@@ -1999,7 +2109,7 @@ useEscapeClose(
         </div>
 
     <!-- 下载管理 -->
-        <div v-show="activeSettingsSection === 'storage'" class="settings-section-panel">
+        <div v-show="activeSettingsSection === 'downloads'" class="settings-section-panel" data-section="downloads">
     <div class="section-label">
       <span class="material-symbols-rounded" style="font-size: 18px">download</span>
       <span>{{ t('settings.download_manage') }}</span>
@@ -2056,15 +2166,122 @@ useEscapeClose(
       </div>
       <span class="material-symbols-rounded" style="font-size: 20px; opacity: 0.3">chevron_right</span>
     </div>
+
+    <div class="section-label">
+      <span class="material-symbols-rounded" style="font-size: 18px">tune</span>
+      <span>{{ t('settings.download_settings') }}</span>
+    </div>
+      <div class="setting-card">
+        <div class="setting-icon-wrap"><span class="material-symbols-rounded">downloading</span></div>
+        <div class="setting-info">
+          <div class="setting-title">{{ t('settings.download_parallelism') }}</div>
+          <div class="setting-desc">{{ t('settings.download_parallelism_desc') }}</div>
+          <EditableRangeValue
+            v-model="downloadParallelism"
+            class="setting-desc"
+            :min="MIN_DOWNLOAD_PARALLELISM"
+            :max="MAX_DOWNLOAD_PARALLELISM"
+            :step="1"
+            :display-value="t('settings.download_parallelism_value', { count: downloadParallelism })"
+            :aria-label="t('settings.download_parallelism')"
+          />
+        </div>
+        <input v-model.number="downloadParallelism" type="range" class="m3-slider" :min="MIN_DOWNLOAD_PARALLELISM" :max="MAX_DOWNLOAD_PARALLELISM" step="1" :aria-label="t('settings.download_parallelism')" />
+      </div>
+
+      <div class="setting-card">
+        <div class="setting-icon-wrap"><span class="material-symbols-rounded">audio_file</span></div>
+        <div class="setting-info">
+          <div class="setting-title">{{ t('settings.download_metadata') }}</div>
+          <div class="setting-desc">{{ t('settings.download_metadata_desc') }}</div>
+        </div>
+        <label class="m3-switch"><input type="checkbox" v-model="downloadAutoFillMetadata" /><span class="track"><span class="thumb"><span v-if="downloadAutoFillMetadata" class="material-symbols-rounded" style="font-size: 14px">check</span></span></span></label>
+      </div>
+
+      <div class="setting-card sub-card">
+        <div class="setting-icon-wrap"><span class="material-symbols-rounded">lyrics</span></div>
+        <div class="setting-info">
+          <div class="setting-title">{{ t('settings.download_embed_lyrics') }}</div>
+          <div class="setting-desc">{{ t('settings.download_embed_lyrics_desc') }}</div>
+        </div>
+        <label class="m3-switch"><input type="checkbox" v-model="downloadEmbedLyrics" :disabled="!downloadAutoFillMetadata" /><span class="track"><span class="thumb"><span v-if="downloadEmbedLyrics" class="material-symbols-rounded" style="font-size: 14px">check</span></span></span></label>
+      </div>
+
+      <div class="setting-card">
+        <div class="setting-icon-wrap"><span class="material-symbols-rounded">high_quality</span></div>
+        <div class="setting-info">
+          <div class="setting-title">{{ t('settings.download_follow_playback_quality') }}</div>
+          <div class="setting-desc">{{ t('settings.download_follow_playback_quality_desc') }}</div>
+        </div>
+        <label class="m3-switch"><input type="checkbox" v-model="downloadFollowPlaybackQuality" /><span class="track"><span class="thumb"><span v-if="downloadFollowPlaybackQuality" class="material-symbols-rounded" style="font-size: 14px">check</span></span></span></label>
+      </div>
+
+      <template v-if="!downloadFollowPlaybackQuality">
+        <div class="setting-card sub-card">
+          <div class="setting-info"><div class="setting-title">{{ t('settings.netease_quality') }}</div></div>
+          <CustomSelect v-model="downloadNeteaseQuality" :options="downloadNeteaseQualityOptions" :label="t('settings.netease_quality')" />
+        </div>
+        <div class="setting-card sub-card">
+          <div class="setting-info"><div class="setting-title">{{ t('settings.youtube_quality') }}</div></div>
+          <CustomSelect v-model="downloadYoutubeQuality" :options="youtubeQualityOptions" :label="t('settings.youtube_quality')" />
+        </div>
+        <div class="setting-card sub-card">
+          <div class="setting-info"><div class="setting-title">{{ t('settings.bili_quality') }}</div></div>
+          <CustomSelect v-model="downloadBiliQuality" :options="biliQualityOptions" :label="t('settings.bili_quality')" />
+        </div>
+      </template>
+
+      <div class="setting-card" style="cursor: pointer" @click="openDownloadTemplateDialog">
+        <div class="setting-icon-wrap"><span class="material-symbols-rounded">text_fields</span></div>
+        <div class="setting-info">
+          <div class="setting-title">{{ t('settings.download_format') }}</div>
+          <div class="setting-desc">{{ downloadNameTemplate }}</div>
+        </div>
+        <span class="material-symbols-rounded" style="font-size: 20px; opacity: 0.3">edit</span>
+      </div>
+
+      <div class="setting-card">
+        <div class="setting-icon-wrap"><span class="material-symbols-rounded">folder</span></div>
+        <div class="setting-info">
+          <div class="setting-title">{{ t('settings.download_dir') }}</div>
+          <div class="setting-desc" style="word-break: break-all">{{ displayDownloadDir }}</div>
+          <div class="setting-desc">{{ t('settings.download_dir_desc') }}</div>
+        </div>
+        <div class="chip-row">
+          <button class="m3-chip sm" :disabled="activeDownloadCount > 0" @click="selectDownloadDir">{{ t('settings.download_dir_select') }}</button>
+          <button v-if="downloadDir" class="m3-chip sm" :disabled="activeDownloadCount > 0" @click="resetDownloadDir">{{ t('settings.download_dir_reset') }}</button>
+        </div>
+      </div>
+
         </div>
 
     <!-- 歌词 -->
-        <div v-show="activeSettingsSection === 'lyrics'" class="settings-section-panel">
+        <div v-show="activeSettingsSection === 'lyrics'" class="settings-section-panel" data-section="lyrics">
     <div class="section-label clickable" @click="toggleSection('lyrics')">
       <span class="material-symbols-rounded" style="font-size: 18px">lyrics</span>
       <span>{{ t('settings.lyrics') }}</span>
       <span class="material-symbols-rounded section-arrow" :class="{ expanded: isExpanded('lyrics') }">expand_more</span>
     </div>
+
+      <div class="setting-card">
+        <div class="setting-icon-wrap"><span class="material-symbols-rounded">format_size</span></div>
+        <div class="setting-info">
+          <div class="setting-title">{{ t('settings.lyric_font_size') }}</div>
+          <EditableRangeValue
+            v-model="lyricFontScale"
+            class="setting-desc"
+            :min="LYRIC_FONT_SCALE_MIN"
+            :max="LYRIC_FONT_SCALE_MAX"
+            :step="LYRIC_FONT_SCALE_STEP"
+            :display-value="`${Math.round(lyricFontScale * 100)}%`"
+            :input-scale="100"
+            input-suffix="%"
+            :aria-label="t('settings.lyric_font_size')"
+          />
+        </div>
+        <input type="range" class="m3-slider" v-model.number="lyricFontScale" :min="LYRIC_FONT_SCALE_MIN" :max="LYRIC_FONT_SCALE_MAX" :step="LYRIC_FONT_SCALE_STEP" />
+      </div>
+
 
     <div class="setting-card">
       <div class="setting-icon-wrap"><span class="material-symbols-rounded">translate</span></div>
@@ -2171,7 +2388,10 @@ useEscapeClose(
       </div>
     </div></Transition>
 
+        </div>
+
     <!-- 桌面歌词 -->
+        <div v-show="activeSettingsSection === 'desktop_lyrics'" class="settings-section-panel" data-section="desktop_lyrics">
     <div id="settings-desktop-lyrics" class="section-label clickable" @click="toggleSection('desktop_lyrics')">
       <span class="material-symbols-rounded" style="font-size: 18px">subtitles</span>
       <span>{{ t('desktop_lyrics.title') }}</span>
@@ -2407,7 +2627,7 @@ useEscapeClose(
         </div>
 
     <!-- 动效 & 视觉 -->
-        <div v-show="activeSettingsSection === 'motion'" class="settings-section-panel">
+        <div v-show="activeSettingsSection === 'motion'" class="settings-section-panel" data-section="motion">
     <div class="section-label clickable" @click="toggleSection('effects')">
       <span class="material-symbols-rounded" style="font-size: 18px">auto_awesome</span>
       <span>{{ t('settings.effects') }}</span>
@@ -2491,7 +2711,7 @@ useEscapeClose(
         </div>
 
     <!-- 播放源 -->
-        <div v-show="activeSettingsSection === 'playback_sources'" class="settings-section-panel">
+        <div v-show="activeSettingsSection === 'playback_sources'" class="settings-section-panel" data-section="playback_sources">
     <div class="section-label">
       <span class="material-symbols-rounded" style="font-size: 18px">alt_route</span>
       <span>{{ t('settings.playback_sources') }}</span>
@@ -2534,7 +2754,7 @@ useEscapeClose(
         </div>
 
     <!-- 音质 -->
-        <div v-show="activeSettingsSection === 'quality'" class="settings-section-panel">
+        <div v-show="activeSettingsSection === 'quality'" class="settings-section-panel" data-section="quality">
     <div class="section-label clickable" @click="toggleSection('quality')">
       <span class="material-symbols-rounded" style="font-size: 18px">headphones</span>
       <span>{{ t('settings.audio_quality') }}</span>
@@ -2575,7 +2795,7 @@ useEscapeClose(
         </div>
 
     <!-- 存储 & 缓存 -->
-        <div v-show="activeSettingsSection === 'storage'" class="settings-section-panel">
+        <div v-show="activeSettingsSection === 'storage'" class="settings-section-panel" data-section="storage">
     <div class="section-label clickable" @click="toggleSection('storage')">
       <span class="material-symbols-rounded" style="font-size: 18px">folder</span>
       <span>{{ t('settings.storage') }}</span>
@@ -2606,88 +2826,6 @@ useEscapeClose(
           :max="MAX_MEDIA_CACHE_SIZE_MB"
           step="256"
         />
-      </div>
-
-      <div class="setting-card">
-        <div class="setting-icon-wrap"><span class="material-symbols-rounded">downloading</span></div>
-        <div class="setting-info">
-          <div class="setting-title">{{ t('settings.download_parallelism') }}</div>
-          <div class="setting-desc">{{ t('settings.download_parallelism_desc') }}</div>
-          <EditableRangeValue
-            v-model="downloadParallelism"
-            class="setting-desc"
-            :min="MIN_DOWNLOAD_PARALLELISM"
-            :max="MAX_DOWNLOAD_PARALLELISM"
-            :step="1"
-            :display-value="t('settings.download_parallelism_value', { count: downloadParallelism })"
-            :aria-label="t('settings.download_parallelism')"
-          />
-        </div>
-        <input v-model.number="downloadParallelism" type="range" class="m3-slider" :min="MIN_DOWNLOAD_PARALLELISM" :max="MAX_DOWNLOAD_PARALLELISM" step="1" :aria-label="t('settings.download_parallelism')" />
-      </div>
-
-      <div class="setting-card">
-        <div class="setting-icon-wrap"><span class="material-symbols-rounded">audio_file</span></div>
-        <div class="setting-info">
-          <div class="setting-title">{{ t('settings.download_metadata') }}</div>
-          <div class="setting-desc">{{ t('settings.download_metadata_desc') }}</div>
-        </div>
-        <label class="m3-switch"><input type="checkbox" v-model="downloadAutoFillMetadata" /><span class="track"><span class="thumb"><span v-if="downloadAutoFillMetadata" class="material-symbols-rounded" style="font-size: 14px">check</span></span></span></label>
-      </div>
-
-      <div class="setting-card sub-card">
-        <div class="setting-icon-wrap"><span class="material-symbols-rounded">lyrics</span></div>
-        <div class="setting-info">
-          <div class="setting-title">{{ t('settings.download_embed_lyrics') }}</div>
-          <div class="setting-desc">{{ t('settings.download_embed_lyrics_desc') }}</div>
-        </div>
-        <label class="m3-switch"><input type="checkbox" v-model="downloadEmbedLyrics" :disabled="!downloadAutoFillMetadata" /><span class="track"><span class="thumb"><span v-if="downloadEmbedLyrics" class="material-symbols-rounded" style="font-size: 14px">check</span></span></span></label>
-      </div>
-
-      <div class="setting-card">
-        <div class="setting-icon-wrap"><span class="material-symbols-rounded">high_quality</span></div>
-        <div class="setting-info">
-          <div class="setting-title">{{ t('settings.download_follow_playback_quality') }}</div>
-          <div class="setting-desc">{{ t('settings.download_follow_playback_quality_desc') }}</div>
-        </div>
-        <label class="m3-switch"><input type="checkbox" v-model="downloadFollowPlaybackQuality" /><span class="track"><span class="thumb"><span v-if="downloadFollowPlaybackQuality" class="material-symbols-rounded" style="font-size: 14px">check</span></span></span></label>
-      </div>
-
-      <template v-if="!downloadFollowPlaybackQuality">
-        <div class="setting-card sub-card">
-          <div class="setting-info"><div class="setting-title">{{ t('settings.netease_quality') }}</div></div>
-          <CustomSelect v-model="downloadNeteaseQuality" :options="downloadNeteaseQualityOptions" :label="t('settings.netease_quality')" />
-        </div>
-        <div class="setting-card sub-card">
-          <div class="setting-info"><div class="setting-title">{{ t('settings.youtube_quality') }}</div></div>
-          <CustomSelect v-model="downloadYoutubeQuality" :options="youtubeQualityOptions" :label="t('settings.youtube_quality')" />
-        </div>
-        <div class="setting-card sub-card">
-          <div class="setting-info"><div class="setting-title">{{ t('settings.bili_quality') }}</div></div>
-          <CustomSelect v-model="downloadBiliQuality" :options="biliQualityOptions" :label="t('settings.bili_quality')" />
-        </div>
-      </template>
-
-      <div class="setting-card" style="cursor: pointer" @click="openDownloadTemplateDialog">
-        <div class="setting-icon-wrap"><span class="material-symbols-rounded">text_fields</span></div>
-        <div class="setting-info">
-          <div class="setting-title">{{ t('settings.download_format') }}</div>
-          <div class="setting-desc">{{ downloadNameTemplate }}</div>
-        </div>
-        <span class="material-symbols-rounded" style="font-size: 20px; opacity: 0.3">edit</span>
-      </div>
-
-      <div class="setting-card">
-        <div class="setting-icon-wrap"><span class="material-symbols-rounded">folder</span></div>
-        <div class="setting-info">
-          <div class="setting-title">{{ t('settings.download_dir') }}</div>
-          <div class="setting-desc" style="word-break: break-all">{{ displayDownloadDir }}</div>
-          <div class="setting-desc">{{ t('settings.download_dir_desc') }}</div>
-        </div>
-        <div class="chip-row">
-          <button class="m3-chip sm" :disabled="activeDownloadCount > 0" @click="selectDownloadDir">{{ t('settings.download_dir_select') }}</button>
-          <button v-if="downloadDir" class="m3-chip sm" :disabled="activeDownloadCount > 0" @click="resetDownloadDir">{{ t('settings.download_dir_reset') }}</button>
-        </div>
       </div>
 
       <div class="setting-card" style="cursor: pointer" @click="openStorageManagement">
@@ -2736,7 +2874,7 @@ useEscapeClose(
         </div>
 
     <!-- 备份 & 恢复 -->
-        <div v-show="activeSettingsSection === 'backup'" class="settings-section-panel">
+        <div v-show="activeSettingsSection === 'backup'" class="settings-section-panel" data-section="backup">
     <div class="section-label clickable" @click="toggleSection('backup')">
       <span class="material-symbols-rounded" style="font-size: 18px">cloud_sync</span>
       <span>{{ t('settings.backup') }}</span>
@@ -2898,7 +3036,7 @@ useEscapeClose(
         </div>
 
     <!-- 语言 -->
-        <div v-show="activeSettingsSection === 'language'" class="settings-section-panel">
+        <div v-show="activeSettingsSection === 'language'" class="settings-section-panel" data-section="language">
     <div class="section-label">
       <span class="material-symbols-rounded" style="font-size: 18px">language</span>
       <span>{{ t('settings.language') }}</span>
@@ -2917,7 +3055,7 @@ useEscapeClose(
         </div>
 
     <!-- 关于 -->
-        <div v-show="activeSettingsSection === 'about'" class="settings-section-panel">
+        <div v-show="activeSettingsSection === 'about'" class="settings-section-panel" data-section="about">
     <div class="section-label">
       <span class="material-symbols-rounded" style="font-size: 18px">info</span>
       <span>{{ t('settings.about') }}</span>
@@ -3326,6 +3464,83 @@ useEscapeClose(
   background: color-mix(in srgb, var(--md-surface-container) 78%, transparent);
 }
 
+.settings-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 42px;
+  margin: -12px 4px 12px 0;
+  padding: 0 6px 0 12px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--md-surface-container-high) 82%, transparent);
+  color: var(--md-on-surface-variant);
+  transition: border-color 160ms var(--ease-standard), background 160ms var(--ease-standard);
+
+  &:focus-within {
+    border-color: var(--md-primary);
+    background: var(--md-surface-container-high);
+  }
+
+  > .material-symbols-rounded { font-size: 20px; }
+
+  input {
+    flex: 1;
+    min-width: 0;
+    border: 0;
+    outline: none;
+    background: transparent;
+    color: var(--md-on-surface);
+    font: inherit;
+    font-size: 14px;
+    &::placeholder { color: var(--md-on-surface-variant); }
+    &::-webkit-search-cancel-button { display: none; }
+  }
+}
+
+.settings-search-clear {
+  width: 30px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  color: var(--md-on-surface-variant);
+  .material-symbols-rounded { font-size: 18px; }
+  &:hover { background: var(--md-surface-container-highest); color: var(--md-on-surface); }
+}
+
+.settings-search-results {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  margin-right: 4px;
+  scrollbar-width: none;
+  &::-webkit-scrollbar { display: none; }
+}
+
+.settings-search-result { min-height: 54px; }
+
+.settings-search-empty {
+  padding: 24px 12px;
+  text-align: center;
+  font-size: 13px;
+  color: var(--md-on-surface-variant);
+}
+
+.settings-result-enter-active { transition: opacity 180ms var(--ease-standard), transform 220ms var(--ease-emphasized-decel); }
+.settings-result-enter-from { opacity: 0; transform: translateY(6px); }
+.settings-result-move { transition: transform 220ms var(--ease-emphasized-decel); }
+
+.setting-card.search-highlight {
+  animation: settings-search-flash 1.6s var(--ease-standard);
+}
+
+@keyframes settings-search-flash {
+  0%, 100% { box-shadow: 0 0 0 0 transparent; }
+  15%, 55% { box-shadow: 0 0 0 2px var(--md-primary), 0 0 24px color-mix(in srgb, var(--md-primary) 30%, transparent); }
+}
+
 .settings-nav-item {
   width: 100%;
   min-height: 60px;
@@ -3582,7 +3797,6 @@ useEscapeClose(
   min-height: 61px;
   margin: 0 0 24px;
 }
-
 .section-label {
   display: flex;
   align-items: center;

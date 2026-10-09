@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { filterAndRank, trackSearchTokens } from '@/modules/search/textMatcher'
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
@@ -138,15 +139,8 @@ function scheduleDragGlassActivation() {
   })
 }
 
-const filteredTracks = computed(() => {
-  if (!searchQuery.value) return tracks.value
-  const q = searchQuery.value.toLowerCase()
-  return tracks.value.filter(t =>
-    t.title.toLowerCase().includes(q)
-    || t.artist.toLowerCase().includes(q)
-    || displayAlbum(t.album || '').toLowerCase().includes(q)
-  )
-})
+const filteredTracks = computed(() => filterAndRank(searchQuery.value, tracks.value, track =>
+  trackSearchTokens({ ...track, album: displayAlbum(track.album || '') })))
 
 // 大歌单窗口渲染：首屏只画一批，滚动触底再扩，避免 800+ DOM 卡死
 const RENDER_CHUNK = 100

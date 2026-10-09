@@ -6,8 +6,13 @@ const source = await readFile(new URL('../src/modules/library/favoriteArtists.ts
 const compiled = ts.transpileModule(source, {
   compilerOptions: { module: ts.ModuleKind.ES2022, target: ts.ScriptTarget.ES2022 },
 }).outputText
+const matcherSource = await readFile(new URL('../src/modules/search/textMatcher.ts', import.meta.url), 'utf8')
+const matcherModule = ts.transpileModule(matcherSource, {
+  compilerOptions: { module: ts.ModuleKind.ES2022, target: ts.ScriptTarget.ES2022 },
+}).outputText.replace(`'pinyin-pro'`, `'${import.meta.resolve('pinyin-pro')}'`)
+const matcherUrl = `data:text/javascript;base64,${Buffer.from(matcherModule).toString('base64')}`
 const { parseFavoritePlaylists, isArtistFavoriteSource, filterFavoriteArtists, favoriteKey, favoriteArtistRoute } =
-  await import(`data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}`)
+  await import(`data:text/javascript;base64,${Buffer.from(compiled.replace(`'@/modules/search/textMatcher'`, `'${matcherUrl}'`)).toString('base64')}`)
 
 const favorites = parseFavoritePlaylists([
   { id: 39, name: '陈奕迅', source: 'neteaseArtist', subtitle: 'Eason Chan', sortOrder: 20 },

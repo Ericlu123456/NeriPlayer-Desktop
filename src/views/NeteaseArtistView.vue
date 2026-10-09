@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { filterAndRank, searchValue, trackSearchTokens } from '@/modules/search/textMatcher'
 import { computed, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
@@ -55,19 +56,10 @@ const tracks = ref<TrackInfo[]>([])
 const albums = ref<ArtistAlbum[]>([])
 const activeTab = ref<'songs' | 'albums'>('songs')
 const query = ref('')
-const search = computed(() => query.value.trim().toLocaleLowerCase())
-const filteredTracks = computed(() => {
-  const keyword = search.value
-  if (!keyword) return tracks.value
-  return tracks.value.filter(track =>
-    [track.title, track.artist, track.album].some(value => value.toLocaleLowerCase().includes(keyword)))
-})
-const filteredAlbums = computed(() => {
-  const keyword = search.value
-  if (!keyword) return albums.value
-  return albums.value.filter(album =>
-    [album.name, album.publishYear].some(value => value.toLocaleLowerCase().includes(keyword)))
-})
+const search = computed(() => query.value.trim())
+const filteredTracks = computed(() => filterAndRank(query.value, tracks.value, trackSearchTokens))
+const filteredAlbums = computed(() => filterAndRank(query.value, albums.value, album =>
+  [searchValue(album.name, 0), searchValue(album.publishYear, 6)]))
 
 const artistId = computed(() => Number(route.params.id) || 0)
 let generation = 0

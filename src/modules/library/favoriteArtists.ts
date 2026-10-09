@@ -1,3 +1,5 @@
+import { filterAndRank, searchValue } from '@/modules/search/textMatcher'
+
 export const ARTIST_FAVORITE_SOURCES = ['neteaseArtist', 'biliArtist', 'youtubeMusicArtist'] as const
 export type ArtistFavoriteSource = typeof ARTIST_FAVORITE_SOURCES[number]
 
@@ -46,9 +48,8 @@ export function parseFavoritePlaylists(raw: unknown): FavoritePlaylist[] {
 }
 
 export function filterFavoriteArtists(favorites: FavoritePlaylist[], source: ArtistFavoriteSource, query = ''): FavoritePlaylist[] {
-  const search = query.trim().toLocaleLowerCase()
-  return favorites.filter(favorite => favorite.source === source && (!search ||
-    [favorite.name, favorite.subtitle].some(value => value.toLocaleLowerCase().includes(search))))
+  return filterAndRank(query, favorites.filter(favorite => favorite.source === source), favorite =>
+    [searchValue(favorite.name, 0), searchValue(favorite.subtitle, 6)])
 }
 
 export function favoriteArtistRoute(favorite: Pick<FavoritePlaylist, 'source' | 'id' | 'name'> & Partial<FavoritePlaylist>) {

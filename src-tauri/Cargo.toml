@@ -64,6 +64,7 @@ keyring = { version = "3", default-features = false, features = ["apple-native",
 tauri-plugin-log = "2.9.0"
 tauri-plugin-single-instance = "2"
 rusqlite = { version = "0.40", features = ["bundled"] }
+tauri-plugin-global-shortcut = "2"
 
 [target.'cfg(windows)'.dependencies]
 # 最小化时把 WebView2 控制器设为不可见；版本跟随 tauri 使用的 webview2-com

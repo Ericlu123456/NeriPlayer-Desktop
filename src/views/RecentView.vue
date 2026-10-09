@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { filterAndRank, trackSearchTokens } from '@/modules/search/textMatcher'
 import { ref, computed, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { usePlayerStore, type TrackInfo } from '@/stores/player'
@@ -37,15 +38,7 @@ const showAddToPlaylist = ref(false)
 const addToPlaylistTarget = ref<TrackInfo | null>(null)
 const addToPlaylistTargets = ref<TrackInfo[]>([])
 
-const filteredEntries = computed(() => {
-  if (!searchQuery.value) return history.entries
-  const q = searchQuery.value.toLowerCase()
-  return history.entries.filter(e =>
-    e.track.title.toLowerCase().includes(q) ||
-    e.track.artist.toLowerCase().includes(q) ||
-    e.track.album.toLowerCase().includes(q)
-  )
-})
+const filteredEntries = computed(() => filterAndRank(searchQuery.value, history.entries, entry => trackSearchTokens(entry.track)))
 
 const allHistoryTracks = computed(() => history.entries.map(entry => entry.track))
 const visibleHistoryTracks = computed(() => filteredEntries.value.map(entry => entry.track))

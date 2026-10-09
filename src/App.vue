@@ -6,8 +6,10 @@ import {
 import { useRoute, useRouter } from 'vue-router'
 import { usePlayerStore, displayAlbum } from '@/stores/player'
 import { usePlaybackStatsStore } from '@/stores/playbackStats'
-import { installGlobalShortcuts } from '@/modules/shortcuts/globalShortcuts'
-import { installDesktopLyricsBridge } from '@/modules/desktopLyrics/bridge'
+import { installGlobalShortcuts, type ShortcutActions } from '@/modules/shortcuts/globalShortcuts'
+import { applySystemShortcuts, clearSystemShortcuts } from '@/modules/shortcuts/systemShortcuts'
+import { shortcutRecording } from '@/modules/shortcuts/recording'
+import { closeDesktopLyricsWindow, desktopLyricsOpen, installDesktopLyricsBridge, openDesktopLyricsWindow } from '@/modules/desktopLyrics/bridge'
 import { installTrayBridge, quitApp } from '@/modules/tray/bridge'
 import { syncFrequencyDelayMs, useSyncStore } from '@/stores/sync'
 import { useAuthStore } from '@/stores/auth'
@@ -60,6 +62,7 @@ const isNowPlayingOpen = ref(false)
 // 静音前的音量，取消静音时还原
 let volumeBeforeMute = 0.5
 let uninstallShortcuts: (() => void) | null = null
+let stopSystemShortcuts: (() => void) | null = null
 let uninstallDesktopLyrics: (() => void) | null = null
 const contentRef = ref<HTMLElement | null>(null)
 const miniPlayerRef = ref<InstanceType<typeof MiniPlayer> | null>(null)
@@ -425,7 +428,7 @@ onMounted(async () => {
     openSettings: () => {
       if (isNowPlayingOpen.value) closeNowPlaying()
       // 带上时间戳：已经在设置页时也能再次跳到桌面歌词分区
-      void router.push({ name: 'settings', query: { section: 'lyrics', focus: 'desktop-lyrics', at: String(Date.now()) } })
+      void router.push({ name: 'settings', query: { section: 'desktop_lyrics', focus: 'desktop-lyrics', at: String(Date.now()) } })
     },
   })
   uninstallTray = installTrayBridge({
@@ -445,7 +448,7 @@ onMounted(async () => {
   // Rust 配置是启动后的规范来源，本地影子只负责首屏快速显示
   // 播放统计要在任何播放发生之前接上，否则首曲不计数
   usePlaybackStatsStore().attach()
-  uninstallShortcuts = installGlobalShortcuts({
+  const shortcutActions: ShortcutActions = {
     togglePlay: () => void player.togglePlayPause(),
     next: () => void player.next(),
     previous: () => void player.previous(),
@@ -486,11 +489,28 @@ onMounted(async () => {
     },
     toggleShuffle: () => player.toggleShuffle(),
     cycleRepeat: () => player.toggleRepeatMode(),
+    toggleLike: () => {
+      if (player.currentTrack) void likedSongs.toggleTrack(player.currentTrack)
+    },
+    toggleDesktopLyrics: () => {
+      const toggle = desktopLyricsOpen.value ? closeDesktopLyricsWindow() : openDesktopLyricsWindow()
+      void toggle.catch(() => useToastStore().error((i18n.global as any).t('player.desktop_lyrics_failed')))
+    },
+    showWindow: () => {
+      const appWindow = getCurrentWindow()
+      void appWindow.unminimize().then(() => appWindow.show()).then(() => appWindow.setFocus()).catch(() => {})
+    },
     // 覆盖所有实际存在的弹层根类，弹层打开时不响应全局播放快捷键（UI-002）
     isOverlayOpen: () => document.querySelector(
       '.m3-dialog-overlay, .dialog-overlay, .context-menu-overlay, .atp-overlay, .lt-overlay, .queue-overlay, .comments-overlay, .notif-overlay, .debug-dialog-overlay',
     ) !== null,
-  })
+  }
+  uninstallShortcuts = installGlobalShortcuts(shortcutActions, () => settingsStore.shortcutBindings)
+  stopSystemShortcuts = watch(
+    () => [settingsStore.shortcutBindings, settingsStore.globalShortcutsEnabled, shortcutRecording.value] as const,
+    ([bindings, enabled, recording]) => void applySystemShortcuts(bindings, enabled && !recording, shortcutActions),
+    { immediate: true },
+  )
 
   await settingsStore.hydrate()
   applyTheme(settingsStore.darkMode, false)
@@ -561,6 +581,9 @@ onUnmounted(() => {
   void player.flushPlayerState()
   uninstallShortcuts?.()
   uninstallShortcuts = null
+  stopSystemShortcuts?.()
+  stopSystemShortcuts = null
+  void clearSystemShortcuts()
   window.removeEventListener('beforeunload', handleBeforeUnload)
   window.removeEventListener('pagehide', handleBeforeUnload)
   window.removeEventListener('focus', handleWindowFocus)

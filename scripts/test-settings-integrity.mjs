@@ -48,6 +48,9 @@ const settingsModule = load(await read('../src/stores/settings.ts'), {
   '@tauri-apps/api/core': bridge,
   '@/utils/logger': { createLogger: () => ({ info() {}, warn() {}, error() {}, debug() {} }) },
   '@/modules/desktopLyrics/style': load(await read('../src/modules/desktopLyrics/style.ts')),
+  '@/modules/shortcuts/bindings': load(await read('../src/modules/shortcuts/bindings.ts'), {
+    './platform': load(await read('../src/modules/shortcuts/platform.ts')),
+  }),
 })
 const { roundToStepPrecision } = load(await read('../src/utils/editableRange.ts'))
 

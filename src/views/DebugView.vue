@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted } from 'vue'
+import { computed, reactive, ref, onMounted, onUnmounted } from 'vue'
+import DebugLogViewer from '@/components/debug/DebugLogViewer.vue'
 import { useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { invoke } from '@tauri-apps/api/core'
@@ -173,81 +174,104 @@ onMounted(async () => {
     appDataDir.value = await invoke('get_app_data_dir')
   } catch { /* 忽略 */ }
   await loadDebugCookieStorageStatus()
-  await refreshLogs()
   await refreshCrashes()
-  logsTimer = window.setInterval(() => {
-    if (!logsPaused.value) void refreshLogs()
-  }, 1500)
+  startRuntimeSampling()
 })
 
 onUnmounted(() => {
-  if (logsTimer) window.clearInterval(logsTimer)
   if (crashRefreshTimer) window.clearTimeout(crashRefreshTimer)
+  stopRuntimeSampling()
 })
 
-// ===== 运行日志 =====
-interface RecentLogEntry { timestamp_ms: number; level: string; target: string; message: string }
-const logs = ref<RecentLogEntry[]>([])
-const logsPaused = ref(false)
-const logLevelFilter = ref('')
-let logsTimer: number | null = null
+// ===== 标签页 =====
+type DebugTab = 'overview' | 'network' | 'logs' | 'crashes' | 'lt'
+const DEBUG_TAB_KEY = 'neri:debug-tab'
+const storedTab = sessionStorage.getItem(DEBUG_TAB_KEY) as DebugTab | null
+const activeTab = ref<DebugTab>(storedTab && ['overview', 'network', 'logs', 'crashes', 'lt'].includes(storedTab) ? storedTab : 'overview')
+/** 日志每 1.5s 轮询一次，第一次切到日志页才挂载 */
+const logsMounted = ref(activeTab.value === 'logs')
 
-async function refreshLogs() {
-  try {
-    logs.value = await invoke<RecentLogEntry[]>('get_recent_logs', {
-      limit: 300,
-      minLevel: logLevelFilter.value || null,
-    })
-  } catch { /* 命令不可用时静默 */ }
+const debugTabs = computed(() => [
+  { id: 'overview' as const, icon: 'dashboard', label: t('settings.debug_tab_overview'), badge: '' },
+  { id: 'network' as const, icon: 'sensors', label: t('settings.debug_tab_network'), badge: '' },
+  { id: 'logs' as const, icon: 'terminal', label: t('settings.debug_logs'), badge: '' },
+  { id: 'crashes' as const, icon: 'report', label: t('settings.debug_tab_crashes'), badge: crashes.value.length ? String(crashes.value.length) : '' },
+  { id: 'lt' as const, icon: 'group', label: t('settings.debug_lt_panel'), badge: '' },
+])
+
+function selectTab(tab: DebugTab) {
+  activeTab.value = tab
+  if (tab === 'logs') logsMounted.value = true
+  sessionStorage.setItem(DEBUG_TAB_KEY, tab)
 }
 
-function logTime(ms: number): string {
-  const date = new Date(ms)
-  const pad = (v: number, n = 2) => String(v).padStart(n, '0')
-  return `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}.${pad(date.getMilliseconds(), 3)}`
+// ===== 运行时诊断 =====
+const runtime = reactive({ fps: 0, heap: '—', uptime: '—', viewport: '', locale: '', online: navigator.onLine })
+let fpsFrame = 0
+let fpsFrames = 0
+let fpsWindowStart = 0
+let runtimeTimer: number | null = null
+
+function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '—'
+  const units = ['B', 'KB', 'MB', 'GB']
+  const exponent = Math.min(units.length - 1, Math.floor(Math.log(bytes) / Math.log(1024)))
+  return `${(bytes / 1024 ** exponent).toFixed(exponent ? 1 : 0)} ${units[exponent]}`
 }
 
-function levelColor(level: string): string {
-  switch (level) {
-    case 'ERROR': return 'var(--md-error)'
-    case 'WARN': return '#ffa726'
-    case 'DEBUG': return 'var(--md-on-surface-variant)'
-    case 'TRACE': return 'var(--md-outline)'
-    default: return 'var(--md-primary)'
+function formatUptime(ms: number): string {
+  const seconds = Math.floor(ms / 1000)
+  const h = Math.floor(seconds / 3600)
+  const m = Math.floor((seconds % 3600) / 60)
+  const s = seconds % 60
+  return h ? `${h}h ${m}m ${s}s` : m ? `${m}m ${s}s` : `${s}s`
+}
+
+function sampleRuntime() {
+  const memory = (performance as Performance & { memory?: { usedJSHeapSize: number; jsHeapSizeLimit: number } }).memory
+  runtime.heap = memory ? `${formatBytes(memory.usedJSHeapSize)} / ${formatBytes(memory.jsHeapSizeLimit)}` : '—'
+  runtime.uptime = formatUptime(performance.now())
+  runtime.viewport = `${window.innerWidth}×${window.innerHeight} @${window.devicePixelRatio}x · ${screen.width}×${screen.height}`
+  runtime.locale = `${locale.value} · ${Intl.DateTimeFormat().resolvedOptions().timeZone}`
+  runtime.online = navigator.onLine
+}
+
+function countFrame(now: number) {
+  if (!fpsWindowStart) fpsWindowStart = now
+  fpsFrames++
+  if (now - fpsWindowStart >= 1000) {
+    runtime.fps = Math.round((fpsFrames * 1000) / (now - fpsWindowStart))
+    fpsFrames = 0
+    fpsWindowStart = now
   }
+  fpsFrame = requestAnimationFrame(countFrame)
 }
 
-async function copyLogs() {
-  const text = [...logs.value].reverse()
-    .map(entry => `${logTime(entry.timestamp_ms)} [${entry.target}] [${entry.level}] ${entry.message}`)
-    .join('\n')
-  try {
-    const { writeText } = await import('@tauri-apps/plugin-clipboard-manager')
-    await writeText(text)
-    toast.success(t('settings.debug_logs_copied'))
-  } catch (e) {
-    log.error('copy logs failed:', e)
-  }
+function startRuntimeSampling() {
+  sampleRuntime()
+  fpsFrame = requestAnimationFrame(countFrame)
+  runtimeTimer = window.setInterval(sampleRuntime, 1000)
 }
 
-async function exportReport() {
-  try {
-    const path = await invoke<string>('export_debug_report')
-    toast.success(t('settings.debug_logs_exported'))
-    await invoke('reveal_in_file_manager', { path })
-  } catch (e) {
-    log.error('export report failed:', e)
-  }
+function stopRuntimeSampling() {
+  cancelAnimationFrame(fpsFrame)
+  if (runtimeTimer) window.clearInterval(runtimeTimer)
 }
 
-async function openLogDir() {
-  try {
-    const dir = await invoke<string>('get_log_dir')
-    await invoke('reveal_in_file_manager', { path: dir })
-  } catch (e) {
-    log.error('open log dir failed:', e)
-  }
-}
+const decoderText = computed(() => {
+  const capabilities = player.decoderCapabilities
+  if (!capabilities) return '—'
+  if (capabilities.ffmpeg) return `FFmpeg avcodec ${capabilities.ffmpeg.avcodec}`
+  return capabilities.ffmpegError ? `FFmpeg ✕ ${capabilities.ffmpegError}` : 'FFmpeg ✕'
+})
+
+const audioText = computed(() => [
+  settingsStore.audioOutputDevice || t('settings.debug_runtime_default_device'),
+  `vol ${Math.round(player.volume * 100)}%`,
+  `×${settingsStore.playbackSpeed}`,
+  settingsStore.normalizeVolume ? 'loudness' : '',
+  settingsStore.equalizerEnabled ? `EQ ${settingsStore.equalizerPresetId}` : '',
+].filter(Boolean).join(' · '))
 
 // ===== API 探针详情（对齐 Android 各平台探针页：调真实接口、看/复制返回）=====
 interface ProbeAction { id: string; label: string; run: () => Promise<unknown> }
@@ -400,6 +424,25 @@ async function clearCrashes() {
       <h1 class="page-title">{{ t('settings.debug_title') }}</h1>
     </header>
 
+    <nav class="debug-tabs" role="tablist" :aria-label="t('settings.debug_title')">
+      <button
+        v-for="tab in debugTabs"
+        :key="tab.id"
+        type="button"
+        role="tab"
+        class="debug-tab"
+        :class="{ active: activeTab === tab.id }"
+        :aria-selected="activeTab === tab.id"
+        @click="selectTab(tab.id)"
+      >
+        <span class="material-symbols-rounded">{{ tab.icon }}</span>
+        {{ tab.label }}
+        <span v-if="tab.badge" class="debug-tab-badge">{{ tab.badge }}</span>
+      </button>
+    </nav>
+
+    <section v-show="activeTab === 'overview'" class="debug-panel debug-columns">
+      <div class="debug-column">
     <!-- 构建信息 -->
     <div v-if="buildInfo" class="section-label">
       <span class="material-symbols-rounded" style="font-size: 18px">info</span>
@@ -448,6 +491,128 @@ async function clearCrashes() {
       </div>
     </div>
 
+    <!-- 运行时诊断 -->
+    <div class="section-label">
+      <span class="material-symbols-rounded" style="font-size: 18px">monitor_heart</span>
+      <span>{{ t('settings.debug_runtime') }}</span>
+    </div>
+    <div class="setting-card">
+      <div class="setting-info">
+        <div class="state-grid">
+          <div class="state-item">
+            <span class="state-label">{{ t('settings.debug_runtime_fps') }}</span>
+            <span class="state-value mono" :class="{ warn: runtime.fps > 0 && runtime.fps < 45 }">{{ runtime.fps || '—' }}</span>
+          </div>
+          <div class="state-item">
+            <span class="state-label">{{ t('settings.debug_runtime_heap') }}</span>
+            <span class="state-value mono">{{ runtime.heap }}</span>
+          </div>
+          <div class="state-item">
+            <span class="state-label">{{ t('settings.debug_runtime_uptime') }}</span>
+            <span class="state-value mono">{{ runtime.uptime }}</span>
+          </div>
+          <div class="state-item">
+            <span class="state-label">{{ t('settings.debug_runtime_window') }}</span>
+            <span class="state-value mono">{{ runtime.viewport }}</span>
+          </div>
+          <div class="state-item">
+            <span class="state-label">{{ t('settings.debug_runtime_locale') }}</span>
+            <span class="state-value mono">{{ runtime.locale }}</span>
+          </div>
+          <div class="state-item">
+            <span class="state-label">{{ t('settings.debug_runtime_network') }}</span>
+            <span class="state-value" :style="{ color: runtime.online ? 'var(--md-primary)' : 'var(--md-error)' }">{{ runtime.online ? t('settings.debug_runtime_online') : t('settings.debug_runtime_offline') }}</span>
+          </div>
+          <div class="state-item full-width">
+            <span class="state-label">{{ t('settings.debug_runtime_decoder') }}</span>
+            <span class="state-value mono">{{ decoderText }}</span>
+          </div>
+          <div class="state-item full-width">
+            <span class="state-label">{{ t('settings.debug_runtime_audio') }}</span>
+            <span class="state-value mono">{{ audioText }}</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+      </div>
+      <div class="debug-column">
+    <!-- 播放器状态 -->
+    <div class="section-label">
+      <span class="material-symbols-rounded" style="font-size: 18px">queue_music</span>
+      <span>{{ t('settings.player_state') }}</span>
+    </div>
+    <div class="setting-card">
+      <div class="setting-info">
+        <div class="state-grid">
+          <div class="state-item">
+            <span class="state-label">{{ t('settings.debug_player_track') }}</span>
+            <span class="state-value">{{ player.currentTrack?.title || '—' }}</span>
+          </div>
+          <div class="state-item">
+            <span class="state-label">{{ t('settings.debug_player_artist') }}</span>
+            <span class="state-value">{{ player.currentTrack?.artist || '—' }}</span>
+          </div>
+          <div class="state-item">
+            <span class="state-label">{{ t('settings.debug_player_source') }}</span>
+            <span class="state-value mono">{{ player.currentTrack?.id?.split(':')[0] || '—' }}</span>
+          </div>
+          <div class="state-item">
+            <span class="state-label">{{ t('settings.debug_player_playing') }}</span>
+            <span class="state-value">{{ player.isPlaying ? t('common.yes') : t('common.no') }}</span>
+          </div>
+          <div class="state-item">
+            <span class="state-label">{{ t('settings.debug_player_position') }}</span>
+            <span class="state-value mono">{{ formatTimeMs(player.positionMs) }} / {{ formatTimeMs(player.durationMs) }}</span>
+          </div>
+          <div class="state-item">
+            <span class="state-label">{{ t('settings.debug_player_queue') }}</span>
+            <span class="state-value">{{ player.queue?.length || 0 }}</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 同步状态 -->
+    <div class="section-label">
+      <span class="material-symbols-rounded" style="font-size: 18px">sync</span>
+      <span>{{ t('settings.debug_sync_status') }}</span>
+    </div>
+    <div class="setting-card">
+      <div class="setting-info">
+        <div class="state-grid">
+          <div class="state-item">
+            <span class="state-label">{{ t('settings.debug_github_sync') }}</span>
+            <span class="state-value" :style="{ color: syncStore.github.configured ? 'var(--md-primary)' : 'var(--md-on-surface-variant)' }">
+              {{ syncStore.github.configured
+                ? (syncStore.github.autoSync ? t('settings.debug_auto_sync_on') : t('settings.debug_auto_sync_off'))
+                : t('settings.debug_not_configured') }}
+            </span>
+          </div>
+          <div class="state-item">
+            <span class="state-label">{{ t('settings.debug_last_sync') }} (GitHub)</span>
+            <span class="state-value">{{ formatSyncTime(syncStore.github.lastSyncTime, syncStore.github.configured) }}</span>
+          </div>
+          <div class="state-item">
+            <span class="state-label">{{ t('settings.debug_webdav_sync') }}</span>
+            <span class="state-value" :style="{ color: syncStore.webdav.configured ? 'var(--md-primary)' : 'var(--md-on-surface-variant)' }">
+              {{ syncStore.webdav.configured
+                ? (syncStore.webdav.autoSync ? t('settings.debug_auto_sync_on') : t('settings.debug_auto_sync_off'))
+                : t('settings.debug_not_configured') }}
+            </span>
+          </div>
+          <div class="state-item">
+            <span class="state-label">{{ t('settings.debug_last_sync') }} (WebDAV)</span>
+            <span class="state-value">{{ formatSyncTime(syncStore.webdav.lastSyncTime, syncStore.webdav.configured) }}</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+      </div>
+    </section>
+
+    <section v-show="activeTab === 'network'" class="debug-panel">
     <!-- Debug Cookie 存储 -->
     <template v-if="debugCookieStorage?.available">
       <div class="section-label">
@@ -526,42 +691,6 @@ async function clearCrashes() {
       </div>
     </div>
 
-    <!-- 同步状态 -->
-    <div class="section-label">
-      <span class="material-symbols-rounded" style="font-size: 18px">sync</span>
-      <span>{{ t('settings.debug_sync_status') }}</span>
-    </div>
-    <div class="setting-card">
-      <div class="setting-info">
-        <div class="state-grid">
-          <div class="state-item">
-            <span class="state-label">{{ t('settings.debug_github_sync') }}</span>
-            <span class="state-value" :style="{ color: syncStore.github.configured ? 'var(--md-primary)' : 'var(--md-on-surface-variant)' }">
-              {{ syncStore.github.configured
-                ? (syncStore.github.autoSync ? t('settings.debug_auto_sync_on') : t('settings.debug_auto_sync_off'))
-                : t('settings.debug_not_configured') }}
-            </span>
-          </div>
-          <div class="state-item">
-            <span class="state-label">{{ t('settings.debug_last_sync') }} (GitHub)</span>
-            <span class="state-value">{{ formatSyncTime(syncStore.github.lastSyncTime, syncStore.github.configured) }}</span>
-          </div>
-          <div class="state-item">
-            <span class="state-label">{{ t('settings.debug_webdav_sync') }}</span>
-            <span class="state-value" :style="{ color: syncStore.webdav.configured ? 'var(--md-primary)' : 'var(--md-on-surface-variant)' }">
-              {{ syncStore.webdav.configured
-                ? (syncStore.webdav.autoSync ? t('settings.debug_auto_sync_on') : t('settings.debug_auto_sync_off'))
-                : t('settings.debug_not_configured') }}
-            </span>
-          </div>
-          <div class="state-item">
-            <span class="state-label">{{ t('settings.debug_last_sync') }} (WebDAV)</span>
-            <span class="state-value">{{ formatSyncTime(syncStore.webdav.lastSyncTime, syncStore.webdav.configured) }}</span>
-          </div>
-        </div>
-      </div>
-    </div>
-
     <!-- API 探针详情 -->
     <div class="section-label">
       <span class="material-symbols-rounded" style="font-size: 18px">api</span>
@@ -621,38 +750,29 @@ async function clearCrashes() {
       </div>
     </div>
 
-    <!-- 一起听调试 -->
-    <div class="section-label">
-      <span class="material-symbols-rounded" style="font-size: 18px">group</span>
-      <span>{{ t('settings.debug_lt_panel') }}</span>
-    </div>
+    </section>
+
+    <section v-show="activeTab === 'logs'" class="debug-panel">
+    <!-- 始终记录日志（对齐 Android settings_always_record_logs）-->
     <div class="setting-card">
-      <div class="state-grid">
-        <div class="state-item">
-          <span class="state-label">{{ t('settings.debug_lt_connection') }}</span>
-          <span class="state-value" :style="{ color: ltStore.isConnected ? 'var(--md-primary)' : 'var(--md-on-surface-variant)' }">
-            {{ ltStore.connectionState }}
-          </span>
+      <div class="setting-info" style="display: flex; align-items: center; gap: 12px">
+        <div style="flex: 1; min-width: 0">
+          <div class="setting-title">{{ t('settings.debug_always_log') }}</div>
+          <div class="setting-desc">{{ t('settings.debug_always_log_desc') }}</div>
         </div>
-        <div class="state-item">
-          <span class="state-label">{{ t('settings.debug_lt_room') }}</span>
-          <span class="state-value mono">{{ ltStore.roomId || '—' }}</span>
-        </div>
-        <div class="state-item">
-          <span class="state-label">{{ t('settings.debug_lt_role') }}</span>
-          <span class="state-value">{{ ltStore.role || '—' }}</span>
-        </div>
-        <div class="state-item">
-          <span class="state-label">{{ t('settings.debug_lt_version') }}</span>
-          <span class="state-value mono">{{ ltStore.roomState?.version ?? '—' }}</span>
-        </div>
-        <div class="state-item">
-          <span class="state-label">{{ t('settings.debug_lt_members') }}</span>
-          <span class="state-value">{{ ltStore.members.length }}</span>
-        </div>
+        <label class="debug-switch">
+          <input v-model="settingsStore.logToFile" type="checkbox" />
+          <span class="debug-switch-track"><span class="debug-switch-thumb" /></span>
+        </label>
       </div>
     </div>
 
+    <!-- 运行日志 -->
+    <DebugLogViewer v-if="logsMounted" />
+
+    </section>
+
+    <section v-show="activeTab === 'crashes'" class="debug-panel">
     <!-- 测试异常 -->
     <div class="section-label">
       <span class="material-symbols-rounded" style="font-size: 18px">warning</span>
@@ -677,64 +797,6 @@ async function clearCrashes() {
           <span class="crash-test-title">{{ t('settings.debug_test_panic_thread') }}</span>
           <span class="crash-test-desc">{{ t('settings.debug_test_panic_thread_desc') }}</span>
         </button>
-      </div>
-    </div>
-
-    <!-- 始终记录日志（对齐 Android settings_always_record_logs）-->
-    <div class="setting-card">
-      <div class="setting-info" style="display: flex; align-items: center; gap: 12px">
-        <div style="flex: 1; min-width: 0">
-          <div class="setting-title">{{ t('settings.debug_always_log') }}</div>
-          <div class="setting-desc">{{ t('settings.debug_always_log_desc') }}</div>
-        </div>
-        <label class="debug-switch">
-          <input v-model="settingsStore.logToFile" type="checkbox" />
-          <span class="debug-switch-track"><span class="debug-switch-thumb" /></span>
-        </label>
-      </div>
-    </div>
-
-    <!-- 运行日志 -->
-    <div class="section-label">
-      <span class="material-symbols-rounded" style="font-size: 18px">terminal</span>
-      <span>{{ t('settings.debug_logs') }}</span>
-    </div>
-    <div class="setting-card debug-logs-card">
-      <div class="debug-logs-toolbar">
-        <select v-model="logLevelFilter" class="debug-logs-level" @change="refreshLogs">
-          <option value="">{{ t('settings.debug_level_all') }}</option>
-          <option value="error">ERROR</option>
-          <option value="warn">WARN</option>
-          <option value="info">INFO</option>
-          <option value="debug">DEBUG</option>
-        </select>
-        <div class="debug-logs-actions">
-          <button class="debug-log-btn" @click="logsPaused = !logsPaused">
-            <span class="material-symbols-rounded">{{ logsPaused ? 'play_arrow' : 'pause' }}</span>
-            {{ logsPaused ? t('settings.debug_logs_resume') : t('settings.debug_logs_pause') }}
-          </button>
-          <button class="debug-log-btn" @click="copyLogs">
-            <span class="material-symbols-rounded">content_copy</span>
-            {{ t('settings.debug_logs_copy') }}
-          </button>
-          <button class="debug-log-btn" @click="exportReport">
-            <span class="material-symbols-rounded">ios_share</span>
-            {{ t('settings.debug_logs_export') }}
-          </button>
-          <button class="debug-log-btn" @click="openLogDir">
-            <span class="material-symbols-rounded">folder_open</span>
-            {{ t('settings.debug_logs_open_dir') }}
-          </button>
-        </div>
-      </div>
-      <div v-if="logs.length === 0" class="debug-logs-empty">{{ t('settings.debug_logs_empty') }}</div>
-      <div v-else class="debug-logs-list">
-        <div v-for="(entry, index) in logs" :key="`${entry.timestamp_ms}-${index}`" class="debug-log-line">
-          <span class="debug-log-time">{{ logTime(entry.timestamp_ms) }}</span>
-          <span class="debug-log-level" :style="{ color: levelColor(entry.level) }">{{ entry.level }}</span>
-          <span class="debug-log-target">[{{ entry.target }}]</span>
-          <span class="debug-log-msg">{{ entry.message }}</span>
-        </div>
       </div>
     </div>
 
@@ -769,41 +831,42 @@ async function clearCrashes() {
       </div>
     </div>
 
-    <!-- 播放器状态 -->
+    </section>
+
+    <section v-show="activeTab === 'lt'" class="debug-panel">
+    <!-- 一起听调试 -->
     <div class="section-label">
-      <span class="material-symbols-rounded" style="font-size: 18px">queue_music</span>
-      <span>{{ t('settings.player_state') }}</span>
+      <span class="material-symbols-rounded" style="font-size: 18px">group</span>
+      <span>{{ t('settings.debug_lt_panel') }}</span>
     </div>
     <div class="setting-card">
-      <div class="setting-info">
-        <div class="state-grid">
-          <div class="state-item">
-            <span class="state-label">{{ t('settings.debug_player_track') }}</span>
-            <span class="state-value">{{ player.currentTrack?.title || '—' }}</span>
-          </div>
-          <div class="state-item">
-            <span class="state-label">{{ t('settings.debug_player_artist') }}</span>
-            <span class="state-value">{{ player.currentTrack?.artist || '—' }}</span>
-          </div>
-          <div class="state-item">
-            <span class="state-label">{{ t('settings.debug_player_source') }}</span>
-            <span class="state-value mono">{{ player.currentTrack?.id?.split(':')[0] || '—' }}</span>
-          </div>
-          <div class="state-item">
-            <span class="state-label">{{ t('settings.debug_player_playing') }}</span>
-            <span class="state-value">{{ player.isPlaying ? t('common.yes') : t('common.no') }}</span>
-          </div>
-          <div class="state-item">
-            <span class="state-label">{{ t('settings.debug_player_position') }}</span>
-            <span class="state-value mono">{{ formatTimeMs(player.positionMs) }} / {{ formatTimeMs(player.durationMs) }}</span>
-          </div>
-          <div class="state-item">
-            <span class="state-label">{{ t('settings.debug_player_queue') }}</span>
-            <span class="state-value">{{ player.queue?.length || 0 }}</span>
-          </div>
+      <div class="state-grid">
+        <div class="state-item">
+          <span class="state-label">{{ t('settings.debug_lt_connection') }}</span>
+          <span class="state-value" :style="{ color: ltStore.isConnected ? 'var(--md-primary)' : 'var(--md-on-surface-variant)' }">
+            {{ ltStore.connectionState }}
+          </span>
+        </div>
+        <div class="state-item">
+          <span class="state-label">{{ t('settings.debug_lt_room') }}</span>
+          <span class="state-value mono">{{ ltStore.roomId || '—' }}</span>
+        </div>
+        <div class="state-item">
+          <span class="state-label">{{ t('settings.debug_lt_role') }}</span>
+          <span class="state-value">{{ ltStore.role || '—' }}</span>
+        </div>
+        <div class="state-item">
+          <span class="state-label">{{ t('settings.debug_lt_version') }}</span>
+          <span class="state-value mono">{{ ltStore.roomState?.version ?? '—' }}</span>
+        </div>
+        <div class="state-item">
+          <span class="state-label">{{ t('settings.debug_lt_members') }}</span>
+          <span class="state-value">{{ ltStore.members.length }}</span>
         </div>
       </div>
     </div>
+
+    </section>
 
     <Teleport to="body">
       <div
@@ -839,9 +902,68 @@ async function clearCrashes() {
 <style scoped lang="scss">
 .debug-view {
   padding: 20px 28px 32px;
-  max-width: 680px;
+  max-width: 1180px;
   /* 宽屏下水平居中，避免固定左对齐右侧大空白 */
   margin-inline: auto;
+}
+
+.debug-tabs {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: -8px 0 20px;
+  padding: 8px 0;
+  background: color-mix(in srgb, var(--md-background, var(--md-surface)) 88%, transparent);
+  backdrop-filter: blur(12px);
+}
+
+.debug-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 36px;
+  padding: 0 14px;
+  border-radius: var(--radius-full);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--md-on-surface-variant);
+  background: var(--md-surface-container);
+  transition: background 160ms var(--ease-standard), color 160ms var(--ease-standard);
+  .material-symbols-rounded { font-size: 18px; }
+  &:hover { background: var(--md-surface-container-high); color: var(--md-on-surface); }
+  &.active { background: var(--md-secondary-container); color: var(--md-on-secondary-container); }
+}
+
+.debug-tab-badge {
+  min-width: 18px;
+  padding: 0 5px;
+  border-radius: var(--radius-full);
+  background: var(--md-error);
+  color: var(--md-on-error);
+  font-size: 11px;
+  line-height: 18px;
+  text-align: center;
+}
+
+.debug-panel { animation: debug-panel-in 220ms var(--ease-emphasized-decel); }
+
+/* 概览宽屏双列：左边构建 / 系统 / 运行时，右边播放器 / 同步 */
+.debug-columns {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
+  gap: 0 24px;
+  align-items: start;
+}
+
+.debug-column { min-width: 0; }
+
+.state-value.warn { color: #f59e0b; }
+
+@keyframes debug-panel-in {
+  from { opacity: 0; transform: translateY(6px); }
 }
 
 .debug-header {
@@ -980,7 +1102,7 @@ async function clearCrashes() {
   line-height: 1.45;
 
   &.mono {
-    font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', monospace;
+    font-family: var(--font-mono);
     font-size: 12px;
   }
 }
@@ -1082,27 +1204,6 @@ async function clearCrashes() {
   }
 }
 
-.debug-logs-card { display: flex; flex-direction: column; gap: 10px; }
-
-.debug-logs-toolbar {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-
-.debug-logs-level {
-  height: 32px;
-  padding: 0 10px;
-  border-radius: 10px;
-  background: var(--md-surface-container);
-  color: var(--md-on-surface);
-  border: 1px solid var(--md-outline-variant);
-  font-size: 12px;
-}
-
-.debug-logs-actions { display: flex; gap: 6px; flex-wrap: wrap; margin-left: auto; }
-
 .debug-log-btn {
   display: inline-flex;
   align-items: center;
@@ -1125,26 +1226,6 @@ async function clearCrashes() {
 }
 
 .debug-crash-clear { color: var(--md-error); }
-
-.debug-logs-list {
-  max-height: 320px;
-  overflow-y: auto;
-  display: flex;
-  flex-direction: column-reverse; /* 新日志在底部，滚动锚在最新 */
-  gap: 2px;
-  font-family: ui-monospace, 'SF Mono', Menlo, monospace;
-  font-size: 11px;
-  line-height: 1.5;
-  background: var(--md-surface-container-lowest, var(--md-surface));
-  border-radius: 12px;
-  padding: 10px 12px;
-}
-
-.debug-log-line { display: flex; gap: 8px; align-items: baseline; }
-.debug-log-time { color: var(--md-outline); flex-shrink: 0; }
-.debug-log-level { width: 44px; flex-shrink: 0; font-weight: 700; }
-.debug-log-target { color: var(--md-on-surface-variant); flex-shrink: 0; }
-.debug-log-msg { word-break: break-all; white-space: pre-wrap; }
 
 .debug-logs-empty {
   padding: 20px;
@@ -1179,7 +1260,7 @@ async function clearCrashes() {
   &:hover { background: var(--md-surface-container-high); }
 }
 
-.debug-crash-name { flex: 1; min-width: 0; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: ui-monospace, monospace; }
+.debug-crash-name { flex: 1; min-width: 0; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); }
 .debug-crash-size { color: var(--md-on-surface-variant); font-size: 12px; flex-shrink: 0; }
 
 .debug-crash-body {
@@ -1189,7 +1270,7 @@ async function clearCrashes() {
   /* 保持原始排版并在容器内滚动，不做逐字符硬折行 */
   overflow: auto;
   overscroll-behavior: contain;
-  font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+  font-family: var(--font-mono);
   font-size: 11px;
   line-height: 1.5;
   white-space: pre;
@@ -1224,7 +1305,7 @@ async function clearCrashes() {
 .probe-action-label { flex: 1; min-width: 0; font-size: 13px; }
 .probe-action-status {
   font-size: 12px;
-  font-family: ui-monospace, monospace;
+  font-family: var(--font-mono);
   color: var(--md-on-surface-variant);
   &.failed { color: var(--md-error); }
   &.success { color: var(--md-primary); }
@@ -1239,7 +1320,7 @@ async function clearCrashes() {
   overscroll-behavior: contain;
   border-radius: 10px;
   background: var(--md-surface-container-lowest, var(--md-surface));
-  font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+  font-family: var(--font-mono);
   font-size: 11px;
   line-height: 1.5;
   white-space: pre;

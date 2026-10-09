@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { filterAndRank, trackSearchTokens } from '@/modules/search/textMatcher'
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { normalizeTrack, usePlayerStore, type TrackInfo } from '@/stores/player'
@@ -67,13 +68,7 @@ function saveDetailCache(cacheKey: string) {
   })
 }
 
-const filteredTracks = computed(() => {
-  if (!searchQuery.value) return tracks.value
-  const q = searchQuery.value.toLowerCase()
-  return tracks.value.filter(t =>
-    t.title.toLowerCase().includes(q) || t.artist.toLowerCase().includes(q)
-  )
-})
+const filteredTracks = computed(() => filterAndRank(searchQuery.value, tracks.value, trackSearchTokens))
 
 // 大列表分块渲染（WebKitGTK 上千行一次性渲染会卡顿）
 const { visibleItems: visibleTracks, onScroll: onTrackListScroll, ensureIndex: ensureTrackIndex } =

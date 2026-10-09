@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { filterAndRank, trackSearchTokens } from '@/modules/search/textMatcher'
 import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
@@ -23,14 +24,7 @@ const { t } = useI18n()
 const loading = ref(true)
 const tracks = ref<TrackInfo[]>([])
 const searchQuery = ref('')
-const filteredTracks = computed(() => {
-  const keyword = searchQuery.value.trim().toLocaleLowerCase()
-  if (!keyword) return tracks.value
-  return tracks.value.filter(track =>
-    [track.title, track.artist, track.album].some(value =>
-      (value || '').toLocaleLowerCase().includes(keyword)),
-  )
-})
+const filteredTracks = computed(() => filterAndRank(searchQuery.value, tracks.value, trackSearchTokens))
 
 const artistName = computed(() => String(route.params.name ?? ''))
 const totalDurationMs = computed(() =>

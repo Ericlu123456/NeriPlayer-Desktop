@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { searchMatches } from '@/modules/search/textMatcher'
 import { ref, computed, onMounted, onUnmounted, onDeactivated, nextTick, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 
@@ -335,9 +336,7 @@ const tabQuery = computed({
 })
 
 function matchesQuery(query: string, ...fields: (string | number | undefined | null)[]): boolean {
-  const trimmed = query.trim().toLowerCase()
-  if (!trimmed) return true
-  return fields.some((field) => String(field ?? '').toLowerCase().includes(trimmed))
+  return searchMatches(query, ...fields)
 }
 
 // 所有 tab（含下载页与本地的两个分类）共用同一搜索栏，位置固定不动

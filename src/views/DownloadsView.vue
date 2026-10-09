@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { filterAndRank, searchValue, trackSearchTokens } from '@/modules/search/textMatcher'
 import { computed, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { invoke } from '@tauri-apps/api/core'
@@ -69,20 +70,14 @@ const sortedDownloads = computed(() => {
   })
 })
 
-const filteredDownloads = computed(() => {
-  const keyword = searchQuery.value.trim().toLowerCase()
-  if (!keyword) return sortedDownloads.value
-  return sortedDownloads.value.filter((track) => {
-    return [track.title, track.artist, displayAlbum(track.album), track.source, track.filePath]
-      .filter(Boolean)
-      .some(value => String(value).toLowerCase().includes(keyword))
-  })
-})
+const filteredDownloads = computed(() => filterAndRank(searchQuery.value, sortedDownloads.value, track => [
+  ...trackSearchTokens({ ...track, album: displayAlbum(track.album) }),
+  searchValue(track.source, 10),
+  searchValue(track.filePath, 12),
+]))
 
-const activeTasks = computed(() => {
-  const query = searchQuery.value.trim().toLowerCase()
-  return downloadStore.activeDownloads.filter(task => !query || [task.title, task.artist, task.source].some(value => value.toLowerCase().includes(query)))
-})
+const activeTasks = computed(() => filterAndRank(searchQuery.value, downloadStore.activeDownloads, task =>
+  [searchValue(task.title, 0), searchValue(task.artist, 4), searchValue(task.source, 10)]))
 const downloadedCount = computed(() => downloadStore.downloads.length)
 const activeCount = computed(() => downloadStore.runningDownloadCount)
 const finishedTaskCount = computed(() => downloadStore.activeDownloads.length - activeCount.value)

@@ -151,9 +151,15 @@ pub struct AppSettings {
     /// 桌面歌词外观（字体、颜色、布局、锁定、窗口位置……），逐项规整在前端
     /// normalizeDesktopLyricsStyle；这里只保证是对象且不过大
     pub desktop_lyrics: serde_json::Value,
+    /// 快捷键改键：{ local: {动作: 组合键}, global: {...} }，只存与默认不同的项，
+    /// 逐项规整在前端 normalizeShortcutBindings；这里只保证是对象且不过大
+    pub shortcut_bindings: serde_json::Value,
+    /// 系统级全局快捷键（窗口不在前台也生效）总开关，默认关闭以免抢占其它程序的热键
+    pub global_shortcuts_enabled: bool,
 }
 
 const MAX_DESKTOP_LYRICS_STYLE_BYTES: usize = 16 * 1024;
+const MAX_SHORTCUT_BINDINGS_BYTES: usize = 8 * 1024;
 
 /// 前端数字输入可能带小数：整数字段四舍五入接收，单个字段不能让整份设置被拒绝
 fn lenient_i32<'de, D>(deserializer: D) -> Result<i32, D::Error>
@@ -279,6 +285,8 @@ impl Default for AppSettings {
             equalizer_preset_id: "flat".into(),
             equalizer_bands: vec![0; EQUALIZER_BAND_COUNT],
             desktop_lyrics: serde_json::Value::Object(serde_json::Map::new()),
+            shortcut_bindings: serde_json::Value::Object(serde_json::Map::new()),
+            global_shortcuts_enabled: false,
         }
     }
 }
@@ -353,6 +361,10 @@ impl AppSettings {
         let style_bytes = serde_json::to_vec(&self.desktop_lyrics).map_or(usize::MAX, |bytes| bytes.len());
         if !self.desktop_lyrics.is_object() || style_bytes > MAX_DESKTOP_LYRICS_STYLE_BYTES {
             self.desktop_lyrics = serde_json::Value::Object(serde_json::Map::new());
+        }
+        let bindings_bytes = serde_json::to_vec(&self.shortcut_bindings).map_or(usize::MAX, |bytes| bytes.len());
+        if !self.shortcut_bindings.is_object() || bindings_bytes > MAX_SHORTCUT_BINDINGS_BYTES {
+            self.shortcut_bindings = serde_json::Value::Object(serde_json::Map::new());
         }
 
         if self.netease_quality.trim() == "high" {

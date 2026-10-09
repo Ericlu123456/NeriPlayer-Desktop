@@ -35,6 +35,14 @@ const desktopLyricsStyle = {}
 new Function('exports', ts.transpileModule(await readFile(new URL('../src/modules/desktopLyrics/style.ts', import.meta.url), 'utf8'), {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
 }).outputText)(desktopLyricsStyle)
+const shortcutPlatform = {}
+new Function('exports', ts.transpileModule(await readFile(new URL('../src/modules/shortcuts/platform.ts', import.meta.url), 'utf8'), {
+  compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+}).outputText)(shortcutPlatform)
+const shortcutBindings = {}
+new Function('require', 'exports', ts.transpileModule(await readFile(new URL('../src/modules/shortcuts/bindings.ts', import.meta.url), 'utf8'), {
+  compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+}).outputText)(() => shortcutPlatform, shortcutBindings)
 const exports = {}
 new Function('require', 'exports', compiled)(name => {
   if (name === 'pinia') return pinia
@@ -42,6 +50,7 @@ new Function('require', 'exports', compiled)(name => {
   if (name === '@tauri-apps/api/core') return bridge
   if (name === '@/utils/logger') return { createLogger: () => ({ info() {}, warn() {}, error() {}, debug() {} }) }
   if (name === '@/modules/desktopLyrics/style') return desktopLyricsStyle
+  if (name === '@/modules/shortcuts/bindings') return shortcutBindings
   throw new Error(`Unexpected settings dependency: ${name}`)
 }, exports)
 

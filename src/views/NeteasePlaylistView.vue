@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { filterAndRank, trackSearchTokens } from '@/modules/search/textMatcher'
 import { ref, computed, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { usePlayerStore, type TrackInfo } from '@/stores/player'
@@ -83,13 +84,7 @@ function saveDetailCache(cacheKey: string) {
   })
 }
 
-const filteredTracks = computed(() => {
-  if (!searchQuery.value) return tracks.value
-  const q = searchQuery.value.toLowerCase()
-  return tracks.value.filter(t =>
-    t.title.toLowerCase().includes(q) || t.artist.toLowerCase().includes(q)
-  )
-})
+const filteredTracks = computed(() => filterAndRank(searchQuery.value, tracks.value, trackSearchTokens))
 
 // 大歌单分块渲染（网易云歌单可达上千行，一次性渲染在 WebKitGTK 上卡顿）
 const { visibleItems: visibleTracks, onScroll: onTrackListScroll, ensureIndex: ensureTrackIndex } =
