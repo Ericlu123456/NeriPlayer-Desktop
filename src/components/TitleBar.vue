@@ -140,24 +140,32 @@ onUnmounted(() => {
 
     <!-- 窗口控制（macOS 使用系统原生红绿灯，此处隐藏） -->
     <div v-if="!isMac" class="tb-controls">
-      <button class="tb-ctrl" type="button" @click="minimize" :title="t('common.minimize')">
-        <svg width="12" height="12" viewBox="0 0 12 12">
-          <rect x="2" y="5.5" width="8" height="1" fill="currentColor" />
+      <button class="tb-ctrl" type="button" @click="minimize" :title="t('common.minimize')" :aria-label="t('common.minimize')">
+        <svg viewBox="0 0 12 12" aria-hidden="true">
+          <path d="M2.5 6h7" />
         </svg>
       </button>
-      <button class="tb-ctrl" type="button" @click="toggleMaximize" :title="isMaximized ? t('common.restore') : t('common.maximize')">
-        <svg v-if="!isMaximized" width="12" height="12" viewBox="0 0 12 12">
-          <rect x="2.5" y="2.5" width="7" height="7" fill="none" stroke="currentColor" stroke-width="1" />
-        </svg>
-        <svg v-else width="12" height="12" viewBox="0 0 12 12">
-          <rect x="3.5" y="2" width="6.5" height="6.5" fill="none" stroke="currentColor" stroke-width="1" />
-          <rect x="2" y="3.5" width="6.5" height="6.5" fill="var(--md-background)" stroke="currentColor" stroke-width="1" />
-        </svg>
+      <button
+        class="tb-ctrl"
+        type="button"
+        @click="toggleMaximize"
+        :title="isMaximized ? t('common.restore') : t('common.maximize')"
+        :aria-label="isMaximized ? t('common.restore') : t('common.maximize')"
+      >
+        <Transition name="tb-ctrl-swap" mode="out-in">
+          <svg v-if="!isMaximized" key="max" viewBox="0 0 12 12" aria-hidden="true">
+            <rect x="2.5" y="2.5" width="7" height="7" rx="1.6" />
+          </svg>
+          <!-- 还原：后窗只画露出的两条边，不靠填色遮挡（自定义背景下底色是透明的） -->
+          <svg v-else key="restore" viewBox="0 0 12 12" aria-hidden="true">
+            <path d="M4.5 3V2.9A1.4 1.4 0 0 1 5.9 1.5h3.2A1.4 1.4 0 0 1 10.5 2.9v3.2A1.4 1.4 0 0 1 9.1 7.5H9" />
+            <rect x="1.5" y="4" width="6.5" height="6.5" rx="1.4" />
+          </svg>
+        </Transition>
       </button>
-      <button class="tb-ctrl tb-close" type="button" @click="close" :title="t('common.close')">
-        <svg width="12" height="12" viewBox="0 0 12 12">
-          <line x1="2.5" y1="2.5" x2="9.5" y2="9.5" stroke="currentColor" stroke-width="1" />
-          <line x1="9.5" y1="2.5" x2="2.5" y2="9.5" stroke="currentColor" stroke-width="1" />
+      <button class="tb-ctrl tb-close" type="button" @click="close" :title="t('common.close')" :aria-label="t('common.close')">
+        <svg viewBox="0 0 12 12" aria-hidden="true">
+          <path d="M3 3l6 6M9 3L3 9" />
         </svg>
       </button>
     </div>
@@ -344,10 +352,11 @@ onUnmounted(() => {
 }
 
 .tb-title {
-  font-size: 12px;
+  font-family: var(--font-display);
+  font-size: 13px;
   font-weight: 600;
   color: inherit;
-  letter-spacing: 0.2px;
+  letter-spacing: 0.3px;
   pointer-events: none;
   opacity: 0.85;
 }
@@ -452,25 +461,6 @@ onUnmounted(() => {
   margin: 0;
 }
 
-/* 播放器模式保持与普通顶栏同高，避免位移 */
-.tb-np-mode .tb-ctrl {
-  width: 46px;
-  height: 100%;
-  align-self: stretch;
-  border-radius: 0;
-}
-
-.tb-np-mode .tb-ctrl svg {
-  width: 12px;
-  height: 12px;
-}
-
-.tb-np-mode .tb-controls {
-  align-items: stretch;
-  gap: 0;
-  padding-right: 0;
-}
-
 /* 公共 */
 .tb-drag {
   flex: 1;
@@ -511,44 +501,74 @@ onUnmounted(() => {
   line-height: 1.35;
 }
 
+/* 窗口控制：与应用其余按钮一致的圆角悬停块，普通 / 播放器模式同尺寸，开合播放页不位移 */
 .tb-controls {
   display: flex;
-  align-items: stretch;
+  align-items: center;
+  gap: 2px;
+  padding: 0 6px 0 4px;
 }
 
 .tb-ctrl {
-  width: 46px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  width: 40px;
+  height: 28px;
+  display: grid;
+  place-items: center;
   background: transparent;
   border: none;
-  /* Windows/Linux 窗口控件按系统惯例是通栏直角，覆盖全局按钮圆角兜底 */
-  border-radius: 0;
+  border-radius: 8px;
   color: inherit;
-  opacity: 0.7;
+  opacity: 0.72;
   cursor: pointer;
-  transition: background var(--duration-short) var(--ease-standard),
-              opacity var(--duration-short) var(--ease-standard);
+  transition: background 140ms var(--ease-standard),
+              color 140ms var(--ease-standard),
+              opacity 140ms var(--ease-standard),
+              transform 120ms var(--ease-standard);
+
+  svg {
+    width: 12px;
+    height: 12px;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.15;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    overflow: visible;
+  }
 
   &:hover {
-    background: rgba(255, 255, 255, 0.08);
+    background: color-mix(in srgb, currentColor 12%, transparent);
     opacity: 1;
+  }
+
+  &:active {
+    background: color-mix(in srgb, currentColor 18%, transparent);
+    transform: scale(0.94);
   }
 }
 
-.light-theme .title-bar:not(.tb-force-light) .tb-ctrl:hover {
-  background: rgba(0, 0, 0, 0.06);
+.tb-close:hover {
+  background: #e81123;
+  color: #fff;
+  opacity: 1;
+}
+
+.tb-close:active {
+  background: #c50f1f;
+}
+
+.tb-ctrl-swap-enter-active,
+.tb-ctrl-swap-leave-active {
+  transition: opacity 120ms var(--ease-standard), transform 160ms var(--ease-emphasized-decel);
+}
+.tb-ctrl-swap-enter-from,
+.tb-ctrl-swap-leave-to {
+  opacity: 0;
+  transform: scale(0.7);
 }
 
 .light-theme .title-bar:not(.tb-force-light) .tb-np-btn:hover {
   background: rgba(0, 0, 0, 0.06);
-}
-
-.tb-close:hover {
-  background: #e81123 !important;
-  color: #fff;
-  opacity: 1;
 }
 
 </style>

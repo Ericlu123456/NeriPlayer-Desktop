@@ -21,6 +21,7 @@
         "titleBarStyle": "Overlay",
         "hiddenTitle": true,
         "transparent": false,
+        "backgroundColor": "#141218",
         "visible": false,
         "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,IntensiveWakeUpThrottling --disable-background-timer-throttling"
       }

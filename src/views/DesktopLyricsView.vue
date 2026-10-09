@@ -86,7 +86,7 @@ function reportHitRegion() {
   if (!isTauri()) return
   const button = unlockButton.value
   const rect = locked.value && button ? button.getBoundingClientRect() : null
-  const region = rect ? { x: rect.left - 4, y: rect.top - 4, width: rect.width + 8, height: rect.height + 8 } : null
+  const region = rect ? { x: rect.left - 8, y: rect.top - 8, width: rect.width + 16, height: rect.height + 16 } : null
   void invoke('desktop_lyrics_hit_region', { region }).catch(() => {})
 }
 

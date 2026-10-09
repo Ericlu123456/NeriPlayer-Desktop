@@ -1018,6 +1018,7 @@
     "clear_image": "クリア",
     "bg_blur": "背景ぼかし",
     "bg_opacity": "背景の不透明度",
+    "bg_dim": "背景を暗くする",
     "dev_mode": "開発者モード",
     "dev_mode_toast": "開発者モードが有効になりました",
     "dev_mode_tap_hint": "あと{count}回タップで開発者モードを有効化",

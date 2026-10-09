@@ -112,6 +112,8 @@ pub struct AppSettings {
     pub background_image_uri: String,
     pub background_image_blur: f32,
     pub background_image_alpha: f32,
+    /// 背景图压暗程度 0–0.8
+    pub background_image_dim: f32,
     /// 背景图模式下卡片、搜索框等控件的实时玻璃模糊（对齐 Android enhanced_advanced_blur_enabled，PC 默认开）
     pub enhanced_advanced_blur: bool,
     /// 玻璃模糊半径（px），12–64 按 4 对齐（Android enhanced_advanced_blur_radius_dp）
@@ -227,7 +229,7 @@ impl Default for AppSettings {
             advanced_lyrics: true,
             prefer_word_timed_lyrics: true,
             default_lyric_source: "automatic".into(),
-            color_mode: "default".into(),
+            color_mode: "cover".into(),
             dynamic_color: false,
             dynamic_background: true,
             audio_reactive: true,
@@ -247,6 +249,7 @@ impl Default for AppSettings {
             background_image_uri: String::new(),
             background_image_blur: 20.0,
             background_image_alpha: 0.3,
+            background_image_dim: 0.0,
             enhanced_advanced_blur: true,
             enhanced_advanced_blur_radius: 36.0,
             dev_mode_enabled: false,
@@ -334,6 +337,7 @@ impl AppSettings {
         self.cover_blur_darken = clamp_f32(self.cover_blur_darken, 0.0, 1.0, 0.2);
         self.background_image_blur = clamp_f32(self.background_image_blur, 0.0, 100.0, 20.0);
         self.background_image_alpha = clamp_f32(self.background_image_alpha, 0.0, 1.0, 0.3);
+        self.background_image_dim = clamp_f32(self.background_image_dim, 0.0, 0.8, 0.0);
         self.enhanced_advanced_blur_radius =
             (clamp_f32(self.enhanced_advanced_blur_radius, 12.0, 64.0, 36.0) / 4.0).round() * 4.0;
         self.max_cache_size = self
@@ -432,7 +436,7 @@ impl AppSettings {
         self.color_mode = normalize_choice(
             &self.color_mode,
             &["system", "default", "cover"],
-            "default",
+            "cover",
         );
         self.dynamic_color = false;
 

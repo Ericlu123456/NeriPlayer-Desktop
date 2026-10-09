@@ -8,6 +8,8 @@ const props = defineProps<{
   src: string
   blurPx: number
   opacity: number
+  /** 0–1 压暗，直接画进 canvas，不额外叠一层全屏遮罩 */
+  dim: number
 }>()
 
 const canvasRef = ref<HTMLCanvasElement | null>(null)
@@ -61,6 +63,11 @@ function draw(): void {
     drawHeight,
   )
   context.filter = 'none'
+  const dim = Math.min(Math.max(props.dim, 0), 1)
+  if (dim > 0) {
+    context.fillStyle = `rgba(0, 0, 0, ${dim})`
+    context.fillRect(0, 0, width, height)
+  }
   isReady.value = true
 }
 
@@ -97,7 +104,7 @@ function onResize(): void {
 }
 
 watch(() => props.src, load)
-watch(() => props.blurPx, () => draw())
+watch(() => [props.blurPx, props.dim], () => draw())
 
 onMounted(() => {
   window.addEventListener('resize', onResize)

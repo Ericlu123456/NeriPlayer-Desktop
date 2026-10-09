@@ -588,6 +588,7 @@ onUnmounted(() => {
       :src="bgImageSrc"
       :blur-px="settingsStore.backgroundImageBlur"
       :opacity="settingsStore.backgroundImageAlpha"
+      :dim="settingsStore.backgroundImageDim"
     />
     <SideNav class="app-side-nav" :inert="isNowPlayingOpen || undefined" />
     <main

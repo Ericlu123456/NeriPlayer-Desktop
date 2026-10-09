@@ -3191,6 +3191,7 @@ dependencies = [
  "walkdir",
  "webview2-com 0.38.2",
  "whoami",
+ "windows-sys 0.61.2",
  "winreg",
  "zstd",
 ]

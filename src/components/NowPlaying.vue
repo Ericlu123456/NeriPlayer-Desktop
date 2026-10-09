@@ -3771,8 +3771,10 @@ const sliderActiveColor = computed(() => {
 .np-time {
   display: flex;
   justify-content: space-between;
+  font-family: var(--font-mono);
   font-size: 11px;
-  font-weight: 600;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
   color: rgba(255,255,255,0.78);
   padding: 4px 4px 0;
   font-variant-numeric: tabular-nums;

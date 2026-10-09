@@ -10,6 +10,8 @@ import EditableRangeValue from './ui/EditableRangeValue.vue'
 import { getTrackCoverUrl } from '@/utils/trackCover'
 import { formatTimeMs as formatTime } from '@/utils/timeFormat'
 import { useEscapeClose } from '@/composables/useEscapeClose'
+import { useToastStore } from '@/stores/toast'
+import { closeDesktopLyricsWindow, desktopLyricsOpen, openDesktopLyricsWindow } from '@/modules/desktopLyrics/bridge'
 
 type CoverSnapshot = {
   rect: { left: number; top: number; width: number; height: number }
@@ -28,6 +30,16 @@ const props = withDefaults(defineProps<{
 const player = usePlayerStore()
 const lt = useListenTogetherStore()
 const { t } = useI18n()
+const toast = useToastStore()
+
+async function toggleDesktopLyrics() {
+  try {
+    if (desktopLyricsOpen.value) await closeDesktopLyricsWindow()
+    else await openDesktopLyricsWindow()
+  } catch {
+    toast.error(t('player.desktop_lyrics_failed'))
+  }
+}
 
 const showQueue = ref(false)
 const showLtPanel = ref(false)
@@ -270,8 +282,18 @@ defineExpose({
         </button>
       </div>
 
-      <!-- 右：音量 + 一起听 + 队列 + 展开 -->
+      <!-- 右：桌面歌词 + 音量 + 一起听 + 队列 + 展开 -->
       <div class="mp-right">
+        <button
+          class="mp-tool-btn"
+          :class="{ active: desktopLyricsOpen }"
+          :title="t('player.desktop_lyrics')"
+          :aria-label="t('player.desktop_lyrics')"
+          :aria-pressed="desktopLyricsOpen"
+          @click="toggleDesktopLyrics"
+        >
+          <span class="material-symbols-rounded" :class="{ filled: desktopLyricsOpen }">lyrics</span>
+        </button>
         <div ref="volumeWrapRef" class="mp-volume-wrap">
           <button class="mp-tool-btn" :class="{ active: showVolumeSlider }" @click="showVolumeSlider = !showVolumeSlider">
             <span class="material-symbols-rounded">{{ volumeIcon }}</span>
@@ -513,6 +535,7 @@ defineExpose({
 }
 
 .mp-time {
+  font-family: var(--font-mono);
   font-size: 11px;
   color: var(--md-on-surface-variant);
   opacity: 0.7;

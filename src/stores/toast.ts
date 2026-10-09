@@ -52,7 +52,8 @@ export const useToastStore = defineStore('toast', () => {
     messages.value.push({ id, text, type, duration, action: options.action })
     setTimeout(() => dismiss(id), duration)
 
-    // 同步写入历史
+    // 通知中心只留错误；成功 / 提示类 toast 看过即走，记进历史只会淹没真正需要处理的问题
+    if (type !== 'error') return
     history.value.unshift({
       id,
       text,

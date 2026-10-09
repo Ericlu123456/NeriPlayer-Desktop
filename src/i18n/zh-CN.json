@@ -1018,6 +1018,7 @@
     "clear_image": "清除",
     "bg_blur": "背景模糊",
     "bg_opacity": "背景透明度",
+    "bg_dim": "背景调暗",
     "dev_mode": "调试模式",
     "dev_mode_toast": "已启用调试模式",
     "dev_mode_tap_hint": "再点击 {count} 次启用调试模式",

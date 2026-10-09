@@ -88,6 +88,8 @@ export interface AppSettings {
   backgroundImageUri: string
   backgroundImageBlur: number
   backgroundImageAlpha: number
+  /** 背景图压暗程度 0–0.8：亮色图片上文字看不清时调暗 */
+  backgroundImageDim: number
   /** 背景图模式下卡片、搜索框等控件的实时玻璃模糊（Android enhanced_advanced_blur_enabled） */
   enhancedAdvancedBlur: boolean
   /** 玻璃模糊半径（px），12–64 按 4 对齐（Android enhanced_advanced_blur_radius_dp） */
@@ -202,7 +204,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   preferWordTimedLyrics: true,
   defaultLyricSource: 'automatic',
   dynamicBackground: true,
-  colorMode: 'default',
+  colorMode: 'cover',
   audioReactive: true,
   coverBlurBg: false,
   coverBlurAmount: 1.5,
@@ -220,6 +222,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   backgroundImageUri: '',
   backgroundImageBlur: 20,
   backgroundImageAlpha: 0.3,
+  backgroundImageDim: 0,
   enhancedAdvancedBlur: true,
   enhancedAdvancedBlurRadius: 36,
   devModeEnabled: false,
@@ -459,6 +462,7 @@ function normalizeSnapshot(input: unknown): AppSettings {
   result.coverBlurDarken = clamp(result.coverBlurDarken, 0, 1)
   result.backgroundImageBlur = clamp(result.backgroundImageBlur, 0, 100)
   result.backgroundImageAlpha = clamp(result.backgroundImageAlpha, 0, 1)
+  result.backgroundImageDim = clamp(result.backgroundImageDim, 0, 0.8)
   result.enhancedAdvancedBlurRadius = Math.round(
     clamp(result.enhancedAdvancedBlurRadius, ENHANCED_BLUR_RADIUS_MIN, ENHANCED_BLUR_RADIUS_MAX) / ENHANCED_BLUR_RADIUS_STEP,
   ) * ENHANCED_BLUR_RADIUS_STEP
@@ -599,6 +603,7 @@ export const useSettingsStore = defineStore('settings', () => {
   const backgroundImageUri = ref(initial.backgroundImageUri)
   const backgroundImageBlur = ref(initial.backgroundImageBlur)
   const backgroundImageAlpha = ref(initial.backgroundImageAlpha)
+  const backgroundImageDim = ref(initial.backgroundImageDim)
   const enhancedAdvancedBlur = ref(initial.enhancedAdvancedBlur)
   const enhancedAdvancedBlurRadius = ref(initial.enhancedAdvancedBlurRadius)
   const devModeEnabled = ref(initial.devModeEnabled)
@@ -642,7 +647,7 @@ export const useSettingsStore = defineStore('settings', () => {
     coverBlurAmount, coverBlurDarken, neteaseQuality, qqMusicQuality,
     youtubeQuality, biliQuality, bypassProxy, internationalizationEnabled, exploreSearchHistoryEnabled,
     youtubePlaybackSource, neteaseAutoSourceSwitch, neteaseLocalSourceFallback,
-    backgroundImageUri, backgroundImageBlur, backgroundImageAlpha, enhancedAdvancedBlur,
+    backgroundImageUri, backgroundImageBlur, backgroundImageAlpha, backgroundImageDim, enhancedAdvancedBlur,
     enhancedAdvancedBlurRadius, devModeEnabled,
     logToFile, logLevel,
     maxCacheSize, downloadNameTemplate, downloadDir, ltServerUrl, ltNickname,
@@ -741,7 +746,7 @@ export const useSettingsStore = defineStore('settings', () => {
     neteaseQuality, qqMusicQuality, youtubeQuality, biliQuality, bypassProxy,
     youtubePlaybackSource, neteaseAutoSourceSwitch, neteaseLocalSourceFallback,
     internationalizationEnabled, exploreSearchHistoryEnabled, backgroundImageUri, backgroundImageBlur,
-    backgroundImageAlpha, enhancedAdvancedBlur, enhancedAdvancedBlurRadius,
+    backgroundImageAlpha, backgroundImageDim, enhancedAdvancedBlur, enhancedAdvancedBlurRadius,
     devModeEnabled, logToFile, logLevel, maxCacheSize, downloadNameTemplate,
     downloadDir, ltServerUrl, ltNickname, ltAllowMemberControl,
     downloadParallelism, downloadAutoFillMetadata, downloadEmbedLyrics,

@@ -1018,6 +1018,7 @@
     "clear_image": "清除",
     "bg_blur": "背景模糊",
     "bg_opacity": "背景透明度",
+    "bg_dim": "背景調暗",
     "dev_mode": "開發者模式",
     "dev_mode_toast": "已啟用開發者模式",
     "dev_mode_tap_hint": "再點擊 {count} 次啟用開發者模式",

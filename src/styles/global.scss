@@ -64,6 +64,10 @@
   --font-family: 'MiSans', 'Inter', -apple-system, BlinkMacSystemFont,
     'Segoe UI Variable', 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB',
     'Microsoft YaHei UI', 'Noto Sans CJK SC', 'Noto Sans', system-ui, sans-serif;
+  /* 艺术字体（SIL OFL，随包本地加载）：只覆盖拉丁字符，中文自动回落到 MiSans */
+  --font-display: 'Fraunces Variable', var(--font-family);
+  --font-mono: 'Geist Mono Variable', 'Cascadia Mono', Consolas, var(--font-family);
+  --font-hand: 'Caveat Variable', var(--font-family);
 }
 
 /* macOS：更高的标题栏承载垂直居中的红绿灯（trafficLightPosition 20/20） */

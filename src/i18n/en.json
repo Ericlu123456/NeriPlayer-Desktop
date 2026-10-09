@@ -1018,6 +1018,7 @@
     "clear_image": "Clear",
     "bg_blur": "Background Blur",
     "bg_opacity": "Background Opacity",
+    "bg_dim": "Background Dimming",
     "dev_mode": "Debug Mode",
     "dev_mode_toast": "Debug mode enabled",
     "dev_mode_tap_hint": "Tap {count} more times to enable debug mode",

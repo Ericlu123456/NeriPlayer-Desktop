@@ -21,6 +21,8 @@
         font-display: swap;
         src: url(/fonts/Inter-Variable.woff2) format('woff2');
       }
+      /* MiSans 在 WebView2 里偏粗：正文 400 用更细的 Normal（分片见 misans-normal/，后声明优先），
+         Regular 只兜底分片没覆盖的字；其余每档往细挪一级，800 以上才用 Bold */
       @font-face {
         font-family: 'MiSans';
         font-style: normal;
@@ -33,19 +35,26 @@
         font-style: normal;
         font-weight: 500;
         font-display: swap;
-        src: url(/fonts/MiSans-Medium.woff2) format('woff2');
+        src: url(/fonts/MiSans-Regular.woff2) format('woff2');
       }
       @font-face {
         font-family: 'MiSans';
         font-style: normal;
         font-weight: 600;
         font-display: swap;
-        src: url(/fonts/MiSans-Semibold.woff2) format('woff2');
+        src: url(/fonts/MiSans-Medium.woff2) format('woff2');
       }
       @font-face {
         font-family: 'MiSans';
         font-style: normal;
         font-weight: 700;
+        font-display: swap;
+        src: url(/fonts/MiSans-Semibold.woff2) format('woff2');
+      }
+      @font-face {
+        font-family: 'MiSans';
+        font-style: normal;
+        font-weight: 800 900;
         font-display: swap;
         src: url(/fonts/MiSans-Bold.woff2) format('woff2');
       }
@@ -71,6 +80,7 @@
         vertical-align: middle;
       }
     </style>
+    <link rel="stylesheet" href="/fonts/misans-normal/MiSans-Normal.css" />
   </head>
   <body>
     <div id="app"></div>

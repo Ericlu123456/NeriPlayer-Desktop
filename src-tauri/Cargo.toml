@@ -70,6 +70,8 @@ rusqlite = { version = "0.40", features = ["bundled"] }
 webview2-com = "0.38"
 # 读取系统强调色（跟随系统取色）
 winreg = "0.55"
+# 桌面歌词锁定时直接读鼠标左键状态，解锁不依赖穿透窗口能否收到点击
+windows-sys = { version = "0.61", features = ["Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"

@@ -534,6 +534,7 @@ pub async fn set_desktop_lyrics_lock(
 async fn poll_locked_cursor(app: AppHandle, generation: u64) {
     let mut inside = false;
     let mut passthrough = true;
+    let mut was_pressed = primary_button_pressed();
     loop {
         tokio::time::sleep(LOCK_POLL).await;
         let region = {
@@ -544,10 +545,11 @@ async fn poll_locked_cursor(app: AppHandle, generation: u64) {
             state.lock.hit_region
         };
         let Some(window) = app.get_webview_window(WINDOW_LABEL) else { break };
+        // WebView 从客户区原点开始布局，命中计算必须用 inner 坐标
         let (Ok(cursor), Ok(origin), Ok(size), Ok(scale)) = (
             app.cursor_position(),
-            window.outer_position(),
-            window.outer_size(),
+            window.inner_position(),
+            window.inner_size(),
             window.scale_factor(),
         ) else {
             continue;
@@ -565,7 +567,29 @@ async fn poll_locked_cursor(app: AppHandle, generation: u64) {
             passthrough = !on_button;
             let _ = window.set_ignore_cursor_events(passthrough);
         }
+        // 部分设备上透明置顶窗口取消穿透后 WebView 仍收不到点击，按钮上按下左键时直接解锁
+        let pressed = primary_button_pressed();
+        if on_button && pressed && !was_pressed {
+            log::info!(target: "desktop-lyrics", "unlock via native click");
+            let _ = app.emit_to("main", ACTION_EVENT, serde_json::json!({"action":"unlock"}));
+        }
+        was_pressed = pressed;
     }
+}
+
+#[cfg(windows)]
+fn primary_button_pressed() -> bool {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON, VK_RBUTTON};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_SWAPBUTTON};
+    // GetAsyncKeyState 读的是物理按键：左右键互换时主键是物理右键
+    let key = if unsafe { GetSystemMetrics(SM_SWAPBUTTON) } != 0 { VK_RBUTTON } else { VK_LBUTTON };
+    let state = unsafe { GetAsyncKeyState(i32::from(key)) };
+    state < 0
+}
+
+#[cfg(not(windows))]
+fn primary_button_pressed() -> bool {
+    false
 }
 
 /// 歌词窗口报告锁定时可点的解锁按钮位置

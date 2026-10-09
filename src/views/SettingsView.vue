@@ -104,7 +104,7 @@ const {
   neteaseQuality, youtubeQuality, biliQuality,
   youtubePlaybackSource, neteaseAutoSourceSwitch, neteaseLocalSourceFallback,
   bypassProxy, internationalizationEnabled, exploreSearchHistoryEnabled,
-  backgroundImageUri, backgroundImageBlur, backgroundImageAlpha,
+  backgroundImageUri, backgroundImageBlur, backgroundImageAlpha, backgroundImageDim,
   enhancedAdvancedBlur, enhancedAdvancedBlurRadius,
   devModeEnabled, logToFile, logLevel,
   maxCacheSize, downloadNameTemplate, downloadDir,
@@ -1657,6 +1657,23 @@ useEscapeClose(
         </div>
           <input type="range" class="m3-slider" v-model.number="backgroundImageAlpha" min="0" max="1" step="0.05" />
         </div>
+        <div class="setting-card sub-card">
+        <div class="setting-info">
+          <div class="setting-title">{{ t('settings.bg_dim') }}</div>
+          <EditableRangeValue
+            v-model="backgroundImageDim"
+            class="setting-desc"
+            :min="0"
+            :max="0.8"
+            :step="0.05"
+            :inputScale="100"
+            :display-value="`${(backgroundImageDim * 100).toFixed(0)}%`"
+            input-suffix="%"
+            :aria-label="t('settings.bg_dim')"
+          />
+        </div>
+          <input type="range" class="m3-slider" v-model.number="backgroundImageDim" min="0" max="0.8" step="0.05" />
+        </div>
 
         <div class="setting-card sub-card">
           <div class="setting-info">
@@ -2911,7 +2928,7 @@ useEscapeClose(
         <img src="/app-icon.png" alt="NeriPlayer" style="width: 24px; height: 24px; border-radius: 4px;" />
       </div>
       <div class="setting-info">
-        <div class="setting-title">NeriPlayer Desktop{{ devModeEnabled ? ' (dev)' : '' }}</div>
+        <div class="setting-title about-wordmark">NeriPlayer <span class="about-wordmark-hand">Desktop</span>{{ devModeEnabled ? ' (dev)' : '' }}</div>
         <div class="setting-desc mono-build-value">
           {{ t('settings.version_info', {
             version: buildInfo?.version || 'dev',
@@ -2951,7 +2968,7 @@ useEscapeClose(
         <div class="setting-icon-wrap"><span class="material-symbols-rounded">schedule</span></div>
         <div class="setting-info">
           <div class="setting-title">{{ t('settings.build_time') }}</div>
-          <div class="setting-desc">{{ buildInfo.build_timestamp }}</div>
+          <div class="setting-desc mono-build-value">{{ buildInfo.build_timestamp }}</div>
         </div>
         <span class="material-symbols-rounded copy-hint-icon">content_copy</span>
       </div>
@@ -3633,9 +3650,26 @@ useEscapeClose(
 }
 
 .mono-build-value {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  font-size: 11px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  letter-spacing: 0.02em;
+  font-variant-numeric: tabular-nums slashed-zero;
   word-break: break-all;
+}
+
+.about-wordmark {
+  font-family: var(--font-display);
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+.about-wordmark-hand {
+  margin-left: 2px;
+  font-family: var(--font-hand);
+  font-size: 20px;
+  font-weight: 600;
+  color: var(--md-primary);
 }
 
 .copy-hint-icon {

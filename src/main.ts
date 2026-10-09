@@ -6,8 +6,13 @@ import { getCurrentWindow } from '@tauri-apps/api/window'
 import { isTauri } from '@tauri-apps/api/core'
 import i18n from './i18n'
 import { initTheme } from './utils/theme'
+import { installHostBackgroundSync } from './utils/hostBackground'
 import { preloadUserData } from './modules/persistence/userData'
 import { removeLegacyCacheBuckets } from './utils/persistentCache'
+import '@fontsource-variable/fraunces'
+import '@fontsource-variable/fraunces/wght-italic.css'
+import '@fontsource-variable/geist-mono'
+import '@fontsource-variable/caveat'
 import './styles/global.scss'
 
 // 在 DOM 挂载前应用主题（class 已在 index.html 内联脚本中预设）
@@ -75,6 +80,7 @@ async function mountWindow() {
   app.use(router)
   app.use(i18n)
   app.mount('#app')
+  installHostBackgroundSync()
 
   // Vue 挂载完成后显示窗口，避免闪烁
   if (isTauri()) void getCurrentWindow().show().catch(() => {})
