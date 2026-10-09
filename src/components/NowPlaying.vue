@@ -2221,7 +2221,7 @@ const sliderActiveColor = computed(() => {
         'np--rounded-window': isMacPlatform,
       },
     ]"
-    :style="dynamicColorVars"
+    :style="[dynamicColorVars, { backgroundColor: accentBgStyle.background }]"
     @click="closeToolbarPopovers()"
   >
     <!-- AccentBackdrop 底色层（对齐 Android：主色降饱和+调暗） -->
@@ -3266,7 +3266,12 @@ const sliderActiveColor = computed(() => {
   border-radius: 0;
   user-select: none;
   -webkit-user-select: none;
-  transition: transform 460ms cubic-bezier(0.22, 1, 0.36, 1), opacity 300ms ease;
+  transition: transform 460ms cubic-bezier(0.22, 1, 0.36, 1), opacity 300ms ease, background-color 0.8s ease;
+  /* 打开期间就常驻独立合成层：收起时只平移已画好的纹理。不常驻的话收起瞬间才提升图层、
+     整页现栅格化，来不及画完的几帧会透出下层（自定义背景下下层几乎全透明，于是闪白）；
+     根元素自带不透明底色，合成器补空块时也用这个颜色而不是透明 */
+  will-change: transform;
+  background-color: rgb(18, 18, 18);
 }
 
 .now-playing.np--rounded-window {
