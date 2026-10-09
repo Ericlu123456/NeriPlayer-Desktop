@@ -44,8 +44,14 @@ pub struct BiliAudioStream {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BiliVideoInfo {
     pub bvid: String,
+    #[serde(default)]
+    pub aid: u64,
     pub title: String,
     pub owner: String,
+    #[serde(default)]
+    pub owner_mid: u64,
+    #[serde(default)]
+    pub owner_face: String,
     pub cover: String,
     pub cid: u64,
     pub duration: u64,
@@ -267,17 +273,9 @@ impl BiliClient {
         params.insert("bvid".into(), bvid.into());
 
         let resp = self.wbi_get("https://api.bilibili.com/x/web-interface/wbi/view", params).await?;
-        let data = &resp["data"];
-
-        Ok(BiliVideoInfo {
-            bvid: bvid.to_string(),
-            title: data["title"].as_str().unwrap_or("").to_string(),
-            owner: data["owner"]["name"].as_str().unwrap_or("").to_string(),
-            cover: data["pic"].as_str().unwrap_or("").to_string(),
-            cid: data["cid"].as_u64().unwrap_or(0),
-            duration: data["duration"].as_u64().unwrap_or(0),
-            pages: parse_video_pages(data),
-        })
+        let mut info = video_info_from_view(&resp["data"]);
+        info.bvid = bvid.to_string();
+        Ok(info)
     }
 
     /// 获取音频流 URL（DASH 模式）
@@ -359,17 +357,40 @@ impl BiliClient {
         params.insert("aid".into(), avid.to_string());
 
         let resp = self.wbi_get("https://api.bilibili.com/x/web-interface/wbi/view", params).await?;
-        let data = &resp["data"];
+        Ok(video_info_from_view(&resp["data"]))
+    }
 
-        Ok(BiliVideoInfo {
-            bvid: data["bvid"].as_str().unwrap_or("").to_string(),
-            title: data["title"].as_str().unwrap_or("").to_string(),
-            owner: data["owner"]["name"].as_str().unwrap_or("").to_string(),
-            cover: data["pic"].as_str().unwrap_or("").to_string(),
-            cid: data["cid"].as_u64().unwrap_or(0),
-            duration: data["duration"].as_u64().unwrap_or(0),
-            pages: parse_video_pages(data),
-        })
+    /// 分页视频搜索（对齐 Android：综合排序、全部时长）
+    pub async fn search_videos(&self, keyword: &str, page: u32) -> AppResult<Value> {
+        self.wbi_get("https://api.bilibili.com/x/web-interface/wbi/search/type", BTreeMap::from([
+            ("search_type".into(), "video".into()),
+            ("keyword".into(), keyword.into()),
+            ("order".into(), "totalrank".into()),
+            ("duration".into(), "0".into()),
+            ("tids".into(), "0".into()),
+            ("page".into(), page.max(1).to_string()),
+        ])).await
+    }
+
+    /// 视频评论（对齐 Android）：sort 1 热门 / 0 最新
+    pub async fn get_video_comments(&self, aid: u64, page: u32, page_size: u32, sort: u32) -> AppResult<Value> {
+        self.api_get("https://api.bilibili.com/x/v2/reply", &BTreeMap::from([
+            ("type".into(), "1".into()),
+            ("oid".into(), aid.to_string()),
+            ("pn".into(), page.max(1).to_string()),
+            ("ps".into(), page_size.clamp(1, 49).to_string()),
+            ("sort".into(), if sort == 0 { "0" } else { "1" }.into()),
+        ])).await
+    }
+
+    pub async fn get_video_comment_replies(&self, aid: u64, root: u64, page: u32, page_size: u32) -> AppResult<Value> {
+        self.api_get("https://api.bilibili.com/x/v2/reply/reply", &BTreeMap::from([
+            ("type".into(), "1".into()),
+            ("oid".into(), aid.to_string()),
+            ("root".into(), root.to_string()),
+            ("pn".into(), page.max(1).to_string()),
+            ("ps".into(), page_size.clamp(1, 49).to_string()),
+        ])).await
     }
 
     /// 获取视频分 P 列表
@@ -383,6 +404,21 @@ impl BiliClient {
     pub async fn get_video_page_cid(&self, bvid: &str, page: u64) -> AppResult<Option<u64>> {
         let response = self.get_video_pages(bvid).await?;
         Ok(find_video_page_cid(&response, page))
+    }
+}
+
+fn video_info_from_view(data: &Value) -> BiliVideoInfo {
+    BiliVideoInfo {
+        bvid: data["bvid"].as_str().unwrap_or("").to_string(),
+        aid: data["aid"].as_u64().unwrap_or(0),
+        title: data["title"].as_str().unwrap_or("").to_string(),
+        owner: data["owner"]["name"].as_str().unwrap_or("").to_string(),
+        owner_mid: data["owner"]["mid"].as_u64().unwrap_or(0),
+        owner_face: data["owner"]["face"].as_str().unwrap_or("").to_string(),
+        cover: data["pic"].as_str().unwrap_or("").to_string(),
+        cid: data["cid"].as_u64().unwrap_or(0),
+        duration: data["duration"].as_u64().unwrap_or(0),
+        pages: parse_video_pages(data),
     }
 }
 

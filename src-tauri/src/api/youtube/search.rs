@@ -7,6 +7,17 @@ use crate::error::AppResult;
 
 const SONG_PARAMS: &str = "EgWKAQIIAWoKEAkQBRAKEAMQBA%3D%3D";
 const VIDEO_PARAMS: &str = "EgWKAQIQAWoKEAkQChAFEAMQBA%3D%3D";
+const CREATOR_PARAMS: &str = "EgWKAQIgAWoKEAkQChAFEAMQBA%3D%3D";
+const CREATOR_LIMIT: usize = 20;
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct YtCreatorResult {
+    pub browse_id: String,
+    pub title: String,
+    pub subtitle: String,
+    pub cover_url: Option<String>,
+}
 const RESULT_LIMIT: usize = 30;
 const PAGE_LIMIT: usize = 80;
 
@@ -247,6 +258,79 @@ async fn collect(
     .await
 }
 
+pub(super) async fn search_filtered(
+    client: &YouTubeClient,
+    query: &str,
+    videos: bool,
+) -> AppResult<Vec<YtSearchResult>> {
+    let query = query.trim();
+    if query.is_empty() {
+        return Ok(Vec::new());
+    }
+    collect(client, query, if videos { VIDEO_PARAMS } else { SONG_PARAMS }).await
+}
+
+fn parse_creator(renderer: &Value) -> Option<YtCreatorResult> {
+    let endpoint = renderer
+        .pointer("/navigationEndpoint/browseEndpoint")
+        .or_else(|| renderer.pointer("/title/runs/0/navigationEndpoint/browseEndpoint"))?;
+    let browse_id = endpoint["browseId"].as_str().filter(|id| !id.trim().is_empty())?;
+    let page_type = endpoint
+        .pointer("/browseEndpointContextSupportedConfigs/browseEndpointContextMusicConfig/pageType")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if !page_type.is_empty() && page_type != "MUSIC_PAGE_TYPE_ARTIST" && page_type != "MUSIC_PAGE_TYPE_USER_CHANNEL" {
+        return None;
+    }
+    let title = if renderer.get("flexColumns").is_some() { text(column(renderer, 0)) } else { text(&renderer["title"]) };
+    if title.trim().is_empty() {
+        return None;
+    }
+    let subtitle = if renderer.get("flexColumns").is_some() { text(column(renderer, 1)) } else { text(&renderer["subtitle"]) };
+    Some(YtCreatorResult {
+        browse_id: browse_id.to_string(),
+        title,
+        subtitle,
+        cover_url: thumbnail(renderer),
+    })
+}
+
+pub(super) fn parse_creators(root: &Value, limit: usize) -> Vec<YtCreatorResult> {
+    let mut rows = Vec::new();
+    let mut seen = HashSet::new();
+    let mut stack = vec![root];
+    let mut visited = 0;
+    while let Some(node) = stack.pop() {
+        visited += 1;
+        if visited > 8000 || rows.len() >= limit {
+            break;
+        }
+        for key in ["musicResponsiveListItemRenderer", "musicTwoRowItemRenderer"] {
+            if let Some(creator) = node.get(key).and_then(parse_creator) {
+                if seen.insert(creator.browse_id.clone()) {
+                    rows.push(creator);
+                }
+            }
+        }
+        match node {
+            Value::Object(object) => stack.extend(object.values().rev()),
+            Value::Array(array) => stack.extend(array.iter().rev()),
+            _ => {}
+        }
+    }
+    rows
+}
+
+/// 创作者搜索（对齐 Android searchCreators）：只取第一页，够做精确匹配与列表展示
+pub(super) async fn search_creators(client: &YouTubeClient, query: &str) -> AppResult<Vec<YtCreatorResult>> {
+    let query = query.trim();
+    if query.is_empty() {
+        return Ok(Vec::new());
+    }
+    let response = client.innertube_post("search", &request_body(query, CREATOR_PARAMS, None)).await?;
+    Ok(parse_creators(&response, CREATOR_LIMIT))
+}
+
 pub(super) async fn search_tracks(
     client: &YouTubeClient,
     query: &str,
@@ -342,6 +426,29 @@ mod tests {
         assert_eq!(rows[0].artist, "Plain artist");
         assert_eq!(rows[0].album, "Plain album");
         assert_eq!(rows[0].duration_ms, 225_000);
+    }
+
+    #[test]
+    fn creators_keep_artist_and_channel_pages_only() {
+        let creator = |id: &str, page: &str, name: &str| json!({"musicResponsiveListItemRenderer": {
+            "navigationEndpoint": {"browseEndpoint": {"browseId": id, "browseEndpointContextSupportedConfigs": {"browseEndpointContextMusicConfig": {"pageType": page}}}},
+            "flexColumns": [
+                {"musicResponsiveListItemFlexColumnRenderer": {"text": {"runs": [{"text": name}]}}},
+                {"musicResponsiveListItemFlexColumnRenderer": {"text": {"runs": [{"text": "Artist • 1M subscribers"}]}}}
+            ],
+            "thumbnail": {"musicThumbnailRenderer": {"thumbnail": {"thumbnails": [{"url": "https://yt3.ggpht.com/a=s120"}]}}}
+        }});
+        let root = json!({"contents": [
+            creator("UC1", "MUSIC_PAGE_TYPE_ARTIST", "Singer"),
+            creator("UC1", "MUSIC_PAGE_TYPE_ARTIST", "Singer"),
+            creator("UC2", "MUSIC_PAGE_TYPE_USER_CHANNEL", "Channel"),
+            creator("MPREalbum", "MUSIC_PAGE_TYPE_ALBUM", "Album"),
+        ]});
+        let creators = parse_creators(&root, 20);
+        assert_eq!(creators.iter().map(|c| c.browse_id.as_str()).collect::<Vec<_>>(), ["UC1", "UC2"]);
+        assert_eq!(creators[0].title, "Singer");
+        assert_eq!(creators[0].subtitle, "Artist • 1M subscribers");
+        assert_eq!(request_body("q", CREATOR_PARAMS, None)["params"], "EgWKAQIgAWoKEAkQChAFEAMQBA%3D%3D");
     }
 
     #[tokio::test]

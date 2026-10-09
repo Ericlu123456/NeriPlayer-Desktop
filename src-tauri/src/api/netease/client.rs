@@ -444,6 +444,88 @@ impl NeteaseClient {
         parse_json_response(resp, "netease weapi").await
     }
 
+    /// 明文表单 POST（对齐 Android CryptoMode.API），带登录 Cookie
+    async fn api_post(&self, url: &str, params: &[(&str, String)]) -> AppResult<Value> {
+        let build = |client: &Client| {
+            client
+                .post(url)
+                .header("User-Agent", USER_AGENT)
+                .header("Referer", "https://music.163.com")
+                .form(params)
+        };
+        let resp = self.send_with_fallback(build).await?;
+        parse_json_response(resp, "netease api").await
+    }
+
+    /// 探索页分类搜索（对齐 Android cloudsearch）：type 1 歌曲 / 1000 歌单 / 100 歌手
+    pub async fn cloudsearch(&self, keyword: &str, search_type: u32, limit: u32, offset: u32) -> AppResult<Value> {
+        let params = json!({
+            "s": keyword,
+            "type": search_type.to_string(),
+            "limit": limit.to_string(),
+            "offset": offset.to_string(),
+            "total": "true"
+        });
+        let body = self.weapi_post(&format!("{}/weapi/cloudsearch/get/web", BASE_URL), &params).await?;
+        match json_i64(&body["code"]) {
+            Some(200) | None => Ok(body),
+            Some(code) => Err(AppError::Api(format!("netease search code {code}"))),
+        }
+    }
+
+    /// 歌曲评论（对齐 Android getSongCommentsCancellable）：
+    /// sort 2 热门（游标 normalHot#偏移）/ 3 最新（必须沿用上一页游标）/ 99 推荐（游标为偏移）
+    pub async fn get_song_comments(
+        &self,
+        song_id: u64,
+        page: u32,
+        page_size: u32,
+        sort_type: u32,
+        cursor: Option<&str>,
+    ) -> AppResult<Value> {
+        let page = page.max(1);
+        let page_size = page_size.clamp(1, 100);
+        let offset = u64::from(page - 1) * u64::from(page_size);
+        let cursor = match sort_type {
+            3 if page == 1 => "0".to_string(),
+            3 => cursor.filter(|value| !value.is_empty())
+                .ok_or_else(|| AppError::Api("newest comments need the previous cursor".into()))?
+                .to_string(),
+            99 => offset.to_string(),
+            _ => format!("normalHot#{offset}"),
+        };
+        let sort_type = if matches!(sort_type, 3 | 99) { sort_type } else { 2 };
+        self.api_post(
+            &format!("{}/api/v2/resource/comments", BASE_URL),
+            &[
+                ("threadId", format!("R_SO_4_{song_id}")),
+                ("pageNo", page.to_string()),
+                ("pageSize", page_size.to_string()),
+                ("sortType", sort_type.to_string()),
+                ("cursor", cursor),
+                ("showInner", "true".to_string()),
+            ],
+        )
+        .await
+    }
+
+    /// 楼层回复（对齐 Android getSongCommentReplies），time 为上一页游标，首页 -1
+    pub async fn get_song_comment_replies(
+        &self,
+        song_id: u64,
+        parent_comment_id: u64,
+        limit: u32,
+        cursor: Option<&str>,
+    ) -> AppResult<Value> {
+        let params = json!({
+            "threadId": format!("R_SO_4_{song_id}"),
+            "parentCommentId": parent_comment_id.to_string(),
+            "limit": limit.clamp(1, 100).to_string(),
+            "time": cursor.filter(|value| !value.is_empty()).unwrap_or("-1"),
+        });
+        self.weapi_post(&format!("{}/weapi/resource/comment/floor/get", BASE_URL), &params).await
+    }
+
     /// 搜索歌曲
     pub async fn search(&self, keyword: &str, limit: u32, offset: u32) -> AppResult<Vec<NeteaseSearchResult>> {
         let params = json!({

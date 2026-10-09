@@ -67,6 +67,8 @@ import {
 import { useLyricOffsetStore } from '@/stores/lyricOffset'
 import HyperBackground from './HyperBackground.vue'
 import CoverBlurBackground from './CoverBlurBackground.vue'
+import CommentsPanel from './CommentsPanel.vue'
+import { resolveCommentTarget } from '@/modules/playback/commentTarget'
 import BilibiliCoverImage from './BilibiliCoverImage.vue'
 import WaveformSlider from './WaveformSlider.vue'
 import LyricsView from './LyricsView.vue'
@@ -135,6 +137,8 @@ const showVolumeSlider = ref(false)
 const showQueue = ref(false)
 const showAddToPlaylist = ref(false)
 const showAudioFxPanel = ref(false)
+const showComments = ref(false)
+const commentTarget = computed(() => resolveCommentTarget(player.currentTrack))
 const showSleepMenu = ref(false)
 const showMoreSheet = ref(false)
 const showLtPanel = ref(false)
@@ -1172,7 +1176,7 @@ defineExpose({
 
 // 右键菜单（歌曲名/歌手复制 + 封面保存）
 const contextMenu = ref({ show: false, x: 0, y: 0, type: '' as 'title' | 'artist' | 'cover' | 'artist-page' })
-const artistLinks = ref<Array<{ id: string; name: string; route: { name: string; params: Record<string, string> } }>>([])
+const artistLinks = ref<Array<{ id: string; name: string; route: { name: string; params: Record<string, string>; query?: Record<string, string> } }>>([])
 const artistLinkTrackId = ref('')
 const artistLinksLoading = ref(false)
 
@@ -1180,15 +1184,40 @@ async function openArtistPage(event: MouseEvent) {
   const track = player.currentTrack
   if (!track?.artist.trim() || artistLinksLoading.value) return
   const source = getPlaybackSourceKind(track)
-  if (source && source !== 'netease') {
-    await router.push({ name: 'explore', query: { q: track.artist, platform: source === 'qq' ? 'netease' : source } })
+  if (source === 'qq') {
+    await router.push({ name: 'explore', query: { q: track.artist, platform: 'netease', kind: 'artists' } })
     emit('collapse')
     return
   }
   artistLinksLoading.value = true
   try {
     let links: typeof artistLinks.value
-    if (source === 'netease') {
+    if (source === 'youtube') {
+      // 对齐 Android resolveYouTubeMusicCreators：按名字精确匹配创作者，匹配不到再退回创作者搜索
+      const creators = await invoke<Array<{ id: string; name: string; cover_url: string | null }>>('resolve_youtube_creators', { artist: track.artist })
+      links = creators.map(creator => ({
+        id: creator.id, name: creator.name,
+        route: { name: 'youtube-artist', params: { browseId: creator.id }, query: { name: creator.name, cover: creator.cover_url || '' } },
+      }))
+      if (!links.length) {
+        if (player.currentTrack?.id !== track.id) return
+        await router.push({ name: 'explore', query: { q: track.artist, platform: 'youtube', kind: 'creators' } })
+        emit('collapse')
+        return
+      }
+    } else if (source === 'bilibili') {
+      // 对齐 Android resolveBiliUploader：B 站的「歌手」就是视频的 UP 主
+      const bvid = `${track.id} ${track.syncPayload?.audioId ?? track.syncPayload?.audio_id ?? ''}`.match(/BV[0-9A-Za-z]{10}/)?.[0]
+      const uploader = bvid ? await invoke<{ id: string; name: string; cover_url: string | null } | null>('resolve_bili_uploader', { bvid }) : null
+      if (!uploader) {
+        toast.show(t('player.bili_uploader_unavailable'), 'info')
+        return
+      }
+      links = [{
+        id: uploader.id, name: uploader.name,
+        route: { name: 'bili-artist', params: { mid: uploader.id }, query: { name: uploader.name, cover: uploader.cover_url || '' } },
+      }]
+    } else if (source === 'netease') {
       const rawId = track.syncPayload?.audioId ?? track.syncPayload?.audio_id ?? track.id.replace(/^netease:/i, '')
       const songId = Number(rawId)
       if (!Number.isSafeInteger(songId) || songId <= 0) return
@@ -2460,6 +2489,7 @@ const sliderActiveColor = computed(() => {
                 {{ formatSleepRemaining(player.sleepRemainingSeconds) }}
               </span>
             </button>
+            <Transition name="np-popover">
             <div v-if="showSleepMenu" class="sleep-popover np-floating-popover np-floating-popover--menu">
               <button
                 v-for="opt in sleepOptions"
@@ -2477,6 +2507,7 @@ const sliderActiveColor = computed(() => {
                 {{ t('player.sleep_off') }}
               </button>
             </div>
+            </Transition>
           </div>
           <div class="volume-wrap">
             <button
@@ -2486,6 +2517,7 @@ const sliderActiveColor = computed(() => {
             >
               <span class="material-symbols-rounded">{{ player.volume === 0 ? 'volume_off' : player.volume < 0.5 ? 'volume_down' : 'volume_up' }}</span>
             </button>
+            <Transition name="np-popover">
             <div v-if="showVolumeSlider" class="volume-popover np-floating-popover np-floating-popover--volume">
               <input
                 type="range"
@@ -2511,18 +2543,32 @@ const sliderActiveColor = computed(() => {
                 @update:model-value="player.setVolume($event)"
               />
             </div>
+            </Transition>
           </div>
           <!-- 音效 (AudioFX) -->
           <div class="speed-wrap">
             <button class="tool-btn tool-btn--feedback" :class="{ active: showAudioFxPanel || player.hasActiveEffects }" @click="triggerControlFeedbackPulse(); toggleToolbarPanel('audiofx')">
               <span class="material-symbols-rounded">tune</span>
             </button>
-            <div v-if="showAudioFxPanel" class="audiofx-popover np-floating-popover np-floating-popover--audiofx">
-              <AudioEffectsPanel />
-            </div>
+            <Transition name="np-popover">
+              <div v-if="showAudioFxPanel" class="audiofx-popover np-floating-popover np-floating-popover--audiofx">
+                <AudioEffectsPanel />
+              </div>
+            </Transition>
           </div>
           <button class="tool-btn tool-btn--feedback" @click="triggerControlFeedbackPulse(); toggleToolbarPanel('add')">
             <span class="material-symbols-rounded">playlist_add</span>
+          </button>
+          <!-- 评论（对齐 Android：仅网易云、B 站） -->
+          <button
+            v-if="commentTarget"
+            class="tool-btn tool-btn--feedback"
+            :class="{ active: showComments }"
+            :title="t('player.comments')"
+            :aria-label="t('player.comments')"
+            @click="triggerControlFeedbackPulse(); closeToolbarPopovers(); showComments = true"
+          >
+            <span class="material-symbols-rounded">chat_bubble</span>
           </button>
         </div>
         </div>
@@ -2553,9 +2599,12 @@ const sliderActiveColor = computed(() => {
 
     <!-- 播放队列面板（Teleport 到 body，避免被全屏页开合动画的 transform 包含块限制） -->
     <Teleport to="body">
-      <QueuePanel v-if="player.hasPlaybackSession && showQueue" @close="showQueue = false" />
+      <Transition name="queue-sheet">
+        <QueuePanel v-if="player.hasPlaybackSession && showQueue" @close="showQueue = false" />
+      </Transition>
     </Teleport>
     <AddToPlaylistDialog v-if="player.hasPlaybackSession" v-model:open="showAddToPlaylist" :track="player.currentTrack" />
+    <CommentsPanel v-model:open="showComments" :track="player.currentTrack" />
     <ListenTogetherPanel v-if="player.hasPlaybackSession" v-model:open="showLtPanel" />
 
     <!-- 更多选项面板（对齐 Android MoreOptionsSheet） -->
@@ -2584,6 +2633,13 @@ const sliderActiveColor = computed(() => {
                 <span class="material-symbols-rounded">edit</span>
                 <div class="np-more-list-info">
                   <span class="np-more-list-headline">{{ t('player.edit_info') }}</span>
+                </div>
+                <span class="material-symbols-rounded np-more-chevron">chevron_right</span>
+              </button>
+              <button v-if="commentTarget" class="np-more-list-item" @click="showMoreSheet = false; showComments = true">
+                <span class="material-symbols-rounded">chat_bubble</span>
+                <div class="np-more-list-info">
+                  <span class="np-more-list-headline">{{ t('player.comments') }}</span>
                 </div>
                 <span class="material-symbols-rounded np-more-chevron">chevron_right</span>
               </button>
@@ -4149,17 +4205,18 @@ const sliderActiveColor = computed(() => {
   }
 }
 
-@keyframes np-popover-rise {
-  0% {
-    opacity: 0;
-    transform: translateX(-50%) translateY(10px) scale(0.94);
-    filter: blur(8px);
-  }
-  100% {
-    opacity: 1;
-    transform: translateX(-50%) translateY(0) scale(1);
-    filter: blur(0);
-  }
+/* 工具栏弹层：transition 而非一次性关键帧，连点按钮可从当前状态反向；
+   不再动画 filter: blur，它叠在 backdrop-filter 上每帧都要重算两次模糊 */
+.np-floating-popover.np-popover-enter-active {
+  transition: opacity 200ms ease, transform 260ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+.np-floating-popover.np-popover-leave-active {
+  transition: opacity 140ms ease, transform 160ms var(--ease-emphasized-accel);
+}
+.np-floating-popover.np-popover-enter-from,
+.np-floating-popover.np-popover-leave-to {
+  opacity: 0;
+  transform: translateX(-50%) translateY(10px) scale(0.94);
 }
 
 @keyframes np-toolbar-breathe {
@@ -4490,7 +4547,6 @@ const sliderActiveColor = computed(() => {
   box-shadow:
     0 14px 40px rgba(0,0,0,0.46),
     0 0 0 1px rgba(255,255,255,0.03) inset;
-  animation: np-popover-rise 260ms cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 .np-floating-popover::before {

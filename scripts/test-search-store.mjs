@@ -4,18 +4,17 @@ import ts from 'typescript'
 import * as pinia from 'pinia'
 import * as vue from 'vue'
 
-const source = await readFile(new URL('../src/stores/search.ts', import.meta.url), 'utf8')
+const source = await readFile(new URL('../src/stores/exploreSearch.ts', import.meta.url), 'utf8')
 const compiled = ts.transpileModule(source, {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
 }).outputText
 
 const pending = []
 function invoke(command, args) {
-  assert.equal(command, 'search')
   let resolve
   let reject
   const promise = new Promise((accept, fail) => { resolve = accept; reject = fail })
-  pending.push({ args, resolve, reject })
+  pending.push({ command, args, resolve, reject })
   return promise
 }
 
@@ -25,48 +24,61 @@ new Function('require', 'exports', compiled)(name => {
   if (name === 'vue') return vue
   if (name === '@tauri-apps/api/core') return { invoke }
   if (name === '@/utils/logger') return { createLogger: () => ({ info() {}, warn() {}, error() {}, debug() {} }) }
-  throw new Error(`Unexpected search dependency: ${name}`)
+  throw new Error(`Unexpected explore search dependency: ${name}`)
 }, exports)
 
 pinia.setActivePinia(pinia.createPinia())
-const store = exports.useSearchStore()
-const result = id => [{ id, title: id, artist: '', album: '', duration_ms: 0, source: 'netease', cover_url: null }]
+const store = exports.useExploreSearchStore()
+const song = id => ({ kind: 'song', id, title: id, artist: '', album: '', duration_ms: 0, source: 'netease', cover_url: null })
+const page = (ids, hasMore = false) => ({ items: ids.map(song), has_more: hasMore })
+
+// 分类与平台都随请求带上，对齐 Android 的类型参数
+assert.deepEqual(exports.EXPLORE_KINDS.netease, ['songs', 'playlists', 'artists'])
+assert.deepEqual(exports.EXPLORE_KINDS.youtube, ['songs', 'videos', 'creators'])
 
 // 慢的旧关键词晚于新关键词返回，不能覆盖新结果
-const slow = store.search('old', 'netease')
-const fast = store.search('new', 'netease')
-pending[1].resolve(result('new'))
+const slow = store.search('netease', 'songs', 'old')
+const fast = store.search('netease', 'playlists', 'new')
+assert.deepEqual(pending[1].args, { platform: 'netease', kind: 'playlists', query: 'new', page: 1 })
+pending[1].resolve(page(['new'], true))
 await fast
-pending[0].resolve(result('old'))
+pending[0].resolve(page(['old']))
 await slow
-assert.deepEqual(store.results.map(r => r.id), ['new'])
+assert.deepEqual(store.items.map(item => item.id), ['new'])
+assert.equal(store.hasMore, true)
 assert.equal(store.isSearching, false)
 
-// 旧请求失败也不能清空新结果或留下错误
-const failing = store.search('broken', 'bilibili')
-const current = store.search('fine', 'bilibili')
-pending[3].resolve(result('fine'))
-await current
-pending[2].reject(new Error('timeout'))
-await failing
-assert.deepEqual(store.results.map(r => r.id), ['fine'])
-assert.equal(store.error, null)
+// 加载下一页：页码递增、去重追加；换了关键词后的旧分页结果丢弃
+const more = store.loadMore('netease', 'playlists', 'new')
+assert.equal(pending[2].args.page, 2)
+pending[2].resolve(page(['new', 'second'], false))
+await more
+assert.deepEqual(store.items.map(item => item.id), ['new', 'second'])
+assert.equal(store.hasMore, false)
+await store.loadMore('netease', 'playlists', 'new')
+assert.equal(pending.length, 3, 'no more pages means no request')
+
+// 链接页走链接识别，结果是单个条目（可能是提示）
+const link = store.search('link', 'songs', 'https://b23.tv/x')
+assert.equal(pending[3].command, 'resolve_share_link')
+pending[3].resolve({ kind: 'notice', reason: 'unsupported' })
+await link
+assert.deepEqual(store.items, [{ kind: 'notice', reason: 'unsupported' }])
 
 // 当前请求失败时给出错误，便于界面与「无结果」区分
-const failed = store.search('offline', 'youtube')
+const failed = store.search('youtube', 'videos', 'offline')
 pending[4].reject(new Error('network down'))
 await failed
-assert.deepEqual(store.results, [])
+assert.deepEqual(store.items, [])
 assert.match(store.error, /network down/)
 
 // clear() 之后返回的旧响应被丢弃，加载态立即结束
-const inFlight = store.search('late', 'netease')
+const inFlight = store.search('bilibili', 'videos', 'late')
 assert.equal(store.isSearching, true)
 store.clear()
 assert.equal(store.isSearching, false)
-pending[5].resolve(result('late'))
+pending[5].resolve(page(['late']))
 await inFlight
-assert.deepEqual(store.results, [])
-assert.equal(store.query, '')
+assert.deepEqual(store.items, [])
 
-console.log('search store request ordering tests passed')
+console.log('explore search store tests passed')

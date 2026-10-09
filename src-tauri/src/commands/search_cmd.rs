@@ -134,32 +134,38 @@ async fn search_qq(
 async fn search_bilibili(query: &str, state: &State<'_, AppState>) -> AppResult<Vec<SearchResult>> {
     let client = state.bilibili();
     let resp = client.search(query).await?;
+    Ok(bili_search_rows(&resp))
+}
 
-    let results = resp["data"]["result"]
+/// B 站搜索结果中的「mm:ss」或「h:mm:ss」
+pub(crate) fn parse_clock_duration_ms(text: &str) -> u64 {
+    text.split(':')
+        .try_fold(0u64, |total, part| part.trim().parse::<u64>().ok().map(|value| total * 60 + value))
+        .unwrap_or(0)
+        * 1000
+}
+
+pub(crate) fn strip_bili_highlight(text: &str) -> String {
+    static TAG: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let tag = TAG.get_or_init(|| regex::Regex::new(r"</?em[^>]*>").expect("bili highlight regex"));
+    tag.replace_all(text, "")
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+}
+
+pub(crate) fn bili_search_rows(resp: &serde_json::Value) -> Vec<SearchResult> {
+    resp["data"]["result"]
         .as_array()
         .unwrap_or(&Vec::new())
         .iter()
         .filter_map(|item| {
             let bvid = item["bvid"].as_str()?;
-            // 清理 HTML 高亮标签
-            let title = item["title"]
-                .as_str()
-                .unwrap_or("")
-                .replace("<em class=\"keyword\">", "")
-                .replace("</em>", "");
+            let title = strip_bili_highlight(item["title"].as_str().unwrap_or(""));
             let author = item["author"].as_str().unwrap_or("").to_string();
-            let duration: u64 = {
-                // B站返回 "mm:ss" 格式
-                let d = item["duration"].as_str().unwrap_or("0:00");
-                let parts: Vec<&str> = d.split(':').collect();
-                if parts.len() == 2 {
-                    let m: u64 = parts[0].parse().unwrap_or(0);
-                    let s: u64 = parts[1].parse().unwrap_or(0);
-                    (m * 60 + s) * 1000
-                } else {
-                    0
-                }
-            };
+            let duration = parse_clock_duration_ms(item["duration"].as_str().unwrap_or("0:00"));
             let cover = item["pic"].as_str().map(|s| {
                 if s.starts_with("//") {
                     format!("https:{}", s)
@@ -181,9 +187,7 @@ async fn search_bilibili(query: &str, state: &State<'_, AppState>) -> AppResult<
                 translated_lyrics: None,
             })
         })
-        .collect();
-
-    Ok(results)
+        .collect()
 }
 
 async fn search_youtube(query: &str, state: &State<'_, AppState>) -> AppResult<Vec<SearchResult>> {
@@ -232,7 +236,7 @@ async fn search_lrclib(query: &str, state: &State<'_, AppState>) -> AppResult<Ve
 }
 
 /// 将 YouTube Music 缩略图 URL 升级为高清尺寸（对齐 Android upgradeYouTubeThumbnailUrl）
-fn upgrade_youtube_thumbnail_url(url: &str) -> String {
+pub(crate) fn upgrade_youtube_thumbnail_url(url: &str) -> String {
     let trimmed = url.trim();
     if trimmed.is_empty() {
         return trimmed.to_string();

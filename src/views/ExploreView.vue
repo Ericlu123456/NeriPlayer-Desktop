@@ -1,11 +1,15 @@
 <script setup lang="ts">
-import { ref, computed, watch, onMounted } from 'vue'
+import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 defineOptions({ name: 'ExploreView' })
 import { useI18n } from 'vue-i18n'
-import { useSearchStore } from '@/stores/search'
-import { usePlayerStore } from '@/stores/player'
+import { readText } from '@tauri-apps/plugin-clipboard-manager'
+import {
+  EXPLORE_KINDS, useExploreSearchStore,
+  type ExploreCollection, type ExploreItem, type ExploreKind, type ExploreSong,
+} from '@/stores/exploreSearch'
+import { usePlayerStore, type TrackInfo } from '@/stores/player'
 import { useAuthStore } from '@/stores/auth'
 import { useRecommendStore, type PlaylistInfo } from '@/stores/recommend'
 import { useSettingsStore } from '@/stores/settings'
@@ -17,7 +21,7 @@ import { formatTrackDuration as formatDuration } from '@/utils/timeFormat'
 const router = useRouter()
 const route = useRoute()
 const { t } = useI18n()
-const searchStore = useSearchStore()
+const searchStore = useExploreSearchStore()
 const player = usePlayerStore()
 const auth = useAuthStore()
 const recommend = useRecommendStore()
@@ -30,8 +34,9 @@ const isFocused = ref(false)
 
 // 平台 Tab
 // 探索页不含 QQ 音乐（QQ 的搜索/播放/账号能力仍保留在其它模块）
-type PlatformTab = 'netease' | 'bilibili' | 'youtube'
-const PLATFORM_KEYS: PlatformTab[] = ['netease', 'bilibili', 'youtube']
+// 「链接」页对齐 Android LINK_RECOGNITION：粘贴分享链接直接识别出歌曲、歌单或歌手
+type PlatformTab = 'netease' | 'bilibili' | 'youtube' | 'link'
+const PLATFORM_KEYS: PlatformTab[] = ['netease', 'bilibili', 'youtube', 'link']
 // 国际化开启时 YouTube Music 为高优先级来源: tab 提前且作为默认平台
 const ytmFirst = settings.internationalizationEnabled
 const initialPlatform = PLATFORM_KEYS.includes(String(route.query.platform) as PlatformTab)
@@ -40,16 +45,30 @@ const initialPlatform = PLATFORM_KEYS.includes(String(route.query.platform) as P
 const activeTab = ref<PlatformTab>(initialPlatform)
 
 const platformTabs = computed(() => {
-  const tabs = [
-    { key: 'netease' as PlatformTab, label: t('settings.netease_account'), icon: '/icons/ic_netease.svg' },
-    { key: 'bilibili' as PlatformTab, label: t('settings.bilibili_account'), icon: '/icons/ic_bilibili.svg' },
-    { key: 'youtube' as PlatformTab, label: t('settings.youtube_account'), icon: '/icons/ic_youtube.svg' },
+  const tabs: Array<{ key: PlatformTab; label: string; icon?: string; symbol?: string }> = [
+    { key: 'netease', label: t('settings.netease_account'), icon: '/icons/ic_netease.svg' },
+    { key: 'bilibili', label: t('settings.bilibili_account'), icon: '/icons/ic_bilibili.svg' },
+    { key: 'youtube', label: t('settings.youtube_account'), icon: '/icons/ic_youtube.svg' },
   ]
   if (settings.internationalizationEnabled) {
     tabs.unshift(...tabs.splice(2, 1))
   }
+  tabs.push({ key: 'link', label: t('explore.tab_link'), symbol: 'link' })
   return tabs
 })
+
+// 每个平台记住自己上次选的分类，切回来不用重选
+const searchKinds = ref<Record<Exclude<PlatformTab, 'link'>, ExploreKind>>({ netease: 'songs', bilibili: 'videos', youtube: 'songs' })
+const activeKind = computed<ExploreKind>(() => activeTab.value === 'link' ? 'songs' : searchKinds.value[activeTab.value])
+const kindOptions = computed(() => activeTab.value === 'link' ? [] : EXPLORE_KINDS[activeTab.value])
+const KIND_ICONS: Record<ExploreKind, string> = {
+  songs: 'music_note', playlists: 'queue_music', artists: 'person', videos: 'smart_display', creators: 'account_circle',
+}
+function selectKind(kind: ExploreKind) {
+  if (activeTab.value === 'link' || searchKinds.value[activeTab.value] === kind) return
+  searchKinds.value = { ...searchKinds.value, [activeTab.value]: kind }
+}
+const searchPlaceholder = computed(() => activeTab.value === 'link' ? t('explore.link_placeholder') : t('explore.search_placeholder'))
 
 // 网易云歌单 Tag
 const TAG_KEYS = [
@@ -175,12 +194,17 @@ async function loadQualityByTag(tagKey: string) {
 const isSearching = computed(() => !!searchQuery.value.trim())
 
 let searchTimer: ReturnType<typeof setTimeout> | null = null
+function runSearch() {
+  void searchStore.search(activeTab.value, activeKind.value, searchQuery.value)
+}
 watch(searchQuery, (q) => {
   if (searchTimer) clearTimeout(searchTimer)
   if (!q.trim()) { searchStore.clear(); return }
-  searchTimer = setTimeout(() => {
-    searchStore.search(q, activeTab.value)
-  }, 300)
+  // 粘贴链接不需要等用户停手
+  searchTimer = setTimeout(runSearch, activeTab.value === 'link' ? 0 : 300)
+})
+watch(activeKind, () => {
+  if (searchQuery.value.trim()) runSearch()
 })
 
 // 页面被 KeepAlive 缓存：离开探索页时 route.query 属于别的页面，不能据此清空搜索
@@ -191,11 +215,95 @@ watch(() => route.query.q, (q) => {
 }, { immediate: true })
 
 function retrySearch() {
-  if (searchQuery.value.trim()) void searchStore.search(searchQuery.value, activeTab.value)
+  if (searchQuery.value.trim()) runSearch()
+}
+
+async function pasteLink() {
+  try {
+    const text = (await readText())?.trim()
+    if (text) searchQuery.value = text
+  } catch {
+    // 剪贴板里不是文本时什么都不做
+  }
+}
+
+// 列表滚到底自动加载下一页（网易云、B 站；YouTube 后端一次取满）
+const loadMoreSentinel = ref<HTMLElement | null>(null)
+let loadMoreObserver: IntersectionObserver | null = null
+watch(loadMoreSentinel, (element) => {
+  loadMoreObserver?.disconnect()
+  if (!element) return
+  loadMoreObserver = new IntersectionObserver((entries) => {
+    if (entries.some(entry => entry.isIntersecting)) {
+      void searchStore.loadMore(activeTab.value, activeKind.value, searchQuery.value)
+    }
+  }, { rootMargin: '400px 0px' })
+  loadMoreObserver.observe(element)
+})
+onBeforeUnmount(() => loadMoreObserver?.disconnect())
+
+const songResults = computed(() => searchStore.items.filter((item): item is ExploreSong => item.kind === 'song'))
+
+function songToTrack(song: ExploreSong): TrackInfo {
+  return {
+    id: song.id,
+    title: song.title,
+    artist: song.artist,
+    album: song.album || '',
+    durationMs: song.duration_ms,
+    coverUrl: song.cover_url || '',
+    audioUrl: '',
+  } as TrackInfo
+}
+
+/// 对齐 Android onSongClick(searchResults, index)：整份歌曲结果入队，从点中的那首开始
+function openResult(item: ExploreItem) {
+  if (item.kind === 'song') {
+    rememberSearch()
+    const queue = songResults.value.map(songToTrack)
+    player.playAll(queue, item.id)
+    return
+  }
+  if (item.kind === 'notice') return
+  rememberSearch()
+  openCollection(item)
+}
+
+function openCollection(item: ExploreCollection) {
+  if (item.kind === 'playlist') {
+    if (item.platform === 'netease') router.push({ name: 'netease-playlist', params: { id: item.id } })
+    else if (item.platform === 'bilibili') router.push({ name: 'bili-playlist', params: { mediaId: item.id } })
+    else router.push({ name: 'youtube-playlist', params: { browseId: item.id } })
+    return
+  }
+  const query = { name: item.name, cover: item.cover_url || '' }
+  if (item.platform === 'netease') router.push({ name: 'netease-artist', params: { id: item.id }, query })
+  else if (item.platform === 'bilibili') router.push({ name: 'bili-artist', params: { mid: item.id }, query })
+  else router.push({ name: 'youtube-artist', params: { browseId: item.id }, query: { ...query, subtitle: item.subtitle } })
+}
+
+function collectionMeta(item: ExploreCollection): string {
+  if (item.kind === 'playlist') {
+    const count = item.track_count ? t('library.track_count', { count: item.track_count }) : ''
+    return [count, item.subtitle].filter(Boolean).join(' · ')
+  }
+  // 网易云歌手副标题是「单曲数|专辑数」
+  const [songs, albums] = item.subtitle.split('|')
+  if (item.platform === 'netease' && albums !== undefined) {
+    return t('explore.artist_meta', { songs: Number(songs) || 0, albums: Number(albums) || 0 })
+  }
+  return item.subtitle
+}
+
+function resultKey(item: ExploreItem, index: number): string {
+  if (item.kind === 'song') return `song:${item.id}`
+  if (item.kind === 'notice') return `notice:${index}`
+  return `${item.kind}:${item.platform}:${item.id}`
 }
 
 // 边输入边搜，只在确认时（回车、播放结果、点历史）记历史，免得记下半截关键词
 function rememberSearch() {
+  if (activeTab.value === 'link') return
   searchHistory.record(searchQuery.value)
 }
 
@@ -212,10 +320,16 @@ watch(() => route.query.platform, (platform) => {
   }
 })
 
+// 播放页「找不到这位创作者」时带 kind=creators/artists 跳来，直接落在对应分类
+watch(() => route.query.kind, (kind) => {
+  if (route.name !== 'explore' || typeof kind !== 'string' || activeTab.value === 'link') return
+  if (EXPLORE_KINDS[activeTab.value].includes(kind as ExploreKind)) selectKind(kind as ExploreKind)
+}, { immediate: true })
+
 // 切换平台 Tab 时，如果有搜索关键词则重新搜索
 watch(activeTab, (tab) => {
   if (searchQuery.value.trim()) {
-    searchStore.search(searchQuery.value, tab)
+    runSearch()
     return
   }
   if (tab === 'bilibili') void loadDiscoveryShelves('bilibili')
@@ -300,7 +414,7 @@ onMounted(() => {
       <input
         v-model="searchQuery"
         type="text"
-        :placeholder="t('explore.search_placeholder')"
+        :placeholder="searchPlaceholder"
         data-shortcut-search
         @focus="isFocused = true"
         @blur="isFocused = false"
@@ -320,15 +434,29 @@ onMounted(() => {
         :class="{ active: activeTab === tab.key }"
         @click="activeTab = tab.key"
       >
-        <span
-          class="tab-icon"
-          :style="{ maskImage: `url(${tab.icon})` }"
-        ></span>
+        <span v-if="tab.icon" class="tab-icon" :style="{ maskImage: `url(${tab.icon})` }"></span>
+        <span v-else class="material-symbols-rounded tab-symbol">{{ tab.symbol }}</span>
         <span class="tab-label">{{ tab.label }}</span>
       </button>
     </div>
 
-    <div v-if="!isSearching && searchHistory.visible.length > 0" class="search-history">
+    <!-- 分类：网易云 歌曲/歌单/歌手，YouTube Music 歌曲/视频/创作者 -->
+    <div v-if="kindOptions.length > 1" class="kind-chips" role="tablist">
+      <button
+        v-for="kind in kindOptions"
+        :key="kind"
+        class="kind-chip"
+        role="tab"
+        :aria-selected="activeKind === kind"
+        :class="{ active: activeKind === kind }"
+        @click="selectKind(kind)"
+      >
+        <span class="material-symbols-rounded">{{ KIND_ICONS[kind] }}</span>
+        {{ t(`explore.kind_${kind}`) }}
+      </button>
+    </div>
+
+    <div v-if="!isSearching && activeTab !== 'link' && searchHistory.visible.length > 0" class="search-history">
       <div class="search-history-header">
         <span class="search-history-title">{{ t('explore.search_history') }}</span>
         <button class="search-history-clear" @click="searchHistory.clear()">{{ t('explore.clear_search_history') }}</button>
@@ -346,25 +474,49 @@ onMounted(() => {
     </div>
 
     <!-- 搜索结果 -->
-    <div v-else-if="isSearching && searchStore.results.length > 0" class="search-results">
-      <div
-        v-for="r in searchStore.results"
-        :key="r.id"
-        class="result-item"
-        @click="playResult(r)"
-      >
-        <div class="result-cover">
-          <BilibiliCoverImage v-if="r.cover_url" :src="r.cover_url" loading="lazy">
-            <span class="material-symbols-rounded filled">music_note</span>
-          </BilibiliCoverImage>
-          <span v-else class="material-symbols-rounded filled">music_note</span>
+    <div v-else-if="isSearching && searchStore.items.length > 0" class="search-results">
+      <template v-for="(item, index) in searchStore.items" :key="resultKey(item, index)">
+        <div v-if="item.kind === 'notice'" class="link-notice" role="status">
+          <span class="material-symbols-rounded">{{ item.reason === 'no_link' ? 'link_off' : 'info' }}</span>
+          <div>
+            <strong>{{ t(`explore.link_${item.reason}_title`) }}</strong>
+            <p>{{ t(`explore.link_${item.reason}_desc`) }}</p>
+          </div>
         </div>
-        <div class="result-info">
-          <div class="result-title">{{ r.title }}</div>
-          <div class="result-meta">{{ r.artist }}<span v-if="r.album"> · {{ r.album }}</span></div>
+        <div
+          v-else
+          class="result-item"
+          :class="{ playing: item.kind === 'song' && player.currentTrack?.id === item.id }"
+          role="button"
+          tabindex="0"
+          @click="openResult(item)"
+          @keydown.enter="openResult(item)"
+        >
+          <div class="result-cover" :class="{ round: item.kind === 'artist' }">
+            <BilibiliCoverImage v-if="item.cover_url" :src="item.cover_url" loading="lazy">
+              <span class="material-symbols-rounded filled">{{ item.kind === 'song' ? 'music_note' : item.kind === 'artist' ? 'person' : 'queue_music' }}</span>
+            </BilibiliCoverImage>
+            <span v-else class="material-symbols-rounded filled">{{ item.kind === 'song' ? 'music_note' : item.kind === 'artist' ? 'person' : 'queue_music' }}</span>
+          </div>
+          <div class="result-info">
+            <template v-if="item.kind === 'song'">
+              <div class="result-title">{{ item.title }}</div>
+              <div class="result-meta">{{ item.artist }}<span v-if="item.album && !item.album.startsWith('Bilibili|')"> · {{ item.album }}</span></div>
+            </template>
+            <template v-else>
+              <div class="result-title">{{ item.name || t(item.kind === 'artist' ? 'explore.kind_artists' : 'explore.kind_playlists') }}</div>
+              <div class="result-meta">{{ collectionMeta(item) }}</div>
+            </template>
+          </div>
+          <template v-if="item.kind === 'song'">
+            <div v-if="activeTab === 'link'" class="result-source">{{ platformLabel(item.source) }}</div>
+            <div class="result-duration">{{ item.duration_ms ? formatDuration(item.duration_ms) : '' }}</div>
+          </template>
+          <span v-else class="material-symbols-rounded result-chevron">chevron_right</span>
         </div>
-        <div class="result-source">{{ platformLabel(r.source) }}</div>
-        <div class="result-duration">{{ formatDuration(r.duration_ms) }}</div>
+      </template>
+      <div v-if="searchStore.hasMore" ref="loadMoreSentinel" class="load-more-state">
+        <span v-if="searchStore.isLoadingMore" class="material-symbols-rounded spinning small">progress_activity</span>
       </div>
     </div>
 
@@ -376,7 +528,7 @@ onMounted(() => {
     </div>
 
     <!-- 搜索无结果 -->
-    <div v-else-if="isSearching && searchStore.results.length === 0" class="empty-state" style="padding: 40px 0">
+    <div v-else-if="isSearching && searchStore.items.length === 0" class="empty-state" style="padding: 40px 0">
       <span class="material-symbols-rounded" style="font-size: 32px; opacity: 0.4">search_off</span>
       <p class="empty-desc" style="margin-top: 8px">{{ t('player.no_results') }}</p>
     </div>
@@ -419,6 +571,29 @@ onMounted(() => {
             </div>
             <div class="playlist-name">{{ pl.name }}</div>
             <div v-if="pl.trackCount" class="playlist-count">{{ t('library.track_count', { count: pl.trackCount }) }}</div>
+          </div>
+        </div>
+      </template>
+
+      <!-- 链接 Tab：粘贴分享链接识别 -->
+      <template v-else-if="activeTab === 'link'">
+        <div class="platform-hero link">
+          <span class="material-symbols-rounded hero-symbol">link</span>
+          <div>
+            <h2>{{ t('explore.link_title') }}</h2>
+            <p>{{ t('explore.link_hint') }}</p>
+          </div>
+          <button class="hero-action" @click="pasteLink">
+            <span class="material-symbols-rounded">content_paste</span>{{ t('explore.link_paste') }}
+          </button>
+        </div>
+        <div class="link-examples">
+          <div v-for="example in ['netease', 'bilibili', 'youtube']" :key="example" class="link-example">
+            <span class="tab-icon" :style="{ maskImage: `url(/icons/ic_${example}.svg)` }"></span>
+            <div>
+              <strong>{{ t(`settings.${example}_account`) }}</strong>
+              <p>{{ t(`explore.link_example_${example}`) }}</p>
+            </div>
           </div>
         </div>
       </template>
@@ -644,6 +819,94 @@ onMounted(() => {
   white-space: nowrap;
 }
 
+.tab-symbol { font-size: 20px; }
+
+/* 分类 chips */
+.kind-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: -6px 0 18px;
+}
+
+.kind-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 34px;
+  padding: 0 14px 0 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--md-outline-variant);
+  color: var(--md-on-surface-variant);
+  font-size: 13px;
+  font-weight: 500;
+  transition: background var(--duration-short) var(--ease-standard), color var(--duration-short) var(--ease-standard), border-color var(--duration-short) var(--ease-standard);
+
+  .material-symbols-rounded { font-size: 18px; }
+  &:hover { background: var(--md-surface-container-high); }
+  &.active {
+    background: var(--md-secondary-container);
+    color: var(--md-on-secondary-container);
+    border-color: transparent;
+  }
+}
+
+/* 链接识别 */
+.hero-symbol {
+  font-size: 34px;
+  color: var(--platform-color);
+}
+
+.hero-action {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  height: 40px;
+  padding: 0 18px 0 14px;
+  border-radius: var(--radius-full);
+  background: var(--md-primary);
+  color: var(--md-on-primary);
+  font-size: 13px;
+  font-weight: 600;
+
+  .material-symbols-rounded { font-size: 18px; }
+  &:hover { opacity: 0.92; }
+}
+
+.link-examples {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 12px;
+}
+
+.link-example {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  padding: 14px 16px;
+  border-radius: var(--radius-lg);
+  background: var(--md-surface-container);
+
+  .tab-icon { margin-top: 2px; background: var(--md-primary); }
+  strong { font-size: 13px; }
+  p { margin-top: 4px; font-size: 12px; color: var(--md-on-surface-variant); line-height: 1.5; overflow-wrap: anywhere; }
+}
+
+.link-notice {
+  display: flex;
+  gap: 14px;
+  align-items: flex-start;
+  padding: 16px 18px;
+  border-radius: var(--radius-lg);
+  background: var(--md-surface-container);
+
+  > .material-symbols-rounded { color: var(--md-primary); }
+  strong { font-size: 14px; }
+  p { margin-top: 4px; font-size: 13px; color: var(--md-on-surface-variant); }
+}
+
 /* Tag 选择区 */
 .tag-section {
   margin-bottom: 20px;
@@ -796,6 +1059,7 @@ onMounted(() => {
 
   &.bilibili { --platform-color: #00a1d6; }
   &.youtube { --platform-color: #ff0033; }
+  &.link { --platform-color: var(--md-primary); }
 
   .tab-icon { background: var(--platform-color); }
 
@@ -1024,4 +1288,18 @@ onMounted(() => {
   font-variant-numeric: tabular-nums;
   flex-shrink: 0;
 }
+
+.result-item.playing .result-title { color: var(--md-primary); }
+.result-cover.round { border-radius: 50%; }
+.result-chevron { font-size: 20px; opacity: 0.35; flex-shrink: 0; }
+
+.load-more-state {
+  display: flex;
+  justify-content: center;
+  min-height: 48px;
+  padding: 12px 0;
+  color: var(--md-on-surface-variant);
+}
+
+.spinning.small { font-size: 22px; }
 </style>

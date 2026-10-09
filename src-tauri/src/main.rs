@@ -4,7 +4,7 @@ use neri_player_desktop::audio::analyzer::SharedAudioLevel;
 use neri_player_desktop::audio::media_session::{MediaAction, MediaSessionController};
 use neri_player_desktop::auth;
 use neri_player_desktop::commands::{
-    auth_cmd, cache_cmd, debug_cmd, desktop_lyrics_cmd, download_cmd, image_cmd, library_cmd,
+    auth_cmd, cache_cmd, debug_cmd, desktop_lyrics_cmd, download_cmd, explore_cmd, image_cmd, library_cmd,
     local_files_cmd, listen_together_cmd, lyrics_cmd, player_cmd, playback_fallback_cmd,
     recommend_cmd, search_cmd, settings_cmd, stats_cmd, storage_cmd, sync_cmd, tray_cmd,
     user_data_cmd,
@@ -150,6 +150,9 @@ fn main() {
 
             // 系统托盘：关闭主窗口后收进托盘继续播放
             tray_cmd::setup(app)?;
+
+            // 本地音乐库：读索引、开始监视文件夹，后台做一次增量校对
+            neri_player_desktop::library::local_index::start(handle.clone());
 
             // 恢复持久化的登录 Cookie
             {
@@ -492,6 +495,11 @@ fn main() {
             local_files_cmd::scan_local_files,
             local_files_cmd::cancel_local_scan,
             local_files_cmd::get_local_playlist_tracks,
+            local_files_cmd::local_library_snapshot,
+            local_files_cmd::local_library_add_folder,
+            local_files_cmd::local_library_remove_folder,
+            local_files_cmd::local_library_rescan,
+            local_files_cmd::local_library_cancel_scan,
             local_files_cmd::edit_local_file_tags,
             local_files_cmd::get_local_audio_info,
             player_cmd::release_audio_file,
@@ -526,6 +534,12 @@ fn main() {
             playback_fallback_cmd::find_netease_local_sources,
             playback_fallback_cmd::find_netease_bili_sources,
             search_cmd::search,
+            explore_cmd::explore_search,
+            explore_cmd::resolve_share_link,
+            explore_cmd::resolve_youtube_creators,
+            explore_cmd::resolve_bili_uploader,
+            explore_cmd::get_comments,
+            explore_cmd::get_comment_replies,
             image_cmd::fetch_bilibili_cover,
             lyrics_cmd::parse_lrc_content,
             lyrics_cmd::load_lyrics_file,
@@ -633,6 +647,7 @@ fn main() {
             stats_cmd::clear_playback_stats,
             stats_cmd::remove_playback_stats,
             stats_cmd::playback_stats_identity_key,
+            stats_cmd::get_playback_stat_tracks,
             user_data_cmd::load_user_data_snapshot,
             user_data_cmd::import_legacy_user_data,
             user_data_cmd::save_playback_state,

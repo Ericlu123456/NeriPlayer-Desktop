@@ -163,6 +163,15 @@ impl YouTubeClient {
         super::search::search_tracks(self, query).await
     }
 
+    /// 探索页分类搜索：songs / videos 各走 Android 同一组筛选参数
+    pub async fn search_tracks_of(&self, query: &str, videos: bool) -> AppResult<Vec<YtSearchResult>> {
+        super::search::search_filtered(self, query, videos).await
+    }
+
+    pub async fn search_creators(&self, query: &str) -> AppResult<Vec<super::search::YtCreatorResult>> {
+        super::search::search_creators(self, query).await
+    }
+
     /// 获取音频流 (兼容入口: 委托 playback; 无 auth 时仅 guest 路径)
     /// 正式播放请走 commands 注入 YouTubeAuth, 以便 Premium 生效
     pub async fn get_streams(&self, video_id: &str) -> AppResult<Vec<YtAudioStream>> {
