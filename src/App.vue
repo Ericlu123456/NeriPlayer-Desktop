@@ -20,6 +20,7 @@ import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { invoke } from '@tauri-apps/api/core'
 import { convertFileSrc } from '@tauri-apps/api/core'
 import { getCurrentWindow } from '@tauri-apps/api/window'
+import AppBackgroundImage from '@/components/AppBackgroundImage.vue'
 import MiniPlayer from '@/components/MiniPlayer.vue'
 import NowPlaying from '@/components/NowPlaying.vue'
 import SideNav from '@/components/SideNav.vue'
@@ -219,18 +220,13 @@ async function adoptManagedBackgroundImage() {
   }
 }
 
-const bgImageStyle = computed(() => {
+const bgImageSrc = computed(() => {
   const uri = settingsStore.backgroundImageUri
-  if (!uri) return null
-  const src = uri.startsWith('http') ? uri : convertFileSrc(uri)
-  return {
-    backgroundImage: `url("${src}")`,
-    filter: `blur(${settingsStore.backgroundImageBlur}px)`,
-    opacity: settingsStore.backgroundImageAlpha,
-  }
+  if (!uri) return ''
+  return /^https?:/i.test(uri) ? uri : convertFileSrc(uri)
 })
 watch(
-  () => [!!bgImageStyle.value, settingsStore.enhancedAdvancedBlur, settingsStore.enhancedAdvancedBlurRadius] as const,
+  () => [!!bgImageSrc.value, settingsStore.enhancedAdvancedBlur, settingsStore.enhancedAdvancedBlurRadius] as const,
   ([active, glass, radius]) => {
     const root = document.documentElement
     root.classList.toggle('has-custom-bg', active)
@@ -492,7 +488,7 @@ onMounted(async () => {
     cycleRepeat: () => player.toggleRepeatMode(),
     // 覆盖所有实际存在的弹层根类，弹层打开时不响应全局播放快捷键（UI-002）
     isOverlayOpen: () => document.querySelector(
-      '.m3-dialog-overlay, .dialog-overlay, .context-menu-overlay, .atp-overlay, .lt-overlay, .queue-overlay, .notif-overlay, .debug-dialog-overlay',
+      '.m3-dialog-overlay, .dialog-overlay, .context-menu-overlay, .atp-overlay, .lt-overlay, .queue-overlay, .comments-overlay, .notif-overlay, .debug-dialog-overlay',
     ) !== null,
   })
 
@@ -585,24 +581,20 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div
-    class="app-layout"
-    :class="{
-      'app-layout--np-active': isNowPlayingOpen || isNowPlayingMotionActive,
-      'app-layout--np-opening': nowPlayingMotionState === 'opening',
-      'app-layout--np-closing': nowPlayingMotionState === 'closing',
-    }"
-  >
+  <div class="app-layout">
     <!-- 自定义背景图 -->
-    <div v-if="bgImageStyle" class="app-bg-image" :style="bgImageStyle"></div>
-    <SideNav class="app-side-nav" :class="{ 'app-side-nav--dimmed': isNowPlayingOpen }" />
+    <AppBackgroundImage
+      v-if="bgImageSrc"
+      :src="bgImageSrc"
+      :blur-px="settingsStore.backgroundImageBlur"
+      :opacity="settingsStore.backgroundImageAlpha"
+    />
+    <SideNav class="app-side-nav" :inert="isNowPlayingOpen || undefined" />
     <main
       ref="contentRef"
       class="content"
-      :class="{
-        'has-mini-player': hasMiniPlayer,
-        'content--np-dimmed': isNowPlayingOpen,
-      }"
+      :class="{ 'has-mini-player': hasMiniPlayer }"
+      :inert="isNowPlayingOpen || undefined"
     >
       <router-view v-slot="{ Component, route }">
         <transition name="fade" mode="out-in" @enter="restoreContentScroll">
@@ -612,6 +604,10 @@ onUnmounted(() => {
         </transition>
       </router-view>
     </main>
+
+    <!-- 播放页开合时压暗底层：用独立遮罩而不是给页面设透明度，页面里的玻璃卡片
+         （backdrop-filter）不会因祖先透明度变化失去背景采样而闪烁 -->
+    <div class="np-underlay-scrim" :class="{ 'np-underlay-scrim--visible': isNowPlayingOpen }" aria-hidden="true" />
 
     <!-- MiniPlayer 动画 -->
     <transition :name="miniTransitionName">
@@ -678,29 +674,9 @@ onUnmounted(() => {
   isolation: isolate;
 }
 
-.app-bg-image {
-  position: fixed;
-  inset: 0;
-  z-index: 0;
-  background-size: cover;
-  background-position: center;
-  background-repeat: no-repeat;
-  pointer-events: none;
-  /* scale slightly to hide blur edges */
-  transform: scale(1.1);
-}
-
 .app-side-nav {
   position: relative;
   z-index: 2;
-  transition: opacity 200ms ease;
-
-  &.app-side-nav--dimmed {
-    /* 仅透明度，避免背景缩放干扰详情页纯上滑 */
-    transition: opacity 320ms ease;
-    opacity: 0.55;
-    pointer-events: none;
-  }
 }
 
 .content {
@@ -709,44 +685,43 @@ onUnmounted(() => {
   overflow-x: hidden;
   position: relative;
   z-index: 2;
-  /* 恢复态用较快的 transition */
-  transition:
-    padding-bottom 300ms var(--ease-standard),
-    opacity 200ms ease;
+  transition: padding-bottom 300ms var(--ease-standard);
 
   /* 预留迷你播放器高度 + 少量余量避开进度条热区；余量过大会在列表下方露出白带 */
   &.has-mini-player { padding-bottom: calc(var(--mini-player-height, 76px) + 6px); }
+}
 
-  &.content--np-dimmed {
-    /* 仅透明度，禁止缩放/位移 */
-    transition:
-      padding-bottom 300ms var(--ease-standard),
-      opacity 320ms ease;
-    opacity: 0.55;
-    pointer-events: none;
+.np-underlay-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 150;
+  background: rgb(0 0 0 / 0.45);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 200ms ease;
+
+  &.np-underlay-scrim--visible {
+    opacity: 1;
+    transition-duration: 320ms;
   }
 }
 
-/* MiniPlayer 入场退场 */
+/* MiniPlayer 入场退场：只动 transform/opacity，滤镜动画会让玻璃底栏逐帧重算模糊 */
 .mini-enter-enter-active {
   transition: transform 350ms var(--ease-emphasized-decel),
-              opacity 250ms var(--ease-decelerate),
-              filter 350ms var(--ease-emphasized-decel);
+              opacity 250ms var(--ease-decelerate);
 }
 .mini-enter-leave-active {
   transition: transform 200ms var(--ease-emphasized-accel),
-              opacity 150ms var(--ease-accelerate),
-              filter 200ms var(--ease-emphasized-accel);
+              opacity 150ms var(--ease-accelerate);
 }
 .mini-enter-enter-from {
   transform: translateY(100%) scale(0.98);
   opacity: 0;
-  filter: blur(12px);
 }
 .mini-enter-leave-to {
   transform: translateY(100%);
   opacity: 0;
-  filter: blur(10px);
 }
 
 .flip-cover-overlay {
