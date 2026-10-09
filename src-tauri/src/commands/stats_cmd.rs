@@ -174,6 +174,84 @@ pub async fn remove_playback_stats(
     Ok(())
 }
 
+/// 把一条统计还原成可播放的曲目（对齐 Android 统计页点歌即播）
+///
+/// 本机记下的统计 id 带平台前缀（`netease:123`）；Android 同步来的是同步模型的
+/// 裸 id + album/mediaUri 标记，交给同步歌单同一套 SyncSong -> TrackInfo 规则解析
+fn stat_to_track(stat: &crate::sync::models::SyncTrackStat) -> Option<crate::state::TrackInfo> {
+    use crate::state::TrackInfo;
+    let id = stat.id.trim();
+    let media_uri = stat.media_uri.clone().unwrap_or_default();
+    let prefixed = id.split_once(':').and_then(|(prefix, rest)| {
+        let source = match prefix {
+            "netease" => TrackSource::Netease,
+            "qq" => TrackSource::Qq,
+            "bilibili" => TrackSource::Bilibili,
+            "youtube" => TrackSource::Youtube,
+            "local" => TrackSource::Local,
+            _ => return None,
+        };
+        (!rest.is_empty()).then_some(source)
+    });
+    if let Some(source) = prefixed {
+        let url = if source == TrackSource::Local {
+            if media_uri.trim().is_empty() { id.trim_start_matches("local:").to_string() } else { media_uri }
+        } else {
+            String::new()
+        };
+        return Some(TrackInfo {
+            id: id.to_string(),
+            title: stat.name.clone(),
+            artist: stat.artist.clone(),
+            album: stat.album.clone(),
+            duration_ms: stat.duration_ms.max(0) as u64,
+            source,
+            url,
+            cover_url: stat.cover_url.clone(),
+            added_at: 0,
+            sync_payload: None,
+            playlist_key: None,
+        });
+    }
+    if id.is_empty() && media_uri.trim().is_empty() {
+        return None;
+    }
+    let song = crate::sync::models::SyncSong {
+        id: id.to_string(),
+        name: stat.name.clone(),
+        artist: stat.artist.clone(),
+        album: stat.album.clone(),
+        album_id: stat.album_id.clone(),
+        duration_ms: stat.duration_ms,
+        cover_url: stat.cover_url.clone().unwrap_or_default(),
+        media_uri: media_uri.clone(),
+        ..Default::default()
+    };
+    let mut track = manager::sync_song_to_track_pub(&song);
+    if track.source == TrackSource::Local {
+        track.url = media_uri;
+    }
+    Some(track)
+}
+
+/// 按传入顺序还原多条统计；还原不了的（无 id 的旧记录等）原位返回 null
+#[tauri::command]
+pub async fn get_playback_stat_tracks(
+    identity_keys: Vec<String>,
+    state: State<'_, AppState>,
+) -> AppResult<Vec<Option<crate::state::TrackInfo>>> {
+    let store = state.stats.lock();
+    let by_key: std::collections::HashMap<&str, &crate::sync::models::SyncTrackStat> = store
+        .stats
+        .iter()
+        .map(|stat| (stat.identity_key.as_str(), stat))
+        .collect();
+    Ok(identity_keys
+        .iter()
+        .map(|key| by_key.get(key.as_str()).and_then(|stat| stat_to_track(stat)))
+        .collect())
+}
+
 /// 计算曲目的统计身份键，供前端上报时使用
 #[tauri::command]
 pub async fn playback_stats_identity_key(

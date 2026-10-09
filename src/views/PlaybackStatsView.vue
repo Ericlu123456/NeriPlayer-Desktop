@@ -2,7 +2,8 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
-import { usePlayerStore, type TrackInfo } from '@/stores/player'
+import { invoke } from '@tauri-apps/api/core'
+import { normalizeTrack, usePlayerStore, type TrackInfo } from '@/stores/player'
 import {
   STATS_PERIODS,
   usePlaybackStatsStore,
@@ -49,38 +50,39 @@ function isFilesystemPath(value: string): boolean {
   return /^[a-zA-Z]:[\\/]/.test(value) || value.startsWith('/') || value.startsWith('\\\\')
 }
 
-// 本地歌曲要有文件路径才能播放：优先统计里记下的位置，旧记录从 local:<路径> 身份里取；
-// 其他设备同步来的 content:// 等地址在桌面端无法打开
-function localPlaybackPath(item: TrackStat): string {
-  const fromId = item.id.startsWith('local:') ? item.id.slice('local:'.length) : ''
-  return [item.mediaUri ?? '', fromId].find(isFilesystemPath) ?? ''
+// 本地歌曲要有本机文件路径才能播放；其他设备同步来的 content:// 等地址在桌面端打不开
+function isPlayable(track: TrackInfo): boolean {
+  return track.source !== 'local' || isFilesystemPath(track.audioUrl)
 }
 
-function statToTrack(item: TrackStat): TrackInfo | null {
-  if (!item.id) return null
-  const prefix = item.id.split(':')[0]
-  const source = (['netease', 'qq', 'bilibili', 'youtube'].includes(prefix) ? prefix : 'local') as TrackInfo['source']
-  return {
-    id: item.id,
-    title: item.name,
-    artist: item.artist,
-    album: item.album,
-    durationMs: item.durationMs,
-    coverUrl: item.coverUrl ?? undefined,
-    audioUrl: source === 'local' ? localPlaybackPath(item) : '',
-    source,
-    addedAt: 0,
-  } as TrackInfo
+const startingIdentity = ref('')
+
+/// 同步来的统计 id 和本机曲目 id 形态不同，同时比对同步身份键
+function isCurrent(item: TrackStat): boolean {
+  const current = player.currentTrack
+  return !!current && (current.id === item.id || current.playlistKey === item.identityKey)
 }
 
-function playStat(item: TrackStat) {
-  const track = statToTrack(item)
-  if (!track) return
-  if (track.source === 'local' && !track.audioUrl) {
-    toast.show(t('stats.local_file_unavailable'), 'info')
-    return
+/// 对齐 Android（onSongClick(listOf(stat.toSongItem()), 0)）：只播点中的这一首。
+/// 统计记录的身份由后端按同步模型还原（Android 同步来的是裸 id + 平台标记）
+async function playStat(item: TrackStat) {
+  if (startingIdentity.value) return
+  startingIdentity.value = item.identityKey
+  try {
+    const [raw] = await invoke<Array<Record<string, unknown> | null>>('get_playback_stat_tracks', {
+      identityKeys: [item.identityKey],
+    })
+    const selected = raw ? normalizeTrack(raw) : null
+    if (!selected || !isPlayable(selected)) {
+      toast.show(t(selected?.source === 'local' ? 'stats.local_file_unavailable' : 'stats.track_unavailable'), 'info')
+      return
+    }
+    player.playAll([selected], selected.id, selected.playlistKey)
+  } catch (error) {
+    toast.error(String(error))
+  } finally {
+    startingIdentity.value = ''
   }
-  void player.play(track, 'local')
 }
 
 async function confirmClear() {
@@ -156,13 +158,13 @@ onUnmounted(() => {
     <template v-else>
       <div class="section-title">{{ t('stats.most_played') }}</div>
       <div class="chart">
-        <div v-for="item in topTracks" :key="item.identityKey" class="chart-row">
+        <button v-for="item in topTracks" :key="item.identityKey" type="button" class="chart-row" :class="{ active: isCurrent(item) }" @click="playStat(item)">
           <div class="chart-name">{{ item.name || t('stats.unknown_track') }}</div>
           <div class="chart-track">
             <div class="chart-bar" :style="{ transform: `scaleX(${barScale(item)})` }" />
           </div>
           <div class="chart-value">{{ item.playCount }}</div>
-        </div>
+        </button>
       </div>
 
       <div class="track-list">
@@ -170,11 +172,12 @@ onUnmounted(() => {
           v-for="(item, index) in summary.items"
           :key="item.identityKey"
           class="track-item"
-          :class="{ active: player.currentTrack?.id === item.id }"
+          :class="{ active: isCurrent(item) }"
           @click="playStat(item)"
         >
           <div class="track-index">
-            <span class="index-num" :class="{ top: index < 3 }">{{ index + 1 }}</span>
+            <span v-if="startingIdentity === item.identityKey" class="material-symbols-rounded spinning index-spinner">progress_activity</span>
+            <span v-else class="index-num" :class="{ top: index < 3 }">{{ index + 1 }}</span>
           </div>
           <div class="track-cover">
             <BilibiliCoverImage v-if="item.coverUrl" :src="item.coverUrl" loading="lazy">
@@ -312,7 +315,7 @@ onUnmounted(() => {
 .chart {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 2px;
   margin-bottom: 28px;
 }
 
@@ -320,6 +323,20 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   gap: 12px;
+  width: calc(100% + 16px);
+  padding: 4px 8px;
+  margin: 0 -8px;
+  text-align: left;
+  border-radius: var(--radius-md);
+  transition: background var(--duration-short) var(--ease-standard);
+
+  &:hover { background: var(--md-surface-container); }
+  &.active .chart-name { color: var(--md-primary); }
+}
+
+.index-spinner {
+  font-size: 18px;
+  color: var(--md-primary);
 }
 
 .chart-name {
