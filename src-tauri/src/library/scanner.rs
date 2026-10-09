@@ -50,7 +50,7 @@ pub struct ScanResult {
     pub skipped: Vec<ScanSkipped>,
 }
 
-#[derive(Debug, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct ScanSkipped {
     pub path: String,
     pub reason: String,
@@ -65,9 +65,58 @@ pub fn scan_directory_with_control(
     dir: &str,
     name_template: Option<&str>,
     cancelled: &AtomicBool,
-    mut on_progress: impl FnMut(usize, usize, usize, &Path),
+    on_progress: impl FnMut(usize, usize, usize, &Path),
 ) -> AppResult<ScanResult> {
-    let mut tracks = Vec::new();
+    let scan = scan_directory_indexed(dir, name_template, cancelled, &HashMap::new(), on_progress)?;
+    Ok(ScanResult {
+        tracks: scan.entries.into_iter().map(|entry| entry.track).collect(),
+        skipped: scan.skipped,
+    })
+}
+
+/// 文件指纹：大小 + 修改时间都没变就认为内容没变，直接复用上次解析结果
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct FileStamp {
+    pub size: u64,
+    pub modified_ms: i64,
+}
+
+impl FileStamp {
+    pub fn of(metadata: &std::fs::Metadata) -> Self {
+        let modified_ms = metadata
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64)
+            .unwrap_or(0);
+        Self { size: metadata.len(), modified_ms }
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct IndexedTrack {
+    pub track: TrackInfo,
+    pub stamp: FileStamp,
+}
+
+pub struct IndexedScan {
+    pub entries: Vec<IndexedTrack>,
+    pub skipped: Vec<ScanSkipped>,
+    /// 这次真正重新解析了标签的文件数（其余都是按指纹复用）
+    pub parsed: usize,
+}
+
+/// 增量扫描：`previous` 以规范化后的文件路径为键，指纹一致的文件不再读标签。
+/// 一万首的库在没有改动时只剩一次目录遍历 + stat，监视到变化后可以放心整夹重扫
+pub fn scan_directory_indexed(
+    dir: &str,
+    name_template: Option<&str>,
+    cancelled: &AtomicBool,
+    previous: &HashMap<String, IndexedTrack>,
+    mut on_progress: impl FnMut(usize, usize, usize, &Path),
+) -> AppResult<IndexedScan> {
+    let mut tracks: Vec<IndexedTrack> = Vec::new();
+    let mut parsed = 0usize;
     let mut skipped: Vec<ScanSkipped> = Vec::new();
     // 扫描会话级封面索引缓存：同目录的封面查找只列举一次目录
     let mut cover_cache = CoverLookupCache::default();
@@ -163,8 +212,22 @@ pub fn scan_directory_with_control(
             break;
         }
 
+        let stamp = match std::fs::metadata(&path) {
+            Ok(metadata) => FileStamp::of(&metadata),
+            Err(error) => {
+                skipped.push(ScanSkipped { path: path.display().to_string(), reason: error.to_string() });
+                continue;
+            }
+        };
+        let key = path.to_string_lossy().to_string();
+        if let Some(cached) = previous.get(&key).filter(|cached| cached.stamp == stamp) {
+            tracks.push(cached.clone());
+            continue;
+        }
+
+        parsed += 1;
         match read_track_info(&path, name_template, &mut cover_cache) {
-            Ok(track) => tracks.push(track),
+            Ok(track) => tracks.push(IndexedTrack { track, stamp }),
             Err(e) => {
                 // 解析失败不再仅后端 warn 静默丢弃, 回传给前端展示失败计数（SC-9）
                 log::warn!(target: "scanner", "Skip {}: {}", path.display(), e);
@@ -177,7 +240,19 @@ pub fn scan_directory_with_control(
     }
 
     on_progress(visited_entries, tracks.len(), skipped.len(), &root);
-    Ok(ScanResult { tracks, skipped })
+    Ok(IndexedScan { entries: tracks, skipped, parsed })
+}
+
+pub fn is_audio_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| AUDIO_EXTENSIONS.contains(&ext.to_ascii_lowercase().as_str()))
+}
+
+pub fn is_image_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| IMAGE_EXTENSIONS.contains(&ext.to_ascii_lowercase().as_str()))
 }
 
 fn read_track_info(

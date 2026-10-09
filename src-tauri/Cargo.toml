@@ -36,6 +36,8 @@ iana-time-zone = "0.1"
 thiserror = "2"
 parking_lot = "0.12"
 walkdir = "2"
+# 本地音乐文件夹监视：系统原生事件，无轮询
+notify = "6.1"
 urlencoding = "2"
 regex = "1"
 # 歌词匹配的文本规整：与 Android 一样先繁转简、再做 NFKC

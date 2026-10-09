@@ -29,21 +29,43 @@ const deferred = () => {
 }
 async function flush() { for (let i = 0; i < 6; i++) await Promise.resolve() }
 const track = { id: 'local:C:/Music/a.wav', title: 'A', artist: 'Artist', album: 'Album', duration_ms: 1000, url: 'C:/Music/a.wav', cover_url: 'C:/Music/a.png', source: 'local', sync_payload: { sourceStableKey: 'online:1' } }
+globalThis.navigator ??= { platform: 'Win32' }
+
 async function runtime(options = {}) {
-  const storage = new Map()
-  globalThis.localStorage = { getItem: key => storage.get(key) ?? null, setItem: (key, value) => storage.set(key, value) }
+  const storage = new Map(options.storage || [])
+  globalThis.localStorage = {
+    getItem: key => storage.get(key) ?? null,
+    setItem: (key, value) => storage.set(key, value),
+    removeItem: key => storage.delete(key),
+  }
   const events = new Map(), calls = []
+  const backend = { folders: options.folders ? [...options.folders] : [], scanning: false }
+  const snapshot = () => ({
+    folders: backend.folders.map(path => ({ path, addedAt: 1, trackCount: 1, available: true })),
+    tracks: backend.folders.length ? [track] : [],
+    scanning: backend.scanning,
+    skipped: [],
+  })
   const module = await load({
     pinia, vue,
     '@tauri-apps/api/core': { convertFileSrc: path => `asset:${path}`, invoke: async (command, args) => {
       calls.push({ command, args })
-      if (command === 'scan_local_files') return options.scan ? options.scan.promise : { tracks: [track], skipped: [] }
+      if (command === 'local_library_snapshot') return snapshot()
+      if (command === 'local_library_add_folder') {
+        if (options.addFailure) throw new Error('fixture inaccessible folder')
+        if (!backend.folders.includes(args.path)) backend.folders.push(args.path)
+        backend.scanning = true
+        return snapshot()
+      }
+      if (command === 'local_library_remove_folder') {
+        backend.folders = backend.folders.filter(path => path !== args.path)
+        return snapshot()
+      }
+      if (command === 'local_library_rescan') { backend.scanning = true; return snapshot() }
       if (command === 'get_local_playlist_tracks') return [track]
-      if (command === 'cancel_local_scan') return true
       if (command === 'edit_local_file_tags' && options.editFailure) throw new Error('fixture write failure')
     } },
     '@tauri-apps/api/event': { listen: async (name, callback) => {
-      if (options.listening) await options.listening.promise
       events.set(name, callback)
       return () => events.delete(name)
     } },
@@ -52,74 +74,76 @@ async function runtime(options = {}) {
       calls.push({ command: 'releaseAudioFile', args: { path } })
       if (options.release) await options.release.promise
       return operation()
-    } }) },
-    '@/utils/logger': { createLogger: () => ({ error() {} }) },
+    }, updateCurrentTrackInfo() {} }) },
+    '@/utils/logger': { createLogger: () => ({ error() {}, warn() {} }) },
   })
   pinia.setActivePinia(pinia.createPinia())
-  return { store: module.useLibraryStore(), calls, events, storage }
+  return { store: module.useLibraryStore(), calls, events, storage, backend }
 }
 
 {
-  const r = await runtime()
-  await r.store.scanDirectory('C:/Music')
+  // 启动时只读索引，不触发整夹扫描；旧版「上次扫描目录」被收编为音乐文件夹后清除
+  const r = await runtime({ storage: [['neri:last_scan_dir', 'C:/Music']] })
+  await r.store.ensureStarted()
+  assert.equal(r.store.folders.length, 1)
+  assert.equal(r.store.folders[0].path, 'C:/Music')
+  assert.equal(r.storage.has('neri:last_scan_dir'), false)
   assert.equal(r.store.tracks[0].coverUrl, 'asset:C:/Music/a.png')
   assert.deepEqual(r.store.tracks[0].syncPayload, { sourceStableKey: 'online:1' })
-  assert.equal(r.store.lastScanDir, 'C:/Music')
-  assert.equal(r.storage.get('neri:last_scan_dir'), 'C:/Music')
-  assert.equal(r.store.isScanning, false)
-  assert.equal(r.events.size, 0)
-  assert.ok(r.calls.every(item => !/create_playlist|add.*playlist|remove.*playlist/.test(item.command)), 'scanning must never modify playlists')
+  assert.ok(['local-library-changed', 'local-library-progress'].every(name => r.events.has(name)))
+  assert.ok(r.calls.every(item => !/create_playlist|add.*playlist|remove.*playlist/.test(item.command)), 'indexing must never modify playlists')
+  await r.store.ensureStarted()
+  assert.equal(r.calls.filter(item => item.command === 'local_library_snapshot').length, 1, 'startup runs once')
 }
 {
-  const scan = deferred(), r = await runtime({ scan })
-  const running = r.store.scanDirectory('C:/Music')
-  await flush()
-  const sessionId = r.calls.find(item => item.command === 'scan_local_files').args.sessionId
-  const emit = payload => r.events.get('local-scan-progress')({ payload })
-  emit({ sessionId: 'stale', visitedEntries: 999, tracks: 999 })
-  assert.equal(r.store.scanProgress.tracks, 0)
-  emit({ sessionId, visitedEntries: 100, tracks: 12, skipped: 1, currentPath: 'C:/Music/a.wav' })
+  // 后端监视到变化后广播，前端跟着刷新；进度事件只更新状态
+  const r = await runtime({ folders: ['C:/Music'] })
+  await r.store.ensureStarted()
+  r.events.get('local-library-progress')({ payload: { folder: 'C:/Music', visitedEntries: 100, tracks: 12, skipped: 1, currentPath: 'C:/Music/a.wav' } })
+  assert.equal(r.store.isScanning, true)
   assert.equal(r.store.scanProgress.tracks, 12)
-  await r.store.cancelScan()
-  scan.reject(new Error('Scan cancelled'))
-  await running
-  assert.equal(r.store.scanCancelled, true)
-  assert.equal(r.store.scanError, null)
+  r.events.get('local-library-changed')()
+  await flush()
+  assert.equal(r.store.isScanning, false)
+  assert.equal(r.store.scanProgress, null)
+}
+{
+  const r = await runtime({ addFailure: true })
+  await r.store.ensureStarted()
+  await assert.rejects(r.store.addFolder('Z:/Missing'), /inaccessible/)
+  assert.match(r.store.scanError, /inaccessible/)
+  assert.equal(r.store.folders.length, 0)
+}
+{
+  const r = await runtime()
+  await r.store.ensureStarted()
+  await r.store.addFolder('C:/Music')
+  assert.equal(r.store.isScanning, true)
+  await r.store.removeFolder('C:/Music')
   assert.equal(r.store.tracks.length, 0)
-  assert.equal(r.events.size, 0)
 }
 {
-  const listening = deferred(), r = await runtime({ listening })
-  const running = r.store.scanDirectory('C:/Music')
-  await r.store.cancelScan()
-  listening.resolve()
-  await running
-  assert.equal(r.store.scanCancelled, true)
-  assert.equal(r.calls.some(item => item.command === 'scan_local_files'), false)
-  assert.equal(r.events.size, 0)
-}
-{
-  const r = await runtime({ editFailure: true })
-  await r.store.scanDirectory('C:/Music')
+  const r = await runtime({ folders: ['C:/Music'], editFailure: true })
+  await r.store.ensureStarted()
   await assert.rejects(r.store.saveTrackTags(r.store.tracks[0], { title: 'New', artist: 'Artist', album: 'Album' }), /fixture write failure/)
   assert.equal(r.store.tracks[0].title, 'A')
   assert.equal(r.store.isSavingTags, false)
 }
 {
-  const r = await runtime()
-  await r.store.scanDirectory('C:/Music')
+  const r = await runtime({ folders: ['C:/Music'] })
+  await r.store.ensureStarted()
   await r.store.saveTrackTags(r.store.tracks[0], { title: 'New', artist: 'Artist', album: 'Album' })
   assert.equal(r.store.tracks[0].title, 'New')
   assert.equal(r.calls.find(item => item.command === 'edit_local_file_tags').args.scanRoot, 'C:/Music')
-  await assert.rejects(r.store.saveTrackTags({ ...r.store.tracks[0], id: 'stale' }, { title: 'New', artist: 'Artist', album: 'Album' }), /no longer/)
+  await assert.rejects(r.store.saveTrackTags({ ...r.store.tracks[0], audioUrl: 'D:/Elsewhere/a.wav' }, { title: 'New', artist: 'Artist', album: 'Album' }), /no longer/)
 }
 {
-  const release = deferred(), r = await runtime({ release })
-  await r.store.scanDirectory('C:/Music')
+  const release = deferred(), r = await runtime({ folders: ['C:/Music'], release })
+  await r.store.ensureStarted()
   const writing = r.store.saveTrackTags(r.store.tracks[0], { title: 'New', artist: 'Artist', album: 'Album' })
   await flush()
   assert.equal(r.calls.some(call => call.command === 'edit_local_file_tags'), false, 'tag writing must wait for decoder release')
   release.resolve(); await writing
   assert.deepEqual(r.calls.filter(call => ['releaseAudioFile', 'edit_local_file_tags'].includes(call.command)).map(call => call.command), ['releaseAudioFile', 'edit_local_file_tags'])
 }
-console.log('local scan store lifecycle tests passed')
+console.log('local library store lifecycle tests passed')

@@ -134,6 +134,40 @@ pub fn cancel_local_scan(session_id: String) -> bool {
     false
 }
 
+use crate::library::local_index::{self, LocalLibrarySnapshot};
+
+#[tauri::command]
+pub fn local_library_snapshot(name_template: Option<String>) -> LocalLibrarySnapshot {
+    local_index::set_name_template(name_template);
+    local_index::snapshot()
+}
+
+#[tauri::command]
+pub async fn local_library_add_folder(path: String, name_template: Option<String>) -> AppResult<LocalLibrarySnapshot> {
+    local_index::set_name_template(name_template);
+    tokio::task::spawn_blocking(move || local_index::add_folder(&path))
+        .await
+        .map_err(|error| AppError::Other(error.to_string()))?
+}
+
+#[tauri::command]
+pub async fn local_library_remove_folder(path: String) -> AppResult<LocalLibrarySnapshot> {
+    tokio::task::spawn_blocking(move || local_index::remove_folder(&path))
+        .await
+        .map_err(|error| AppError::Other(error.to_string()))
+}
+
+#[tauri::command]
+pub fn local_library_rescan(full: Option<bool>, name_template: Option<String>) -> LocalLibrarySnapshot {
+    local_index::set_name_template(name_template);
+    local_index::rescan(full.unwrap_or(false))
+}
+
+#[tauri::command]
+pub fn local_library_cancel_scan() {
+    local_index::cancel();
+}
+
 #[tauri::command]
 pub async fn get_local_playlist_tracks() -> AppResult<Vec<TrackInfo>> {
     tokio::task::spawn_blocking(|| crate::library::playlist::load_all_tracks(None))
@@ -151,7 +185,9 @@ pub async fn edit_local_file_tags(app: AppHandle, scan_root: String, file_path: 
         let audio = std::path::Path::new(&file_path);
         super::download_cmd::edit_download_metadata(&app, audio, &title, &artist, &album, || {
             crate::library::local_file_tags::edit_tags(root, audio, &title, &artist, &album)
-        })
+        })?;
+        local_index::update_track_tags(&file_path, &title, &artist, &album);
+        Ok(())
     }).await.map_err(|error| AppError::Other(error.to_string()))?
 }
 

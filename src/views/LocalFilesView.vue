@@ -1,7 +1,6 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
-import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { open as dialogOpen } from '@tauri-apps/plugin-dialog'
 import { useI18n } from 'vue-i18n'
 import { useLibraryStore } from '@/stores/library'
@@ -35,8 +34,6 @@ const editTitle = ref('')
 const editArtist = ref('')
 const editAlbum = ref('')
 const tagEditError = ref<string | null>(null)
-let unlistenPlaylists: UnlistenFn | undefined
-let disposed = false
 
 const existingIds = computed(() => existingScanTrackIds(tracks.value, library.playlistTracks))
 const duplicateIds = computed(() => duplicateScanTrackIds(tracks.value))
@@ -66,14 +63,42 @@ watch(tracks, () => {
   failedCovers.value = new Set()
 })
 
-async function chooseDirectory() {
-  if (library.isScanning) return
+async function addFolders() {
   try {
-    const dir = await dialogOpen({ directory: true, multiple: false, defaultPath: library.lastScanDir || undefined })
-    if (typeof dir === 'string' && dir) await library.scanDirectory(dir)
+    const picked = await dialogOpen({ directory: true, multiple: true, defaultPath: library.folders[0]?.path })
+    const paths = Array.isArray(picked) ? picked : typeof picked === 'string' ? [picked] : []
+    for (const path of paths) await library.addFolder(path)
   } catch (error) {
     toast.error(`${t('library.scan_failed')}: ${String(error)}`)
   }
+}
+
+async function removeFolder(path: string) {
+  try {
+    await library.removeFolder(path)
+    toast.show(t('library.local_folder_removed'), 'info')
+  } catch (error) {
+    toast.error(String(error))
+  }
+}
+
+function folderName(path: string): string {
+  return path.split(/[\\/]/).filter(Boolean).pop() || path
+}
+
+function playTrack(track: TrackInfo) {
+  player.playAll(filteredTracks.value, track.id)
+}
+
+function playAllFiltered() {
+  if (filteredTracks.value.length) player.playAll(filteredTracks.value)
+}
+
+function shuffleAllFiltered() {
+  if (!filteredTracks.value.length) return
+  const start = filteredTracks.value[Math.floor(Math.random() * filteredTracks.value.length)]
+  if (!player.shuffleEnabled) player.toggleShuffle()
+  player.playAll(filteredTracks.value, start.id)
 }
 
 function importSelected() {
@@ -117,17 +142,9 @@ function formatDuration(milliseconds: number) {
   return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`
 }
 
-onMounted(async () => {
+onMounted(() => {
+  void library.ensureStarted()
   void library.refreshPlaylistIndex()
-  try {
-    const stop = await listen('playlists-changed', () => { void library.refreshPlaylistIndex() })
-    if (disposed) stop()
-    else unlistenPlaylists = stop
-  } catch { /* 浏览器预览没有 Tauri 事件桥 */ }
-})
-onBeforeUnmount(() => {
-  disposed = true
-  unlistenPlaylists?.()
 })
 </script>
 
@@ -135,33 +152,50 @@ onBeforeUnmount(() => {
   <section class="local-files-view" :class="{ embedded }">
     <div class="scan-heading">
       <div>
-        <h2>{{ t('library.local_scan_title') }}</h2>
-        <p>{{ t('library.local_scan_hint') }}</p>
+        <h2>{{ t('library.local_library_title') }}</h2>
+        <p>{{ t('library.local_library_hint') }}</p>
       </div>
       <div class="scan-actions">
-        <button v-if="library.lastScanDir && !library.isScanning" class="scan-button secondary" :disabled="library.isSavingTags" @click="library.scanDirectory(library.lastScanDir)">
-          <span class="material-symbols-rounded">refresh</span>{{ t('library.local_scan_rescan') }}
+        <template v-if="tracks.length">
+          <button class="scan-button" @click="playAllFiltered">
+            <span class="material-symbols-rounded filled">play_arrow</span>{{ t('player.play_all') }}
+          </button>
+          <button class="scan-icon-button outlined" :title="t('player.shuffle_play')" :aria-label="t('player.shuffle_play')" @click="shuffleAllFiltered">
+            <span class="material-symbols-rounded">shuffle</span>
+          </button>
+        </template>
+        <button v-if="library.hasFolders && !library.isScanning" class="scan-icon-button outlined" :title="t('library.local_scan_rescan')" :aria-label="t('library.local_scan_rescan')" @click="library.rescan()">
+          <span class="material-symbols-rounded">refresh</span>
         </button>
-        <button v-if="library.isScanning" class="scan-button secondary" :disabled="library.isCancelling" @click="library.cancelScan()">
-          <span class="material-symbols-rounded">stop</span>{{ t('common.cancel') }}
-        </button>
-        <button class="scan-button" :disabled="library.isScanning || library.isSavingTags" @click="chooseDirectory">
-          <span class="material-symbols-rounded">folder_open</span>{{ t('library.local_scan_choose') }}
+        <button class="scan-button secondary" @click="addFolders">
+          <span class="material-symbols-rounded">create_new_folder</span>{{ t('library.local_add_folder') }}
         </button>
       </div>
     </div>
-    <p v-if="library.scanDir || library.lastScanDir" class="scan-directory">{{ library.scanDir || library.lastScanDir }}</p>
 
-    <div v-if="library.isScanning && library.scanProgress" class="scan-status" role="status" aria-live="polite">
-      <span class="material-symbols-rounded scanning-icon">progress_activity</span>
-      <div>
-        <strong>{{ library.isCancelling ? t('library.local_scan_cancelling') : t('library.scanning') }}</strong>
-        <p>{{ t('library.local_scan_progress', { visited: library.scanProgress.visitedEntries, count: library.scanProgress.tracks, skipped: library.scanProgress.skipped }) }}</p>
-        <p class="scan-current-path">{{ library.scanProgress.currentPath }}</p>
+    <TransitionGroup v-if="library.hasFolders" tag="div" name="folder-chip" class="folder-chips">
+      <div v-for="folder in library.folders" :key="folder.path" class="folder-chip" :class="{ unavailable: !folder.available }" :title="folder.path">
+        <span class="material-symbols-rounded">{{ folder.available ? 'folder' : 'folder_off' }}</span>
+        <span class="folder-chip-name">{{ folderName(folder.path) }}</span>
+        <span class="folder-chip-count">{{ folder.available ? folder.trackCount : t('library.local_folder_unavailable') }}</span>
+        <button class="folder-chip-remove" :title="t('library.local_remove_folder')" :aria-label="t('library.local_remove_folder')" @click="removeFolder(folder.path)">
+          <span class="material-symbols-rounded">close</span>
+        </button>
       </div>
-    </div>
+    </TransitionGroup>
+
+    <Transition name="scan-banner">
+      <div v-if="library.isScanning" class="scan-status" role="status" aria-live="polite">
+        <span class="material-symbols-rounded scanning-icon">progress_activity</span>
+        <div>
+          <strong>{{ t('library.scanning') }}</strong>
+          <p v-if="library.scanProgress">{{ t('library.local_scan_progress', { visited: library.scanProgress.visitedEntries, count: library.scanProgress.tracks, skipped: library.scanProgress.skipped }) }}</p>
+          <p v-if="library.scanProgress" class="scan-current-path">{{ library.scanProgress.currentPath }}</p>
+        </div>
+        <button class="scan-button secondary scan-cancel" @click="library.cancelScan()">{{ t('common.cancel') }}</button>
+      </div>
+    </Transition>
     <p v-if="library.scanError" class="scan-error" role="alert">{{ t('library.scan_failed') }}: {{ library.scanError }}</p>
-    <p v-if="library.scanCancelled" class="scan-message" role="status">{{ t('library.local_scan_cancelled') }}</p>
 
     <template v-if="tracks.length">
       <label v-if="!embedded" class="scan-search">
@@ -188,7 +222,7 @@ onBeforeUnmount(() => {
             <img v-if="track.coverUrl && !failedCovers.has(track.id)" :src="track.coverUrl" loading="lazy" alt="" @error="failedCovers.add(track.id)" />
             <span v-else class="material-symbols-rounded">music_note</span>
           </div>
-          <button class="scan-track-info" @click="toggleSelected(track.id)">
+          <button class="scan-track-info" :class="{ playing: player.currentTrack?.audioUrl === track.audioUrl }" @click="selectedIds.size ? toggleSelected(track.id) : playTrack(track)">
             <strong>{{ track.title }}</strong>
             <span>{{ track.artist }}<template v-if="track.album"> · {{ track.album }}</template></span>
             <small :title="track.audioUrl">{{ track.audioUrl }}</small>
@@ -197,7 +231,7 @@ onBeforeUnmount(() => {
           <span v-if="duplicateIds.has(track.id)" class="scan-badge">{{ t('library.local_scan_duplicate') }}</span>
           <span class="scan-duration">{{ formatDuration(track.durationMs) }}</span>
           <button class="scan-icon-button" :disabled="library.isSavingTags" :title="t('library.local_tags_edit')" @click="openTagEditor(track)"><span class="material-symbols-rounded">edit</span></button>
-          <button class="scan-icon-button" :title="t('common.play_selected')" @click="player.playAll(filteredTracks, track.id)"><span class="material-symbols-rounded">play_arrow</span></button>
+          <button class="scan-icon-button" :title="t('common.play_selected')" @click="playTrack(track)"><span class="material-symbols-rounded">play_arrow</span></button>
         </div>
       </div>
       <p v-if="!filteredTracks.length" class="scan-empty">{{ t('library.local_scan_no_matches') }}</p>
@@ -205,9 +239,12 @@ onBeforeUnmount(() => {
         {{ t('library.local_scan_show_more', { count: filteredTracks.length - visibleLimit }) }}
       </button>
     </template>
-    <div v-else-if="!library.isScanning && !library.scanError && !library.scanCancelled" class="scan-empty">
-      <span class="material-symbols-rounded">folder_open</span>
-      <p>{{ t(library.scanDir ? 'library.local_scan_no_matches' : 'library.local_scan_empty') }}</p>
+    <div v-else-if="library.isLoaded && !library.isScanning && !library.scanError" class="scan-empty">
+      <span class="material-symbols-rounded">{{ library.hasFolders ? 'music_off' : 'library_music' }}</span>
+      <p>{{ t(library.hasFolders ? 'library.local_library_no_audio' : 'library.local_library_empty') }}</p>
+      <button v-if="!library.hasFolders" class="scan-button" @click="addFolders">
+        <span class="material-symbols-rounded">create_new_folder</span>{{ t('library.local_add_folder') }}
+      </button>
     </div>
 
     <details v-if="library.scanSkipped.length" class="scan-skipped">
@@ -232,7 +269,31 @@ onBeforeUnmount(() => {
 .scan-actions { display: flex; gap: 8px; flex-wrap: wrap; }
 .scan-button { display: inline-flex; align-items: center; justify-content: center; gap: 8px; padding: 10px 18px; border-radius: 24px; color: var(--md-on-primary); background: var(--md-primary); font-size: 13px; font-weight: 600; cursor: pointer; &.secondary { background: var(--md-surface-container-high); color: var(--md-on-surface); } &:disabled { opacity: .4; cursor: default; } }
 .scan-directory { color: var(--md-on-surface-variant); font-size: 12px; overflow-wrap: anywhere; margin: 12px 0 20px; }
-.scan-status { display: flex; align-items: center; gap: 16px; background: var(--md-surface-container); border-radius: 16px; padding: 20px; margin: 20px 0; min-width: 0; > div { min-width: 0; } p { color: var(--md-on-surface-variant); font-size: 13px; margin: 6px 0 0; } .scan-current-path { overflow-wrap: anywhere; font-size: 12px; } }
+.scan-actions { align-items: center; }
+.scan-icon-button.outlined { width: 40px; height: 40px; border: 1px solid var(--md-outline-variant); }
+.folder-chips { display: flex; flex-wrap: wrap; gap: 8px; margin: 18px 0 4px; }
+.folder-chip {
+  display: inline-flex; align-items: center; gap: 8px; max-width: 100%; min-height: 36px; padding: 0 4px 0 12px;
+  border-radius: var(--radius-sm); background: var(--md-surface-container); color: var(--md-on-surface); font-size: 13px;
+  > .material-symbols-rounded { font-size: 18px; color: var(--md-primary); }
+  &.unavailable { color: var(--md-on-surface-variant); > .material-symbols-rounded { color: var(--md-error); } }
+}
+.folder-chip-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
+.folder-chip-count { color: var(--md-on-surface-variant); font-size: 12px; font-variant-numeric: tabular-nums; }
+.folder-chip-remove {
+  width: 28px; height: 28px; display: grid; place-items: center; border-radius: 50%; color: var(--md-on-surface-variant);
+  transition: background var(--duration-short) var(--ease-standard), color var(--duration-short) var(--ease-standard);
+  .material-symbols-rounded { font-size: 16px; }
+  &:hover { background: var(--md-surface-container-highest); color: var(--md-error); }
+}
+.folder-chip-enter-active, .folder-chip-leave-active { transition: opacity 180ms var(--ease-standard), transform 180ms var(--ease-standard); }
+.folder-chip-enter-from, .folder-chip-leave-to { opacity: 0; transform: scale(0.94); }
+.folder-chip-leave-active { position: absolute; }
+.scan-status { display: flex; align-items: center; gap: 16px; background: var(--md-surface-container); border-radius: 16px; padding: 14px 16px; margin: 16px 0; min-width: 0; > div { min-width: 0; flex: 1; } p { color: var(--md-on-surface-variant); font-size: 13px; margin: 4px 0 0; } .scan-current-path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; } }
+.scan-cancel { flex-shrink: 0; padding: 8px 14px; }
+.scan-banner-enter-active, .scan-banner-leave-active { transition: opacity 200ms var(--ease-standard), transform 200ms var(--ease-standard); }
+.scan-banner-enter-from, .scan-banner-leave-to { opacity: 0; transform: translateY(-4px); }
+.scan-track-info.playing strong { color: var(--md-primary); }
 .scanning-icon { color: var(--md-primary); animation: local-scan-spin 1s linear infinite; }
 .scan-error { color: var(--md-error); overflow-wrap: anywhere; font-size: 13px; }
 .scan-message, .scan-summary { color: var(--md-on-surface-variant); font-size: 13px; margin: 16px 0; }

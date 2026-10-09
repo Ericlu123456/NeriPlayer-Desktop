@@ -6,3 +6,4 @@ pub mod playback_queue;
 pub mod lyric_offsets;
 pub mod playlist_usage;
 pub mod local_file_tags;
+pub mod local_index;
