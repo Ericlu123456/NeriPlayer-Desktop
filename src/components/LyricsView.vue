@@ -50,6 +50,9 @@ let lastSyncedTime = Number.NaN
 let resizeObserver: ResizeObserver | null = null
 let lastHostWidth = 0
 let lastHostHeight = 0
+let idleDeadline = 0
+let wakeTarget: HTMLElement | null = null
+let loadedTimelineKey: string | null = null
 
 const SPLIT_WHITESPACE_RE = /(\s+)/
 const WHITESPACE_RE = /\s/g
@@ -57,6 +60,9 @@ const AMLL_WORD_FADE_WIDTH = 0.5
 const LAYOUT_SETTLE_PASSES = 4
 const LAYOUT_SETTLE_MAX_PASSES = 8
 const SIZE_EPSILON = 0.5
+// 覆盖 AMLL 弹簧（posY/scale）从任意位移收敛所需的时长
+const IDLE_FRAME_GRACE_MS = 2500
+const WAKE_EVENTS = ['wheel', 'pointerdown', 'touchstart', 'keydown'] as const
 
 interface PlayerRubyWord {
   startMs: number
@@ -287,12 +293,14 @@ function syncCurrentTime(forceSeek = false): void {
 
   lyricPlayer.setCurrentTime(time, forceSeek)
   lastSyncedTime = time
+  if (!props.isPlaying) wakeFrameLoop()
 }
 
 function syncPlayState(): void {
   if (!lyricPlayer) return
   if (props.isPlaying) lyricPlayer.resume()
   else lyricPlayer.pause()
+  wakeFrameLoop()
 }
 
 function syncLyricOptions(): void {
@@ -300,11 +308,20 @@ function syncLyricOptions(): void {
   lyricPlayer.setEnableBlur(settings.lyricBlur)
   lyricPlayer.setBlurAmount(settings.lyricBlurAmount)
   lyricPlayer.setWordFadeWidth(settings.advancedLyrics ? AMLL_WORD_FADE_WIDTH : 0)
+  wakeFrameLoop()
+}
+
+function lyricTimelineKey(lines: PlayerLyricLine[]): string {
+  return lines.map(line => line.startMs).join(',')
 }
 
 function reloadLyrics(): void {
   if (!lyricPlayer) return
-  isLayoutReady.value = false
+  // 换了一首（时间轴不同）才先隐藏等排版落定；同一份时间轴补上音译、翻译、逐字，
+  // 或切换显示选项时原地重排，不让整屏歌词闪一下
+  const timelineKey = lyricTimelineKey(props.lyrics)
+  const isNewTimeline = timelineKey !== loadedTimelineKey
+  loadedTimelineKey = timelineKey
   const time = Math.max(0, Math.round(amllTimeMs.value))
   lyricPlayer.setLyricLines(buildAmllLines(), time)
   lyricPlayer.setCurrentTime(time, true)
@@ -312,7 +329,9 @@ function reloadLyrics(): void {
   lastSyncedTime = time
   syncLyricOptions()
   syncPlayState()
-  scheduleLayoutSync()
+  // 新建的行起始在屏幕外，原地重排要在这一帧就摆好位置
+  if (!isNewTimeline && isLayoutReady.value) forceLayoutAtCurrentTime()
+  scheduleLayoutSync(isNewTimeline || !isLayoutReady.value)
 }
 
 /// 右键菜单：主路径走 AMLL 的 line-contextmenu 事件直接拿 lineIndex；
@@ -401,6 +420,13 @@ function onLineClick(event: Event): void {
   emit('seek', Math.max(0, Math.round(line.startTime - offsetMs.value)))
 }
 
+/// 暂停时没有逐字/间奏动画需要推进，只剩弹簧收尾；收尾后停表，
+/// 避免暂停挂机时每帧重写所有可见行的样式。布局、滚动、交互会再唤醒
+function wakeFrameLoop(): void {
+  idleDeadline = performance.now() + IDLE_FRAME_GRACE_MS
+  startFrameLoop()
+}
+
 function startFrameLoop(): void {
   if (rafId) return
   lastFrameAt = performance.now()
@@ -408,6 +434,10 @@ function startFrameLoop(): void {
     const delta = Math.min(64, now - lastFrameAt)
     lastFrameAt = now
     lyricPlayer?.update(delta)
+    if (!props.isPlaying && now >= idleDeadline) {
+      rafId = 0
+      return
+    }
     rafId = requestAnimationFrame(tick)
   })
 }
@@ -507,13 +537,15 @@ function scheduleFontReadyLayout(token: number): void {
   })
 }
 
-function scheduleLayoutSync(): void {
+/// hide：新歌词首次排版时先隐藏，避免行从屏幕外飞入；缩放、字号等重排保持可见
+function scheduleLayoutSync(hide = false): void {
   if (!lyricPlayer) return
   if (layoutFrameId) cancelAnimationFrame(layoutFrameId)
 
   const token = layoutSyncToken + 1
   layoutSyncToken = token
-  isLayoutReady.value = false
+  if (hide) isLayoutReady.value = false
+  wakeFrameLoop()
   let pass = 0
 
   const runPass = () => {
@@ -578,10 +610,13 @@ onMounted(() => {
     lyricPlayer.addEventListener('line-click', onLineClick as EventListener)
     lyricPlayer.addEventListener('line-contextmenu', onLineContextMenu as EventListener)
     hostRef.value.appendChild(lyricPlayer.getElement())
+    wakeTarget = hostRef.value
+    for (const type of WAKE_EVENTS) {
+      wakeTarget.addEventListener(type, wakeFrameLoop, { passive: true })
+    }
 
     startResizeObserver()
     reloadLyrics()
-    startFrameLoop()
   })
 })
 
@@ -589,6 +624,10 @@ onUnmounted(() => {
   stopFrameLoop()
   cancelLayoutSync()
   stopResizeObserver()
+  for (const type of WAKE_EVENTS) {
+    wakeTarget?.removeEventListener(type, wakeFrameLoop)
+  }
+  wakeTarget = null
   if (!lyricPlayer) return
 
   lyricPlayer.removeEventListener('line-click', onLineClick as EventListener)

@@ -2,7 +2,7 @@
 // 一行卡拉 OK 歌词：描边垫底层、未唱渐变层、已唱渐变层叠在一起，已唱层按进度裁剪
 // 进度每帧由父组件调用 update() 直接写样式，不走响应式，避免每秒 60 次重渲染
 import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { KARAOKE_REGISTRY } from './registry'
+import { KARAOKE_REGISTRY, KARAOKE_WAKE } from './registry'
 import type { DesktopLyricsFrameLine } from '@/modules/desktopLyrics/frame'
 import type { DesktopLyricsAlign, DesktopLyricsKaraoke } from '@/modules/desktopLyrics/style'
 import { hasWordTiming, highlightWidth } from '@/modules/desktopLyrics/timeline'
@@ -50,6 +50,7 @@ function measure() {
   const scale = textWidth > available && textWidth > 0 ? Math.max(0.5, available / textWidth) : 1
   scaler.style.transform = scale < 1 ? `scale(${scale})` : ''
   lastWidth = -1
+  requestFrame?.()
 }
 
 /** 父组件每帧调用；timeMs 已加歌词偏移 */
@@ -70,6 +71,7 @@ function update(timeMs: number) {
 }
 
 const register = inject(KARAOKE_REGISTRY, null)
+const requestFrame = inject(KARAOKE_WAKE, null)
 let unregister: (() => void) | null = null
 
 watch(() => [props.line, props.karaoke, props.fallback], () => { void nextTick(measure) })

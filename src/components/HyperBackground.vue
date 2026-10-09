@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted } from 'vue'
+import { ref, onMounted, onUnmounted, watch } from 'vue'
 import { hyperBackgroundVertexShader, hyperBackgroundFragmentShader } from '@/shaders/hyperBackground'
 import { createLogger } from '@/utils/logger'
 
@@ -12,7 +12,10 @@ const props = withDefaults(defineProps<{
   isDark?: boolean
   lightOffset?: number
   saturateOffset?: number
+  /** 暂停时律动和调色过渡收敛后停表，画面停在最后一帧 */
+  playing?: boolean
 }>(), {
+  playing: true,
   musicLevel: 0,
   beatImpulse: 0,
   colors: () => [
@@ -32,8 +35,11 @@ let gl: WebGLRenderingContext | null = null
 let program: WebGLProgram | null = null
 let quadBuffer: WebGLBuffer | null = null
 let animFrame = 0
-let startTime = 0
+// 只在渲染时累加，停表期间不走，恢复播放时动画从停下的位置接着动
+let shaderTime = 0
 let lastFrameMs = 0
+let resizeObserver: ResizeObserver | null = null
+const SETTLED_EPSILON = 1e-3
 
 // 音乐律动第二级非对称平滑（对齐 Android HyperBackground 帧循环）
 // Rust analyzer.rs 已做第一级帧率无关衰减，这里补一层 attack/release，
@@ -182,7 +188,6 @@ function initGL() {
   targetLight = props.lightOffset
   targetSaturate = props.saturateOffset
 
-  startTime = performance.now() / 1000
   lastFrameMs = performance.now()
   render()
 }
@@ -193,8 +198,9 @@ function render() {
   // mac/GPU 富余场景允许到 2.0，保证 Retina/HiDPI 清晰度；其余仍限制以省 GPU
   const dprCap = window.devicePixelRatio >= 2 ? 2.0 : 1.5
   const dpr = Math.min(window.devicePixelRatio || 1, dprCap)
-  const w = c.clientWidth * dpr
-  const h = c.clientHeight * dpr
+  // canvas 尺寸只存整数；不取整的话小数 DPR 下每帧都判定变化，重设尺寸会重新分配绘图缓冲
+  const w = Math.max(1, Math.round(c.clientWidth * dpr))
+  const h = Math.max(1, Math.round(c.clientHeight * dpr))
   if (c.width !== w || c.height !== h) { c.width = w; c.height = h }
   gl.viewport(0, 0, w, h)
 
@@ -228,13 +234,13 @@ function render() {
     if (raw >= 1) transitioning = false
   }
 
-  const time = performance.now() / 1000 - startTime
+  shaderTime += dt
   gl.uniform2f(uResolution, w, h)
-  gl.uniform1f(uTime, time)
+  gl.uniform1f(uTime, shaderTime)
 
   // 音乐律动第二级非对称平滑（帧率无关）
-  const targetLevel = Math.min(Math.max(props.musicLevel, 0), 1)
-  const targetBeat = Math.min(Math.max(props.beatImpulse * BEAT_SCALE, 0), 1)
+  const targetLevel = props.playing ? Math.min(Math.max(props.musicLevel, 0), 1) : 0
+  const targetBeat = props.playing ? Math.min(Math.max(props.beatImpulse * BEAT_SCALE, 0), 1) : 0
   const levelRate = frameIndependentRate(
     targetLevel > smoothLevel ? LEVEL_ATTACK : LEVEL_RELEASE, dt)
   const beatRate = frameIndependentRate(
@@ -254,6 +260,22 @@ function render() {
   gl.uniform1f(uSaturateOffset, smoothSaturateOffset)
 
   gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4)
+
+  const settled = !transitioning
+    && smoothLevel < SETTLED_EPSILON
+    && smoothBeat < SETTLED_EPSILON
+  if (!props.playing && settled) {
+    animFrame = 0
+    return
+  }
+  animFrame = requestAnimationFrame(render)
+}
+
+/// 停表后由播放态、调色板、律动、尺寸变化重新拉起；窗口不可见时不拉
+function wake() {
+  if (!gl || !program || animFrame || document.hidden) return
+  // 重置帧时钟，避免 dt 巨大导致平滑量跳变
+  lastFrameMs = performance.now()
   animFrame = requestAnimationFrame(render)
 }
 
@@ -262,20 +284,46 @@ function handleVisibilityChange() {
   if (document.hidden) {
     cancelAnimationFrame(animFrame)
     animFrame = 0
-  } else if (gl && program && !animFrame) {
-    // 重置帧时钟，避免 dt 巨大导致平滑量跳变
-    lastFrameMs = performance.now()
-    animFrame = requestAnimationFrame(render)
+  } else {
+    wake()
   }
 }
+
+// 睡眠唤醒、显卡驱动重置会丢上下文；不接管的话背景会一直是空白
+function handleContextLost(event: Event) {
+  event.preventDefault()
+  cancelAnimationFrame(animFrame)
+  animFrame = 0
+  program = null
+  quadBuffer = null
+}
+
+function handleContextRestored() {
+  initGL()
+}
+
+watch(
+  () => [props.playing, props.colors, props.isDark, props.lightOffset, props.saturateOffset],
+  wake,
+)
 
 onMounted(() => {
   initGL()
   document.addEventListener('visibilitychange', handleVisibilityChange)
+  canvas.value?.addEventListener('webglcontextlost', handleContextLost)
+  canvas.value?.addEventListener('webglcontextrestored', handleContextRestored)
+  if (canvas.value && typeof ResizeObserver !== 'undefined') {
+    resizeObserver = new ResizeObserver(wake)
+    resizeObserver.observe(canvas.value)
+  }
 })
 
 onUnmounted(() => {
   document.removeEventListener('visibilitychange', handleVisibilityChange)
+  canvas.value?.removeEventListener('webglcontextlost', handleContextLost)
+  canvas.value?.removeEventListener('webglcontextrestored', handleContextRestored)
+  resizeObserver?.disconnect()
+  resizeObserver = null
   cancelAnimationFrame(animFrame)
   animFrame = 0
   // 释放 WebGL 资源并主动丢弃 context，防止反复开关正在播放页耗尽 context 配额
