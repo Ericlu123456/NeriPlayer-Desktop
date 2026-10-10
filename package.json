@@ -7,6 +7,11 @@
   "type": "module",
   "scripts": {
     "test": "node scripts/test-frontend.mjs",
+    "test:debug-log-viewer": "node scripts/test-debug-log-viewer.mjs",
+    "test:cover-export": "node scripts/test-cover-export.mjs",
+    "test:tray-popup": "node scripts/test-tray-popup.mjs",
+    "test:collection-menus": "node scripts/test-collection-menus.mjs",
+    "test:context-menu-utils": "node scripts/test-context-menu-utils.mjs",
     "dev": "vite",
     "build": "vue-tsc --build && vite build",
     "preview": "vite preview",

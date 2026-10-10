@@ -92,7 +92,6 @@ async function runtime(options = {}) {
       handleDownloadedFileRemoved: (trackId, path) => invoked.push({ command: 'fileRemoved', args: { trackId, path } }),
     }) },
     './toast': { useToastStore: () => Object.fromEntries(['show', 'error', 'success'].map(method => [method, (...args) => messages.push({ method, args })])) },
-    '@tauri-apps/plugin-opener': { openPath: async path => invoked.push({ command: 'openPath', args: { path } }) },
     '@/i18n': { default: { global: { t: (key, params) => params ? `${key}:${JSON.stringify(params)}` : key } } },
     '@/utils/logger': { createLogger: () => ({ error() {}, warn() {} }) },
     '@/modules/playback/playbackSource': { resolveDownloadSource: async (item, quality) => {
@@ -109,6 +108,34 @@ async function runtime(options = {}) {
     emit: payload => events.get('download-progress')({ payload }),
     emitEvent: (name, payload) => events.get(name)?.({ payload }),
   }
+}
+
+{
+  const saved = manifestTrack('initial-retry', 'E:/Music/initial-retry.flac')
+  let validations = 0
+  const r = await runtime({ validate: () => {
+    if (++validations === 1) throw new Error('fixture temporary validation failure')
+    return { tracks: [saved] }
+  } })
+  await r.store.ensureDownloadsLoaded()
+  assert.equal(r.store.isDownloaded(saved.id), false)
+  await r.store.ensureDownloadsLoaded()
+  assert.equal(r.store.isDownloaded(saved.id), true, 'failed initial validation must retry when another menu needs downloads')
+  await r.store.ensureDownloadsLoaded()
+  assert.equal(validations, 2, 'successful validation remains cached across menu mounts')
+}
+{
+  const validation = deferred()
+  const saved = manifestTrack('initial-shared', 'E:/Music/initial-shared.flac')
+  const r = await runtime({ validate: () => validation.promise })
+  const first = r.store.ensureDownloadsLoaded()
+  const second = r.store.ensureDownloadsLoaded()
+  assert.equal(r.invoked.filter(call => call.command === 'validate_downloads').length, 1, 'concurrent menus share their initial validation')
+  validation.resolve({ tracks: [saved] })
+  await Promise.all([first, second])
+  await r.store.ensureDownloadsLoaded()
+  assert.equal(r.store.isDownloaded(saved.id), true)
+  assert.equal(r.invoked.filter(call => call.command === 'validate_downloads').length, 1, 'loaded menus do not repeatedly scan the disk')
 }
 
 {
@@ -332,7 +359,7 @@ for (const oldFails of [false, true]) {
   assert.equal(r.messages.length, 1)
   assert.match(r.messages[0].args[0], /download.dir_fallback/)
   await r.messages[0].args.at(-1).action.handler()
-  assert.deepEqual(r.invoked.at(-1), { command: 'openPath', args: { path: 'E:/Music/NeriPlayer' } })
+  assert.deepEqual(r.invoked.at(-1), { command: 'reveal_in_file_manager', args: { path: 'E:/Music/NeriPlayer' } })
 }
 {
   const lateValidation = deferred()

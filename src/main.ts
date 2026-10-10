@@ -9,6 +9,7 @@ import { initTheme } from './utils/theme'
 import { installHostBackgroundSync } from './utils/hostBackground'
 import { preloadUserData } from './modules/persistence/userData'
 import { removeLegacyCacheBuckets } from './utils/persistentCache'
+import { installNativeContextMenuPolicy } from './utils/nativeContextMenu'
 import '@fontsource-variable/fraunces'
 import '@fontsource-variable/fraunces/wght-italic.css'
 import '@fontsource-variable/geist-mono'
@@ -17,6 +18,7 @@ import './styles/global.scss'
 
 // 在 DOM 挂载前应用主题（class 已在 index.html 内联脚本中预设）
 initTheme()
+installNativeContextMenuPolicy()
 
 const windowKind = new URLSearchParams(window.location.search).get('window')
 

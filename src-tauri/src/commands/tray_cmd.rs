@@ -44,6 +44,7 @@ const MENU_TRACK_MAX_CHARS: usize = 40;
 const MAX_COVER_URL_BYTES: usize = 1_000_000;
 
 const STATE_EVENT: &str = "tray-popup:state";
+const SHOWN_EVENT: &str = "tray-popup:shown";
 const OPEN_NOW_PLAYING_EVENT: &str = "tray:open-now-playing";
 const TOGGLE_DESKTOP_LYRICS_EVENT: &str = "tray:toggle-desktop-lyrics";
 const QUIT_EVENT: &str = "tray:quit";
@@ -178,7 +179,11 @@ struct TrayRuntime {
     snapshot: TraySnapshot,
     is_playing: bool,
     menu: Option<NativeMenu>,
-    /// 面板首次创建、页面还没就绪时记下的锚点，就绪后在这里弹出
+    /// 面板窗口正在创建（悬停托盘图标时预建，或首次右键）
+    popup_creating: bool,
+    /// 面板页面已就绪，可以直接弹出
+    popup_ready: bool,
+    /// 页面还没就绪时右键记下的锚点，就绪后在这里弹出
     popup_anchor: Option<PhysicalPosition<f64>>,
     popup_metrics: PopupMetrics,
     popup_hidden_at: Option<Instant>,
@@ -402,10 +407,19 @@ pub fn setup(app: &tauri::App) -> tauri::Result<()> {
         menu: native.map(|(_, items)| items),
         ..Default::default()
     });
+    if USE_POPUP {
+        // 提前加载页面和字体，让快速移入后立即右键也能复用窗口
+        ensure_popup(&handle);
+    }
     Ok(())
 }
 
 fn handle_icon_event(app: &AppHandle, event: TrayIconEvent) {
+    // 光标移到图标上就预建面板：WebView 创建、页面加载要几百毫秒，等到右键再建会明显迟滞
+    if USE_POPUP && matches!(event, TrayIconEvent::Enter { .. } | TrayIconEvent::Move { .. }) {
+        ensure_popup(app);
+        return;
+    }
     let TrayIconEvent::Click {
         button,
         button_state: MouseButtonState::Up,
@@ -469,6 +483,10 @@ pub fn request_quit(app: &AppHandle) {
 }
 
 fn hide_popup(app: &AppHandle) {
+    if let Some(runtime) = TRAY.lock().as_mut() {
+        // 页面未就绪时也取消待弹出的请求，避免恢复主窗口后面板才弹出
+        runtime.popup_anchor = None;
+    }
     let Some(window) = app.get_webview_window(POPUP_LABEL) else { return };
     if window.is_visible().unwrap_or(false) {
         let _ = window.hide();
@@ -479,20 +497,26 @@ fn hide_popup(app: &AppHandle) {
 }
 
 fn toggle_popup(app: &AppHandle, anchor: PhysicalPosition<f64>) {
-    let Some(window) = app.get_webview_window(POPUP_LABEL) else {
-        create_popup(app, anchor);
+    let window = app.get_webview_window(POPUP_LABEL);
+    let (ready, just_hidden) = {
+        let mut guard = TRAY.lock();
+        let Some(runtime) = guard.as_mut() else { return };
+        if window.is_none() || !runtime.popup_ready {
+            // 页面就绪后在最后一次右键的位置弹出
+            runtime.popup_anchor = Some(anchor);
+        }
+        let just_hidden = runtime
+            .popup_hidden_at
+            .is_some_and(|at| at.elapsed() < REOPEN_GUARD);
+        (runtime.popup_ready, just_hidden)
+    };
+    let Some(window) = window.filter(|_| ready) else {
+        ensure_popup(app);
         return;
     };
     if window.is_visible().unwrap_or(false) {
         hide_popup(app);
-        return;
-    }
-    let just_hidden = TRAY
-        .lock()
-        .as_ref()
-        .and_then(|runtime| runtime.popup_hidden_at)
-        .is_some_and(|at| at.elapsed() < REOPEN_GUARD);
-    if !just_hidden {
+    } else if !just_hidden {
         show_popup(app, &window, anchor);
     }
 }
@@ -526,19 +550,48 @@ fn show_popup(app: &AppHandle, window: &WebviewWindow, anchor: PhysicalPosition<
         let _ = window.set_size(PhysicalSize::new(size.0 as u32, size.1 as u32));
     }
     push_state(app, true);
+    let _ = app.emit_to(POPUP_LABEL, SHOWN_EVENT, ());
     let _ = window.show();
     let _ = window.set_focus();
 }
 
-fn create_popup(app: &AppHandle, anchor: PhysicalPosition<f64>) {
+/// 关掉系统的窗口显隐过渡：透明窗口淡入时整张面板是半透明的，看着像透出了背后的窗口
+fn disable_window_transitions(window: &WebviewWindow) {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_TRANSITIONS_FORCEDISABLED};
+        let Ok(hwnd) = window.hwnd() else { return };
+        let disabled: i32 = 1;
+        // SAFETY: hwnd 属于刚建好的窗口，属性值指向栈上的 BOOL，长度与之一致
+        let result = unsafe {
+            DwmSetWindowAttribute(
+                hwnd.0 as _,
+                DWMWA_TRANSITIONS_FORCEDISABLED as _,
+                (&disabled as *const i32).cast(),
+                std::mem::size_of::<i32>() as u32,
+            )
+        };
+        if result != 0 {
+            log::warn!(target: "tray", "tray popup transitions not disabled: {result:#x}");
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = window;
+}
+
+/// 面板窗口不存在时在后台建好（隐藏），就绪后若有待弹出的锚点再弹出
+fn ensure_popup(app: &AppHandle) {
     {
         let mut guard = TRAY.lock();
         let Some(runtime) = guard.as_mut() else { return };
-        // 页面就绪前再点一次只更新锚点，不重复建窗
-        let creating = runtime.popup_anchor.replace(anchor).is_some();
-        if creating {
+        if runtime.popup_creating || runtime.popup_ready {
             return;
         }
+        runtime.popup_creating = true;
+    }
+    if app.get_webview_window(POPUP_LABEL).is_some() {
+        // 窗口在、页面还没报就绪（例如开发时页面重载），等 tray_popup_ready
+        return;
     }
     let app = app.clone();
     // WebView2 窗口在事件回调里同步创建会卡住主线程，放到异步运行时里建
@@ -561,6 +614,7 @@ fn create_popup(app: &AppHandle, anchor: PhysicalPosition<f64>) {
             .minimizable(false)
             .always_on_top(true)
             .skip_taskbar(true)
+            .focused(false)
             .visible(false)
             .main_browser_args(&app)
             .build();
@@ -569,16 +623,20 @@ fn create_popup(app: &AppHandle, anchor: PhysicalPosition<f64>) {
             Err(error) => {
                 log::warn!(target: "tray", "tray popup window not created: {error}");
                 if let Some(runtime) = TRAY.lock().as_mut() {
+                    runtime.popup_creating = false;
                     runtime.popup_anchor = None;
                 }
                 return;
             }
         };
+        disable_window_transitions(&window);
         let event_app = app.clone();
         window.on_window_event(move |event| match event {
             WindowEvent::Focused(false) => hide_popup(&event_app),
             WindowEvent::Destroyed => {
                 if let Some(runtime) = TRAY.lock().as_mut() {
+                    runtime.popup_creating = false;
+                    runtime.popup_ready = false;
                     runtime.popup_anchor = None;
                     runtime.sent_state = None;
                 }
@@ -709,6 +767,8 @@ pub fn tray_popup_ready(
         if let Some(metrics) = metrics {
             runtime.popup_metrics = metrics;
         }
+        runtime.popup_creating = false;
+        runtime.popup_ready = true;
         runtime.popup_anchor.take()
     });
     if let Some(anchor) = anchor {

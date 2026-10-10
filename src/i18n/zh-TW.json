@@ -161,6 +161,7 @@
     "local_library_title": "本機音樂庫",
     "local_library_hint": "加入音樂資料夾後自動建立曲庫，資料夾中新增、刪除、修改的歌曲會自動同步",
     "local_library_empty": "尚未加入音樂資料夾",
+    "show_in_folder": "在資料夾中顯示",
     "local_library_no_audio": "已加入的資料夾中沒有找到音訊檔案",
     "local_add_folder": "加入資料夾",
     "local_remove_folder": "從曲庫移除（不會刪除檔案）",
@@ -280,7 +281,10 @@
     "no": "否",
     "minimize": "最小化",
     "maximize": "最大化",
-    "restore": "還原"
+    "restore": "還原",
+    "open": "開啟",
+    "copy_link": "複製連結",
+    "open_in_browser": "在瀏覽器中開啟"
   },
   "download": {
     "download": "下載",
@@ -442,6 +446,8 @@
     "copy_failed": "複製失敗",
     "copy_title": "複製歌曲名",
     "copy_artist": "複製歌手名",
+    "copy_track_info": "複製歌名與歌手",
+    "play_track": "播放",
     "save_cover": "儲存封面",
     "cover_saved": "封面已儲存",
     "cover_save_failed": "儲存封面失敗",
@@ -1109,6 +1115,7 @@
     "debug_logs_exported": "報告已匯出",
     "debug_logs_open_dir": "開啟日誌目錄",
     "debug_logs_empty": "暫無日誌",
+    "debug_logs_no_match": "沒有符合篩選條件的日誌",
     "debug_level_all": "全部級別",
     "debug_crashes": "當機報告",
     "debug_crashes_desc": "panic 現場自動保存，點擊展開",

@@ -6,6 +6,9 @@ import { useI18n } from 'vue-i18n'
 import { invoke } from '@tauri-apps/api/core'
 import { usePlayerStore, type TrackInfo } from '@/stores/player'
 import BilibiliCoverImage from '@/components/BilibiliCoverImage.vue'
+import TrackContextMenu from '@/components/TrackContextMenu.vue'
+import CollectionContextMenu from '@/components/CollectionContextMenu.vue'
+import { collectionWebUrl } from '@/utils/collectionLinks'
 import {
   playlistDetailCacheKey,
   previewCachedDetail,
@@ -56,6 +59,7 @@ const tracks = ref<TrackInfo[]>([])
 const albums = ref<ArtistAlbum[]>([])
 const activeTab = ref<'songs' | 'albums'>('songs')
 const query = ref('')
+const trackMenuRef = ref<InstanceType<typeof TrackContextMenu> | null>(null)
 const search = computed(() => query.value.trim())
 const filteredTracks = computed(() => filterAndRank(query.value, tracks.value, trackSearchTokens))
 const filteredAlbums = computed(() => filterAndRank(query.value, albums.value, album =>
@@ -203,6 +207,15 @@ function openAlbum(album: ArtistAlbum) {
   router.push({ name: 'netease-album', params: { id: String(album.id) } })
 }
 
+const collectionMenuRef = ref<InstanceType<typeof CollectionContextMenu> | null>(null)
+
+function openAlbumMenu(event: MouseEvent, album: ArtistAlbum) {
+  collectionMenuRef.value?.open(event, {
+    route: { name: 'netease-album', params: { id: String(album.id) } },
+    webUrl: collectionWebUrl('netease', 'album', album.id),
+  })
+}
+
 const songCountLabel = computed(() =>
   t('player.track_count', { count: header.value?.musicSize || tracks.value.length }))
 const albumCountLabel = computed(() =>
@@ -318,6 +331,7 @@ onUnmounted(() => { generation++ })
           class="track-item"
           :class="{ active: player.currentTrack?.id === track.id }"
           @click="playTrack(track)"
+          @contextmenu="trackMenuRef?.open($event, track)"
           @pointerenter="player.prefetchIntent(track)"
           @focusin="player.prefetchIntent(track)"
         >
@@ -356,6 +370,7 @@ onUnmounted(() => { generation++ })
           role="button"
           tabindex="0"
           @click="openAlbum(album)"
+          @contextmenu="openAlbumMenu($event, album)"
           @keydown.enter="openAlbum(album)"
         >
           <div class="artist-album-cover">
@@ -376,6 +391,8 @@ onUnmounted(() => { generation++ })
       </div>
       </Transition>
     </template>
+    <TrackContextMenu ref="trackMenuRef" @play="playTrack" />
+    <CollectionContextMenu ref="collectionMenuRef" />
   </div>
 </template>
 

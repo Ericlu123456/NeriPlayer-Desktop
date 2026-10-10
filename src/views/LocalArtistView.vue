@@ -11,6 +11,7 @@ import {
 } from '@/modules/library/localArtists'
 import { recordPlaylistOpen } from '@/modules/library/playlistUsage'
 import BilibiliCoverImage from '@/components/BilibiliCoverImage.vue'
+import TrackContextMenu from '@/components/TrackContextMenu.vue'
 import { createLogger } from '@/utils/logger'
 import { formatTrackDuration as formatDuration } from '@/utils/timeFormat'
 
@@ -24,6 +25,7 @@ const { t } = useI18n()
 const loading = ref(true)
 const tracks = ref<TrackInfo[]>([])
 const searchQuery = ref('')
+const trackMenuRef = ref<InstanceType<typeof TrackContextMenu> | null>(null)
 const filteredTracks = computed(() => filterAndRank(searchQuery.value, tracks.value, trackSearchTokens))
 
 const artistName = computed(() => String(route.params.name ?? ''))
@@ -146,6 +148,7 @@ onMounted(load)
           class="track-item"
           :class="{ active: player.currentTrack?.id === track.id }"
           @click="playTrack(track)"
+          @contextmenu="trackMenuRef?.open($event, track)"
           @pointerenter="player.prefetchIntent(track)"
           @focusin="player.prefetchIntent(track)"
         >
@@ -172,6 +175,7 @@ onMounted(load)
         </div>
       </div>
     </template>
+    <TrackContextMenu ref="trackMenuRef" @play="playTrack" />
   </div>
 </template>
 

@@ -4,9 +4,12 @@ import { computed, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { invoke } from '@tauri-apps/api/core'
-import { usePlayerStore } from '@/stores/player'
+import { usePlayerStore, type TrackInfo } from '@/stores/player'
 import { useToastStore } from '@/stores/toast'
 import BilibiliCoverImage from '@/components/BilibiliCoverImage.vue'
+import TrackContextMenu from '@/components/TrackContextMenu.vue'
+import CollectionContextMenu from '@/components/CollectionContextMenu.vue'
+import { collectionWebUrl } from '@/utils/collectionLinks'
 import { useArtistFavorite } from '@/modules/library/favoriteArtistState'
 import { parseYouTubeArtistDetail, parseYouTubeArtistItems, youtubeArtistItemTrack, type YouTubeArtistDetail, type YouTubeArtistItem, type YouTubeArtistSection } from '@/modules/library/youtubeArtistDetail'
 import { playlistDetailCacheKey, previewCachedDetail, writePlaylistDetailCache } from '@/modules/library/playlistDetailCache'
@@ -25,6 +28,22 @@ const sectionLoading = ref('')
 const queueLoading = ref(false)
 const query = ref('')
 const descriptionExpanded = ref(false)
+const trackMenuRef = ref<InstanceType<typeof TrackContextMenu> | null>(null)
+const trackMenuSection = ref<YouTubeArtistSection | null>(null)
+const collectionMenuRef = ref<InstanceType<typeof CollectionContextMenu> | null>(null)
+
+function openTrackMenu(event: MouseEvent, section: YouTubeArtistSection, item: YouTubeArtistItem) {
+  const track = youtubeArtistItemTrack(item, header.value.name)
+  if (!track) return
+  trackMenuSection.value = section
+  trackMenuRef.value?.open(event, track)
+}
+
+function playFromMenu(track: TrackInfo) {
+  const section = trackMenuSection.value
+  const item = section && sectionItems(section).find(entry => entry.videoId && `youtube:${entry.videoId}` === track.id)
+  if (section && item) void playSection(section, item)
+}
 const sectionPages = ref<Record<string, { items: YouTubeArtistItem[]; continuation: string }>>({})
 let generation = 0
 // detail 当前属于哪位创作者
@@ -145,12 +164,27 @@ async function playSection(section: YouTubeArtistSection, selected?: YouTubeArti
   finally { if (request === generation) queueLoading.value = false }
 }
 
+function collectionRoute(item: YouTubeArtistItem) {
+  if (!item.browseId) return null
+  return item.kind === 'artist'
+    ? { name: 'youtube-artist', params: { browseId: item.browseId }, query: { name: item.title, cover: item.coverUrl, subtitle: item.subtitle } }
+    : { name: 'youtube-playlist', params: { browseId: item.browseId } }
+}
+
 function openItem(section: YouTubeArtistSection, item: YouTubeArtistItem) {
   if (item.videoId) { void playSection(section, item); return }
-  if (!item.browseId) return
-  router.push(item.kind === 'artist'
-    ? { name: 'youtube-artist', params: { browseId: item.browseId }, query: { name: item.title, cover: item.coverUrl, subtitle: item.subtitle } }
-    : { name: 'youtube-playlist', params: { browseId: item.browseId } })
+  const target = collectionRoute(item)
+  if (target) void router.push(target)
+}
+
+function openCollectionMenu(event: MouseEvent, section: YouTubeArtistSection, item: YouTubeArtistItem) {
+  if (item.videoId) { openTrackMenu(event, section, item); return }
+  const target = collectionRoute(item)
+  if (!target) return
+  collectionMenuRef.value?.open(event, {
+    route: target,
+    webUrl: collectionWebUrl('youtube', item.kind === 'artist' ? 'artist' : item.kind === 'album' ? 'album' : 'playlist', item.browseId),
+  })
 }
 async function toggleFollow() { try { await toggle() } catch (cause) { toast.error(String(cause)) } }
 watch(browseId, () => { queueLoading.value = false; void load() }, { immediate: true })
@@ -182,16 +216,18 @@ onUnmounted(() => { generation++ })
       <section v-for="section in detail?.sections || []" :key="sectionKey(section)" class="creator-section">
         <div class="creator-section-heading"><h2>{{ section.title }}</h2><button v-if="canLoadSection(section)" class="creator-more" :disabled="!!sectionLoading || queueLoading" @click="loadSection(section)">{{ t(sectionLoading === sectionKey(section) ? 'common.loading' : (sectionPages[sectionKey(section)] ? 'player.artist_load_more' : 'player.artist_section_more')) }}</button></div>
         <div v-if="section.items.some(item => item.videoId)" class="track-list">
-          <button v-for="(item, index) in filteredItems(section)" :key="item.videoId || item.browseId" class="track-item" :disabled="queueLoading" :class="{ active: player.currentTrack?.id === `youtube:${item.videoId}` }" @click="openItem(section, item)">
+          <button v-for="(item, index) in filteredItems(section)" :key="item.videoId || item.browseId" class="track-item" :disabled="queueLoading" :class="{ active: player.currentTrack?.id === `youtube:${item.videoId}` }" @click="openItem(section, item)" @contextmenu="openTrackMenu($event, section, item)">
             <span class="track-index">{{ index + 1 }}</span><div class="track-cover"><BilibiliCoverImage :src="item.coverUrl" loading="lazy"><span class="material-symbols-rounded filled">music_note</span></BilibiliCoverImage></div><div class="track-info"><div class="track-title">{{ item.title }}</div><div class="track-meta">{{ item.subtitle || item.artist }}</div></div><span class="track-duration">{{ formatTrackDuration(item.durationMs) }}</span>
           </button>
         </div>
         <div v-else class="creator-grid">
-          <button v-for="item in filteredItems(section)" :key="item.browseId || item.videoId" class="creator-card" @click="openItem(section, item)"><div class="creator-card-cover" :class="{ round: item.kind === 'artist' }"><BilibiliCoverImage v-if="item.coverUrl" :src="item.coverUrl" loading="lazy" /><span v-else class="material-symbols-rounded">{{ item.kind === 'artist' ? 'account_circle' : 'album' }}</span></div><span class="creator-card-title">{{ item.title }}</span><span class="creator-card-subtitle">{{ item.subtitle }}</span></button>
+          <button v-for="item in filteredItems(section)" :key="item.browseId || item.videoId" class="creator-card" @click="openItem(section, item)" @contextmenu="openCollectionMenu($event, section, item)"><div class="creator-card-cover" :class="{ round: item.kind === 'artist' }"><BilibiliCoverImage v-if="item.coverUrl" :src="item.coverUrl" loading="lazy" /><span v-else class="material-symbols-rounded">{{ item.kind === 'artist' ? 'account_circle' : 'album' }}</span></div><span class="creator-card-title">{{ item.title }}</span><span class="creator-card-subtitle">{{ item.subtitle }}</span></button>
         </div>
       </section>
       <p v-if="detail && !detail.sections.length" class="creator-empty">{{ t('player.artist_songs_empty') }}</p>
     </template>
+    <TrackContextMenu ref="trackMenuRef" @play="playFromMenu" />
+    <CollectionContextMenu ref="collectionMenuRef" />
   </div>
 </template>
 

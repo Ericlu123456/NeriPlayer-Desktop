@@ -2,7 +2,8 @@
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 
 const props = withDefaults(defineProps<{
-  progress: number
+  /** 传读取函数时只有本组件逐帧跟随，父组件不必因进度变化每帧重渲染 */
+  progress: number | (() => number)
   isPlaying: boolean
   activeColor?: string
   inactiveColor?: string
@@ -39,7 +40,10 @@ let pathInactive: SVGPathElement | null = null
 let thumbTrack: HTMLDivElement | null = null
 let thumbDiv: HTMLDivElement | null = null
 
-const currentProgress = computed(() => isDragging.value ? dragProgress.value : props.progress)
+const currentProgress = computed(() => {
+  if (isDragging.value) return dragProgress.value
+  return typeof props.progress === 'function' ? props.progress() : props.progress
+})
 
 function waveY(x: number, cy: number): number {
   return cy + Math.sin(x * WAVE_FREQ + phase) * currentAmp

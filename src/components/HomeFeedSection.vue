@@ -14,6 +14,8 @@ const emit = defineEmits<{
   retry: []
   play: [songs: TrackInfo[], index: number]
   playlist: [playlist: HomePlaylist]
+  songMenu: [event: MouseEvent, songs: TrackInfo[], index: number]
+  playlistMenu: [event: MouseEvent, playlist: HomePlaylist]
 }>()
 const { t, locale } = useI18n()
 const playCountFormat = computed(() => new Intl.NumberFormat(locale.value, { notation: 'compact', maximumFractionDigits: 1 }))
@@ -50,7 +52,7 @@ onUnmounted(() => window.removeEventListener('resize', updateColumns))
       <button @click="emit('retry')">{{ t('player.retry') }}</button>
     </div>
     <div v-if="hasItems && definition.kind === 'songs'" class="feed-songs" :style="{ gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))` }">
-      <button v-for="(song, index) in pageSongs" :key="song.playlistKey ?? song.id" type="button" class="feed-song" @click="emit('play', section.songs, page * perPage + index)">
+      <button v-for="(song, index) in pageSongs" :key="song.playlistKey ?? song.id" type="button" class="feed-song" @click="emit('play', section.songs, page * perPage + index)" @contextmenu.prevent="emit('songMenu', $event, section.songs, page * perPage + index)">
         <span class="song-number">{{ page * perPage + index + 1 }}</span>
         <span class="song-cover">
           <span class="material-symbols-rounded">music_note</span>
@@ -63,7 +65,7 @@ onUnmounted(() => window.removeEventListener('resize', updateColumns))
       </button>
     </div>
     <div v-else-if="hasItems" class="feed-playlists" :class="{ 'radar-playlists': definition.kind === 'radar' }">
-      <button v-for="(playlist, index) in section.playlists" :key="playlist.id + ':' + index" type="button" class="feed-playlist" @click="emit('playlist', playlist)">
+      <button v-for="(playlist, index) in section.playlists" :key="playlist.id + ':' + index" type="button" class="feed-playlist" @click="emit('playlist', playlist)" @contextmenu.prevent="emit('playlistMenu', $event, playlist)">
         <div class="playlist-image">
           <span class="material-symbols-rounded">queue_music</span>
           <BilibiliCoverImage v-if="playlist.coverUrl" :src="playlist.coverUrl" :alt="playlist.name" loading="lazy" />

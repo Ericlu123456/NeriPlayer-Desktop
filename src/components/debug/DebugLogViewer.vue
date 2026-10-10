@@ -30,9 +30,36 @@ const expanded = ref<string | null>(null)
 const clearedBefore = ref(0)
 const listEl = ref<HTMLElement | null>(null)
 let timer: number | null = null
+let refreshing = false
+let disposed = false
 
-function entryKey(entry: RecentLogEntry, index: number): string {
-  return `${entry.timestamp_ms}-${index}`
+/// 行 key 不能用列表下标：环形缓冲满了以后旧日志从头部出队，下标整体前移会让每一行都重建
+const entryKeys = computed(() => {
+  const seen = new Map<string, number>()
+  const keys = new WeakMap<RecentLogEntry, string>()
+  for (const entry of entries.value) {
+    const identity = JSON.stringify([entry.timestamp_ms, entry.level, entry.target, entry.message])
+    const occurrence = seen.get(identity) ?? 0
+    seen.set(identity, occurrence + 1)
+    keys.set(entry, `${identity}-${occurrence}`)
+  }
+  return keys
+})
+
+function entryKey(entry: RecentLogEntry): string {
+  return entryKeys.value.get(entry) ?? String(entry.timestamp_ms)
+}
+
+function sameEntries(next: RecentLogEntry[]): boolean {
+  const current = entries.value
+  if (current.length !== next.length) return false
+  return current.every((entry, index) => {
+    const other = next[index]!
+    return entry.timestamp_ms === other.timestamp_ms
+      && entry.level === other.level
+      && entry.target === other.target
+      && entry.message === other.message
+  })
 }
 
 /// 前端日志的 target 带完整源码地址（webview:anonymous@http://…/logger.ts:53:55），只留有意义的部分
@@ -43,12 +70,18 @@ function shortTarget(target: string): string {
 }
 
 async function refresh() {
+  if (disposed || refreshing) return
+  refreshing = true
   try {
     const result = await invoke<RecentLogEntry[]>('get_recent_logs', { limit: FETCH_LIMIT, minLevel: null })
+    if (disposed) return
     // 后端最新在前，展示按时间正序，最新在底部
-    entries.value = [...result].reverse()
+    const next = [...result].reverse()
+    if (!sameEntries(next)) entries.value = next
   } catch {
     // 浏览器开发模式没有这个命令
+  } finally {
+    refreshing = false
   }
 }
 
@@ -148,15 +181,15 @@ watch(() => visible.value.length, () => {
   if (follow.value) void nextTick(scrollToBottom)
 })
 
-onMounted(async () => {
-  await refresh()
-  void nextTick(scrollToBottom)
+onMounted(() => {
+  void refresh().then(() => { if (!disposed) void nextTick(scrollToBottom) })
   timer = window.setInterval(() => {
-    if (!paused.value) void refresh()
+    if (!paused.value && document.visibilityState === 'visible') void refresh()
   }, REFRESH_MS)
 })
 
 onUnmounted(() => {
+  disposed = true
   if (timer) window.clearInterval(timer)
 })
 
@@ -164,7 +197,7 @@ const levelClass = (level: string) => `level-${normalizeLevel(level).toLowerCase
 </script>
 
 <template>
-  <div class="log-viewer setting-card">
+  <div class="log-viewer">
     <div class="log-toolbar">
       <div class="log-levels" role="group" :aria-label="t('settings.debug_logs_level')">
         <button
@@ -220,19 +253,21 @@ const levelClass = (level: string) => `level-${normalizeLevel(level).toLowerCase
     </div>
 
     <div ref="listEl" class="log-list" @scroll.passive="onScroll">
-      <p v-if="!visible.length" class="log-empty">{{ t('settings.debug_logs_empty') }}</p>
+      <p v-if="!visible.length" class="log-empty">
+        {{ t(entries.length ? 'settings.debug_logs_no_match' : 'settings.debug_logs_empty') }}
+      </p>
       <div
-        v-for="(entry, index) in visible"
-        :key="entryKey(entry, index)"
+        v-for="entry in visible"
+        :key="entryKey(entry)"
         class="log-line"
-        :class="[levelClass(entry.level), { expanded: expanded === entryKey(entry, index) }]"
-        @click="expanded = expanded === entryKey(entry, index) ? null : entryKey(entry, index)"
+        :class="[levelClass(entry.level), { expanded: expanded === entryKey(entry) }]"
+        @click="expanded = expanded === entryKey(entry) ? null : entryKey(entry)"
       >
         <span class="log-time">{{ logTime(entry.timestamp_ms) }}</span>
         <span class="log-level">{{ normalizeLevel(entry.level) }}</span>
         <span class="log-target" :title="entry.target">{{ shortTarget(entry.target) }}</span>
         <span class="log-message">{{ entry.message }}</span>
-        <div v-if="expanded === entryKey(entry, index)" class="log-detail" @click.stop>
+        <div v-if="expanded === entryKey(entry)" class="log-detail" @click.stop>
           <span class="log-detail-target">{{ entry.target }}</span>
           <button type="button" class="log-btn small" @click="copyText(formatLine(entry))">
             <span class="material-symbols-rounded">content_copy</span>
@@ -252,9 +287,13 @@ const levelClass = (level: string) => `level-${normalizeLevel(level).toLowerCase
 .log-viewer {
   display: flex;
   flex-direction: column;
+  align-items: stretch;
   gap: 10px;
-  padding: 14px;
+  padding: 14px 16px;
   min-height: 0;
+  margin-bottom: 8px;
+  border-radius: var(--radius-lg);
+  background: var(--md-surface-container);
 }
 
 .log-toolbar,

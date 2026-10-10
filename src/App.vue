@@ -8,6 +8,7 @@ import { usePlayerStore, displayAlbum } from '@/stores/player'
 import { usePlaybackStatsStore } from '@/stores/playbackStats'
 import { installGlobalShortcuts, type ShortcutActions } from '@/modules/shortcuts/globalShortcuts'
 import { applySystemShortcuts, clearSystemShortcuts } from '@/modules/shortcuts/systemShortcuts'
+import { detectPlatform } from '@/modules/shortcuts/platform'
 import { shortcutRecording } from '@/modules/shortcuts/recording'
 import { closeDesktopLyricsWindow, desktopLyricsOpen, installDesktopLyricsBridge, openDesktopLyricsWindow } from '@/modules/desktopLyrics/bridge'
 import { installTrayBridge, quitApp } from '@/modules/tray/bridge'
@@ -44,12 +45,9 @@ type CoverSnapshot = {
   src: string
 }
 
-// macOS 标题栏更高（52px，红绿灯垂直居中），根类驱动 --titlebar-height 分支；
-// 与 TitleBar.vue 相同的 navigator 平台判定，窗口在 mount 后才显示，不会闪
-const isMacPlatform = /Mac|iPhone|iPad/.test(
-  (navigator as any).userAgentData?.platform || navigator.platform || navigator.userAgent
-)
-if (isMacPlatform) document.documentElement.classList.add('platform-mac')
+// 根类 platform-mac / platform-windows / platform-linux 驱动平台样式分支（如 macOS 更高的
+// --titlebar-height，红绿灯垂直居中）；窗口在 mount 后才显示，不会闪
+document.documentElement.classList.add(`platform-${detectPlatform()}`)
 
 const appLog = createLogger('app')
 const player = usePlayerStore()

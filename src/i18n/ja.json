@@ -161,6 +161,7 @@
     "local_library_title": "ローカル音楽ライブラリ",
     "local_library_hint": "音楽フォルダを追加するとライブラリを自動で作成し、フォルダ内の追加・削除・変更も自動で反映します",
     "local_library_empty": "音楽フォルダがまだありません",
+    "show_in_folder": "フォルダーで表示",
     "local_library_no_audio": "追加したフォルダに音声ファイルが見つかりません",
     "local_add_folder": "フォルダを追加",
     "local_remove_folder": "ライブラリから削除（ファイルは削除されません）",
@@ -280,7 +281,10 @@
     "no": "いいえ",
     "minimize": "最小化",
     "maximize": "最大化",
-    "restore": "元に戻す"
+    "restore": "元に戻す",
+    "open": "開く",
+    "copy_link": "リンクをコピー",
+    "open_in_browser": "ブラウザで開く"
   },
   "download": {
     "download": "ダウンロード",
@@ -442,6 +446,8 @@
     "copy_failed": "コピーに失敗",
     "copy_title": "曲名をコピー",
     "copy_artist": "アーティスト名をコピー",
+    "copy_track_info": "曲名とアーティストをコピー",
+    "play_track": "再生",
     "save_cover": "カバーを保存",
     "cover_saved": "カバーを保存しました",
     "cover_save_failed": "カバーの保存に失敗",
@@ -1109,6 +1115,7 @@
     "debug_logs_exported": "レポートを書き出しました",
     "debug_logs_open_dir": "ログフォルダを開く",
     "debug_logs_empty": "ログはまだありません",
+    "debug_logs_no_match": "条件に一致するログはありません",
     "debug_level_all": "すべてのレベル",
     "debug_crashes": "クラッシュレポート",
     "debug_crashes_desc": "panic 発生時に自動保存、クリックで展開",

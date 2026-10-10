@@ -41,6 +41,8 @@ const REBUFFER_TARGET: Duration = Duration::from_millis(1_500);
 const EFFECTS_RECOVER_TARGET: Duration = Duration::from_millis(120);
 const PCM_CAPACITY: Duration = Duration::from_secs(4);
 const DECODE_IDLE_SLEEP: Duration = Duration::from_millis(2);
+const DECODE_FULL_WAIT: Duration = Duration::from_millis(10);
+const DECODE_PAUSED_WAIT: Duration = Duration::from_millis(20);
 const READY_POLL: Duration = Duration::from_millis(20);
 const FADE_STEP: Duration = Duration::from_millis(10);
 const ANALYSIS_FRAME_SIZE: usize = 2_048;
@@ -51,6 +53,7 @@ const SEEK_SUPERSEDED: &str = "Seek request superseded";
 // 宽限只兜发送线程被调度延迟的极端情况，超时则回滚旧位置，绝不悬空
 const SEEK_ADOPT_GRACE: Duration = Duration::from_millis(200);
 const OUTPUT_DEVICE_POLL_INTERVAL: Duration = Duration::from_secs(2);
+const OUTPUT_DEVICE_IDLE_POLL_INTERVAL: Duration = Duration::from_secs(15);
 /// 回调一次最多经变速器处理的帧数；更大的设备缓冲按这个大小分块
 const RENDER_CHUNK_FRAMES: usize = 4096;
 /// 字节跳转后最多丢掉这么长的分片开头；超过说明落点不对，宁可不丢
@@ -496,14 +499,15 @@ fn output_device_to_switch(
 /// 在独立线程里定期枚举输出设备，把结果交给控制线程
 ///
 /// Windows 上一次枚举要 250–300 ms。放在控制线程里时，这段时间到达的
-/// 播放、seek、暂停命令都得排队等它。控制线程断开后发送失败，线程随之退出。
-fn spawn_output_device_watch(commands: mpsc::Sender<AudioCmd>) {
+/// 播放、seek、暂停命令都得排队等它。控制线程断开后，监视线程随之退出
+fn spawn_output_device_watch(commands: mpsc::Sender<AudioCmd>) -> Option<mpsc::Sender<bool>> {
+    let (activity_tx, activity_rx) = mpsc::channel();
     let spawned = thread::Builder::new()
         .name("audio-device-watch".into())
         .spawn(move || {
             let mut last_error: Option<String> = None;
-            loop {
-                thread::sleep(OUTPUT_DEVICE_POLL_INTERVAL);
+            let mut active = false;
+            while wait_for_output_device_poll(&activity_rx, &mut active) {
                 let devices = match list_audio_output_devices() {
                     Ok(devices) => {
                         if last_error.take().is_some() {
@@ -533,8 +537,30 @@ fn spawn_output_device_watch(commands: mpsc::Sender<AudioCmd>) {
                 }
             }
         });
-    if let Err(error) = spawned {
-        log::error!(target: "cpal-output", "could not start the output device watcher: {error}");
+    match spawned {
+        Ok(_) => Some(activity_tx),
+        Err(error) => {
+            log::error!(target: "cpal-output", "could not start the output device watcher: {error}");
+            None
+        }
+    }
+}
+
+fn wait_for_output_device_poll(receiver: &mpsc::Receiver<bool>, active: &mut bool) -> bool {
+    loop {
+        let interval = if *active { OUTPUT_DEVICE_POLL_INTERVAL } else { OUTPUT_DEVICE_IDLE_POLL_INTERVAL };
+        match receiver.recv_timeout(interval) {
+            Ok(next_active) => {
+                let started_playing = next_active && !*active;
+                *active = next_active;
+                // 状态变化直接唤醒，不需要另设空闲 tick；恢复播放时立即检查设备
+                if started_playing {
+                    return true;
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => return true,
+            Err(mpsc::RecvTimeoutError::Disconnected) => return false,
+        }
     }
 }
 
@@ -1645,7 +1671,6 @@ fn spawn_audio_thread(
     let alive_for_thread = Arc::clone(&alive);
     // 回传句柄：cpal 错误回调用它向控制线程上报 DeviceLost
     let loopback_tx = cmd_tx.clone();
-    spawn_output_device_watch(cmd_tx.clone());
     thread::Builder::new()
         .name("cpal-playback-control".into())
         .spawn(move || {
@@ -1679,6 +1704,8 @@ fn audio_control_loop(
     transition_generation: Arc<AtomicU64>,
 ) {
     let mut current: Option<PlaybackSession> = None;
+    let output_watch = spawn_output_device_watch(loopback_tx.clone());
+    let mut output_was_in_use = false;
     let mut volume = 1.0f32;
     let mut speed = 1.0f32;
     // 被 seek 折叠/接管路径暂存的命令队列：必须保序回放，
@@ -1704,6 +1731,15 @@ fn audio_control_loop(
     let mut output_profile = OutputDeviceState { preferred_name: None, profile };
     let mut reporter = MetricsReporter::new();
     loop {
+        let output_in_use = current
+            .as_ref()
+            .is_some_and(|session| !session.shared.paused.load(Ordering::Acquire));
+        if output_in_use != output_was_in_use {
+            if let Some(watch) = &output_watch {
+                let _ = watch.send(output_in_use);
+            }
+            output_was_in_use = output_in_use;
+        }
         let idle_wait = if reporter.has_pending_probes() {
             metrics::PROBE_POLL_INTERVAL
         } else {
@@ -1719,9 +1755,7 @@ fn audio_control_loop(
         };
         reporter.poll(
             current.as_ref().map(|session| session.playback_generation),
-            current
-                .as_ref()
-                .is_some_and(|session| !session.shared.paused.load(Ordering::Acquire)),
+            output_in_use,
         );
         let Some(command) = command else { continue };
         match command {
@@ -1855,6 +1889,10 @@ fn audio_control_loop(
                 ));
                 let mut previous = current.take();
                 current = Some(next);
+                if let Some(watch) = &output_watch {
+                    let _ = watch.send(true);
+                }
+                output_was_in_use = true;
                 log::info!(
                     target: "cpal-output",
                     "play session started source={} generation={} duration_ms={} elapsed_ms={}",
@@ -2884,18 +2922,16 @@ fn spawn_decode_worker(
                 && !read_cancellation.is_cancelled()
             {
                 if shared.ring.writable_samples() < shared.channels {
-                    if shared.paused.load(Ordering::Acquire) {
-                        // 暂停期间输出回调不消费 ring，2ms 忙眠纯耗电；
-                        // 改用 condvar 有界等待，resume/stop 会 notify 立即唤醒。
-                        // 保守选 20ms 上限：即便错过通知，恢复时 ring 是满的
-                        // （4 秒容量），20ms 的解码延迟不可能造成欠载
-                        if let Ok(guard) = shared.wake_lock.lock() {
-                            let _ = shared
-                                .wake
-                                .wait_timeout(guard, Duration::from_millis(20));
-                        } else {
-                            thread::sleep(DECODE_IDLE_SLEEP);
-                        }
+                    // ring 满了就等：暂停时输出回调不消费，播放时每 10ms 只腾出 10ms 的空间，
+                    // 2ms 忙眠一秒唤醒 500 次纯耗电。condvar 有界等待，resume/stop 会 notify 立即唤醒；
+                    // ring 有 4 秒容量，这点解码延迟不可能造成欠载
+                    let wait = if shared.paused.load(Ordering::Acquire) {
+                        DECODE_PAUSED_WAIT
+                    } else {
+                        DECODE_FULL_WAIT
+                    };
+                    if let Ok(guard) = shared.wake_lock.lock() {
+                        let _ = shared.wake.wait_timeout(guard, wait);
                     } else {
                         thread::sleep(DECODE_IDLE_SLEEP);
                     }
@@ -3724,6 +3760,36 @@ mod tests {
     }
 
     #[test]
+    fn output_device_watch_polls_on_playback_start_after_idle_updates() {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        sender.send(false).unwrap();
+        sender.send(false).unwrap();
+        sender.send(true).unwrap();
+        let mut active = false;
+        assert!(super::wait_for_output_device_poll(&receiver, &mut active));
+        assert!(active);
+    }
+
+    #[test]
+    fn output_device_watch_does_not_poll_on_pause_or_duplicate_updates() {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        sender.send(true).unwrap();
+        sender.send(false).unwrap();
+        drop(sender);
+        let mut active = true;
+        assert!(!super::wait_for_output_device_poll(&receiver, &mut active));
+        assert!(!active);
+    }
+
+    #[test]
+    fn output_device_watch_exits_when_the_controller_disconnects() {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        drop(sender);
+        let mut active = false;
+        assert!(!super::wait_for_output_device_poll(&receiver, &mut active));
+    }
+
+    #[test]
     fn listed_devices_switch_output_only_when_the_target_changes() {
         let available = vec!["speaker".to_string(), "headphones".to_string()];
         assert_eq!(super::output_device_to_switch(None, &available, Some("headphones"), Some("headphones")), None);
@@ -4351,6 +4417,74 @@ mod tests {
             effects: crate::audio::effects::EffectsControl::new_shared(),
             loudness: crate::audio::effects::TrackLoudness::new_shared(),
         })
+    }
+
+    #[test]
+    fn full_decode_buffer_refills_after_output_consumes_frames() {
+        let shared = render_test_shared(1, 8);
+        let decoder = crate::audio::remote::SymphoniaAudioDecoder::new(
+            Box::new(std::io::Cursor::new(include_bytes!("fixtures/hls-silence.aac").as_slice())), Some("aac"),
+        ).unwrap();
+        let cancellation = crate::audio::remote::RemoteReadCancellation::new(
+            Arc::clone(&shared.cancelled), None,
+        );
+        let worker = super::spawn_decode_worker(
+            Box::new(decoder), Arc::clone(&shared),
+            crate::audio::analyzer::SharedAudioLevel::new(),
+            Arc::new(AtomicU64::new(7)), 7, cancellation,
+        ).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        while shared.ring.readable_samples() < 8 && std::time::Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        let filled = shared.ring.readable_samples() == 8;
+        let mut consumed = [0.0; 8];
+        let taken = shared.ring.pop_frames(&mut consumed, 1);
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        while shared.ring.readable_samples() < 8 && std::time::Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        let refilled = shared.ring.readable_samples() == 8;
+        shared.cancelled.store(true, Ordering::Release);
+        shared.wake.notify_all();
+        worker.join().unwrap();
+        assert!(filled);
+        assert_eq!(taken, 8);
+        assert!(refilled, "output consumption must resume decoding without a notification");
+    }
+
+    #[test]
+    fn full_paused_decode_buffer_observes_a_new_generation() {
+        let shared = render_test_shared(1, 8);
+        shared.paused.store(true, Ordering::Release);
+        let generation = Arc::new(AtomicU64::new(7));
+        let decoder = crate::audio::remote::SymphoniaAudioDecoder::new(
+            Box::new(std::io::Cursor::new(include_bytes!("fixtures/hls-silence.aac").as_slice())), Some("aac"),
+        ).unwrap();
+        let cancellation = crate::audio::remote::RemoteReadCancellation::new(
+            Arc::clone(&shared.cancelled), None,
+        );
+        let worker = super::spawn_decode_worker(
+            Box::new(decoder), Arc::clone(&shared),
+            crate::audio::analyzer::SharedAudioLevel::new(),
+            Arc::clone(&generation), 7, cancellation,
+        ).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        while shared.ring.readable_samples() < 8 && std::time::Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        let filled = shared.ring.readable_samples() == 8;
+        generation.store(8, Ordering::Release);
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        while !worker.is_finished() && std::time::Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        let superseded = worker.is_finished();
+        shared.cancelled.store(true, Ordering::Release);
+        shared.wake.notify_all();
+        worker.join().unwrap();
+        assert!(filled);
+        assert!(superseded, "generation changes must cancel a full paused buffer without a notification");
     }
 
     /// 与 build_typed_stream 里一样的回调状态

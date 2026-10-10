@@ -3,6 +3,7 @@ import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import type { UnlistenFn } from '@tauri-apps/api/event'
+import { isMacPlatform } from '@/modules/shortcuts/platform'
 
 const props = defineProps<{
   forceLight?: boolean
@@ -31,11 +32,11 @@ const titleBarTrackKey = computed(() => `${props.nowPlaying ? 'np' : 'base'}:${t
 const isMaximized = ref(false)
 let unlistenResize: UnlistenFn | null = null
 
-// macOS 使用系统原生红绿灯，隐藏自绘控制并在左侧留出安全区。
-// 通过 navigator 判定平台（reqwest 层的 UA spoof 不影响 webview 的 navigator）。
-const isMac = /Mac|iPhone|iPad/.test(
-  (navigator as any).userAgentData?.platform || navigator.platform || navigator.userAgent
-)
+// macOS 使用系统原生红绿灯，隐藏自绘控制并在左侧留出安全区
+const isMac = isMacPlatform
+/** 拖动改变窗口大小时 resize 事件一秒几十次，最大化状态等停下来再查 */
+const MAXIMIZED_REFRESH_DELAY_MS = 120
+let maximizedRefreshTimer: ReturnType<typeof setTimeout> | null = null
 
 const appWindow = getCurrentWindow()
 
@@ -59,15 +60,24 @@ function close() {
   appWindow.close().catch(() => {})
 }
 
+function scheduleMaximizedRefresh() {
+  if (maximizedRefreshTimer) clearTimeout(maximizedRefreshTimer)
+  maximizedRefreshTimer = setTimeout(() => {
+    maximizedRefreshTimer = null
+    void refreshMaximized()
+  }, MAXIMIZED_REFRESH_DELAY_MS)
+}
+
 onMounted(async () => {
   await refreshMaximized()
   try {
-    unlistenResize = await appWindow.onResized(() => refreshMaximized())
+    unlistenResize = await appWindow.onResized(scheduleMaximizedRefresh)
   } catch {}
 })
 
 onUnmounted(() => {
   if (unlistenResize) unlistenResize()
+  if (maximizedRefreshTimer) clearTimeout(maximizedRefreshTimer)
 })
 </script>
 
@@ -98,7 +108,14 @@ onUnmounted(() => {
         </transition>
         <transition name="tb-arrow-fade">
           <div v-if="nowPlaying" key="np-left" class="tb-np-left">
-            <button class="tb-np-btn tb-np-collapse" type="button" data-tauri-drag-region="false" @click="emit('collapse')">
+            <button
+              class="tb-np-btn tb-np-collapse"
+              type="button"
+              data-tauri-drag-region="false"
+              :title="t('common.back')"
+              :aria-label="t('common.back')"
+              @click="emit('collapse')"
+            >
               <span class="material-symbols-rounded">keyboard_arrow_down</span>
             </button>
           </div>
@@ -130,6 +147,8 @@ onUnmounted(() => {
             class="tb-np-btn tb-np-more"
             type="button"
             data-tauri-drag-region="false"
+            :title="t('player.more_options')"
+            :aria-label="t('player.more_options')"
             @click="emit('toggleMore')"
           >
             <span class="material-symbols-rounded">more_vert</span>

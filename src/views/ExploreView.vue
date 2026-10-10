@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
+import { useRoute, useRouter, type RouteLocationRaw } from 'vue-router'
 
 defineOptions({ name: 'ExploreView' })
 import { useI18n } from 'vue-i18n'
@@ -11,11 +11,14 @@ import {
 } from '@/stores/exploreSearch'
 import { usePlayerStore, type TrackInfo } from '@/stores/player'
 import { useAuthStore } from '@/stores/auth'
-import { useRecommendStore, type PlaylistInfo } from '@/stores/recommend'
+import { useRecommendStore, type HomeFeedItem, type PlaylistInfo } from '@/stores/recommend'
 import { useSettingsStore } from '@/stores/settings'
 import { useSearchHistoryStore } from '@/stores/searchHistory'
 import { invoke } from '@tauri-apps/api/core'
 import BilibiliCoverImage from '@/components/BilibiliCoverImage.vue'
+import TrackContextMenu from '@/components/TrackContextMenu.vue'
+import CollectionContextMenu from '@/components/CollectionContextMenu.vue'
+import { collectionWebUrl, type CollectionMenuTarget } from '@/utils/collectionLinks'
 import { formatTrackDuration as formatDuration } from '@/utils/timeFormat'
 
 const router = useRouter()
@@ -269,17 +272,20 @@ function openResult(item: ExploreItem) {
   openCollection(item)
 }
 
-function openCollection(item: ExploreCollection) {
+function collectionRoute(item: ExploreCollection): RouteLocationRaw {
   if (item.kind === 'playlist') {
-    if (item.platform === 'netease') router.push({ name: 'netease-playlist', params: { id: item.id } })
-    else if (item.platform === 'bilibili') router.push({ name: 'bili-playlist', params: { mediaId: item.id } })
-    else router.push({ name: 'youtube-playlist', params: { browseId: item.id } })
-    return
+    if (item.platform === 'netease') return { name: 'netease-playlist', params: { id: item.id } }
+    if (item.platform === 'bilibili') return { name: 'bili-playlist', params: { mediaId: item.id } }
+    return { name: 'youtube-playlist', params: { browseId: item.id } }
   }
   const query = { name: item.name, cover: item.cover_url || '' }
-  if (item.platform === 'netease') router.push({ name: 'netease-artist', params: { id: item.id }, query })
-  else if (item.platform === 'bilibili') router.push({ name: 'bili-artist', params: { mid: item.id }, query })
-  else router.push({ name: 'youtube-artist', params: { browseId: item.id }, query: { ...query, subtitle: item.subtitle } })
+  if (item.platform === 'netease') return { name: 'netease-artist', params: { id: item.id }, query }
+  if (item.platform === 'bilibili') return { name: 'bili-artist', params: { mid: item.id }, query }
+  return { name: 'youtube-artist', params: { browseId: item.id }, query: { ...query, subtitle: item.subtitle } }
+}
+
+function openCollection(item: ExploreCollection) {
+  void router.push(collectionRoute(item))
 }
 
 function collectionMeta(item: ExploreCollection): string {
@@ -340,9 +346,8 @@ watch(activeTab, (tab) => {
 })
 
 // 工具函数
-function playResult(r: any) {
-  rememberSearch()
-  player.play({
+function discoveryTrack(r: SearchResult): TrackInfo {
+  return {
     id: r.id,
     title: r.title,
     artist: r.artist,
@@ -350,7 +355,33 @@ function playResult(r: any) {
     durationMs: r.duration_ms,
     coverUrl: r.cover_url || '',
     audioUrl: '',
-  })
+  }
+}
+
+function playResult(r: SearchResult) {
+  rememberSearch()
+  player.play(discoveryTrack(r))
+}
+
+const trackMenuRef = ref<InstanceType<typeof TrackContextMenu> | null>(null)
+
+const collectionMenuRef = ref<InstanceType<typeof CollectionContextMenu> | null>(null)
+
+function openResultMenu(event: MouseEvent, item: ExploreItem) {
+  if (item.kind === 'song') trackMenuRef.value?.open(event, songToTrack(item))
+  else if (item.kind !== 'notice') {
+    collectionMenuRef.value?.open(event, {
+      route: collectionRoute(item),
+      webUrl: collectionWebUrl(item.platform, item.kind, item.id),
+    })
+  }
+}
+
+/** 菜单里的「播放」与点击一致：搜索结果整份入队，发现页卡片单曲播放 */
+function playFromMenu(track: TrackInfo) {
+  const song = songResults.value.find(item => item.id === track.id)
+  if (song) openResult(song)
+  else player.play(track)
 }
 
 function goToPlaylist(pl: PlaylistInfo) {
@@ -372,21 +403,43 @@ function platformLabel(source?: string) {
   }
 }
 
-function goToYoutubeShelfItem(item: any) {
-  if (item.browseId) {
-    router.push({ name: 'youtube-playlist', params: { browseId: item.browseId } })
+function youtubeShelfTrack(item: HomeFeedItem): TrackInfo {
+  return {
+    id: `youtube:${item.videoId}`,
+    title: item.title,
+    artist: item.subtitle || 'YouTube Music',
+    album: '',
+    durationMs: item.durationMs || 0,
+    coverUrl: item.coverUrl || '',
+    audioUrl: '',
+  }
+}
+
+function youtubeShelfTarget(item: HomeFeedItem): CollectionMenuTarget | null {
+  if (!item.browseId) return null
+  const isArtist = /ARTIST|USER_CHANNEL/.test(item.pageType?.toUpperCase() || '') || item.browseId.startsWith('UC')
+  return {
+    route: isArtist
+      ? { name: 'youtube-artist', params: { browseId: item.browseId }, query: { name: item.title, cover: item.coverUrl, subtitle: item.subtitle } }
+      : { name: 'youtube-playlist', params: { browseId: item.browseId } },
+    webUrl: collectionWebUrl('youtube', isArtist ? 'artist' : item.browseId.startsWith('MPRE') ? 'album' : 'playlist', item.browseId),
+  }
+}
+
+function openYoutubeShelfMenu(event: MouseEvent, item: HomeFeedItem) {
+  const target = youtubeShelfTarget(item)
+  if (target) collectionMenuRef.value?.open(event, target)
+  else if (item.videoId) trackMenuRef.value?.open(event, youtubeShelfTrack(item))
+}
+
+function goToYoutubeShelfItem(item: HomeFeedItem) {
+  const target = youtubeShelfTarget(item)
+  if (target) {
+    void router.push(target.route)
     return
   }
   if (item.videoId) {
-    player.play({
-      id: `youtube:${item.videoId}`,
-      title: item.title,
-      artist: item.subtitle || 'YouTube Music',
-      album: '',
-      durationMs: 0,
-      coverUrl: item.coverUrl || '',
-      audioUrl: '',
-    })
+    player.play(youtubeShelfTrack(item))
   }
 }
 
@@ -491,6 +544,7 @@ onMounted(() => {
           tabindex="0"
           @click="openResult(item)"
           @keydown.enter="openResult(item)"
+          @contextmenu="openResultMenu($event, item)"
         >
           <div class="result-cover" :class="{ round: item.kind === 'artist' }">
             <BilibiliCoverImage v-if="item.cover_url" :src="item.cover_url" loading="lazy">
@@ -562,6 +616,7 @@ onMounted(() => {
             :key="pl.id"
             class="playlist-card"
             @click="goToPlaylist(pl)"
+            @contextmenu="collectionMenuRef?.open($event, { route: { name: 'netease-playlist', params: { id: pl.id } }, webUrl: collectionWebUrl('netease', 'playlist', pl.id) })"
           >
             <div class="playlist-cover">
               <BilibiliCoverImage v-if="pl.coverUrl" :src="pl.coverUrl" loading="lazy">
@@ -619,7 +674,7 @@ onMounted(() => {
               </div>
             </div>
             <div class="discovery-row">
-              <div v-for="item in shelf.items" :key="item.id" class="discovery-card video" @click="playDiscoveryItem(item)">
+              <div v-for="item in shelf.items" :key="item.id" class="discovery-card video" @click="playDiscoveryItem(item)" @contextmenu="trackMenuRef?.open($event, discoveryTrack(item))">
                 <div class="discovery-cover wide">
                   <BilibiliCoverImage v-if="item.cover_url" :src="item.cover_url" loading="lazy">
                     <span class="material-symbols-rounded filled">movie</span>
@@ -650,7 +705,7 @@ onMounted(() => {
               <h2 class="section-title">{{ shelf.title }}</h2>
             </div>
             <div class="discovery-row">
-              <div v-for="item in shelf.items.slice(0, 10)" :key="item.browseId || item.videoId || item.title" class="discovery-card" @click="goToYoutubeShelfItem(item)">
+              <div v-for="item in shelf.items.slice(0, 10)" :key="item.browseId || item.videoId || item.title" class="discovery-card" @click="goToYoutubeShelfItem(item)" @contextmenu="openYoutubeShelfMenu($event, item)">
                 <div class="discovery-cover">
                   <BilibiliCoverImage v-if="item.coverUrl" :src="item.coverUrl" loading="lazy">
                     <span class="material-symbols-rounded filled">music_note</span>
@@ -676,7 +731,7 @@ onMounted(() => {
               </div>
             </div>
             <div class="discovery-row">
-              <div v-for="item in shelf.items" :key="item.id" class="discovery-card" @click="playDiscoveryItem(item)">
+              <div v-for="item in shelf.items" :key="item.id" class="discovery-card" @click="playDiscoveryItem(item)" @contextmenu="trackMenuRef?.open($event, discoveryTrack(item))">
                 <div class="discovery-cover">
                   <BilibiliCoverImage v-if="item.cover_url" :src="item.cover_url" loading="lazy">
                     <span class="material-symbols-rounded filled">music_note</span>
@@ -691,6 +746,8 @@ onMounted(() => {
         </div>
       </template>
     </template>
+    <TrackContextMenu ref="trackMenuRef" @play="playFromMenu" />
+    <CollectionContextMenu ref="collectionMenuRef" />
   </div>
 </template>
 

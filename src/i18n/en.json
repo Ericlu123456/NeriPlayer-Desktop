@@ -161,6 +161,7 @@
     "local_library_title": "Local music library",
     "local_library_hint": "Add music folders to build your library. Songs added, removed or changed in those folders are picked up automatically",
     "local_library_empty": "No music folders yet",
+    "show_in_folder": "Show in Folder",
     "local_library_no_audio": "No audio files were found in your folders",
     "local_add_folder": "Add folder",
     "local_remove_folder": "Remove from library (files stay on disk)",
@@ -280,7 +281,10 @@
     "no": "No",
     "minimize": "Minimize",
     "maximize": "Maximize",
-    "restore": "Restore"
+    "restore": "Restore",
+    "open": "Open",
+    "copy_link": "Copy Link",
+    "open_in_browser": "Open in Browser"
   },
   "download": {
     "download": "Download",
@@ -442,6 +446,8 @@
     "copy_failed": "Copy failed",
     "copy_title": "Copy Song Title",
     "copy_artist": "Copy Artist Name",
+    "copy_track_info": "Copy Title and Artist",
+    "play_track": "Play",
     "save_cover": "Save Cover Art",
     "cover_saved": "Cover art saved",
     "cover_save_failed": "Failed to save cover",
@@ -1109,6 +1115,7 @@
     "debug_logs_exported": "Report exported",
     "debug_logs_open_dir": "Open log folder",
     "debug_logs_empty": "No logs yet",
+    "debug_logs_no_match": "No logs match the current filters",
     "debug_level_all": "All levels",
     "debug_crashes": "Crash reports",
     "debug_crashes_desc": "Panic scenes saved automatically, click to expand",

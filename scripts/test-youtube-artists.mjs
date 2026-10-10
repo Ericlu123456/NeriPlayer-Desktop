@@ -59,6 +59,23 @@ assert.equal(parseYouTubeArtistDetail({}, { name: 'Fallback' }).header.name, 'Fa
 assert.deepEqual(parseYouTubeArtistItems(null), { items: [], continuation: '' })
 const pages = await Promise.all(['BiliArtistView.vue', 'YouTubeArtistView.vue'].map(name =>
   readFile(new URL(`../src/views/${name}`, import.meta.url), 'utf8')))
+const artistScript = pages[1].match(/<script setup lang="ts">([\s\S]*?)<\/script>/)[1]
+const artistAst = ts.createSourceFile('artist.ts', artistScript, ts.ScriptTarget.ES2022, true)
+const menuPlayback = artistAst.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === 'playFromMenu')
+assert.ok(menuPlayback, 'artist view exposes right-click playback')
+const menuPlaybackJs = ts.transpileModule(menuPlayback.getText(artistAst), {
+  compilerOptions: { target: ts.ScriptTarget.ES2022 },
+}).outputText
+const initialSection = detail.sections[0]
+const extraSong = { ...initialSection.items[0], videoId: 'loaded-song', title: 'Loaded song' }
+const played = []
+const playFromMenu = new Function('trackMenuSection', 'sectionItems', 'playSection', `${menuPlaybackJs}; return playFromMenu`)(
+  { value: initialSection }, () => [...initialSection.items, extraSong],
+  (section, item) => played.push({ section, item }),
+)
+playFromMenu(youtubeArtistItemTrack(extraSong, 'Creator'))
+assert.equal(played.length, 1, 'right-click playback must find songs loaded after the preview')
+assert.equal(played[0].item, extraSong)
 const keys = new Set(pages.flatMap(page => [...page.matchAll(/['"]((?:common|library|player)\.[a-z_]+)['"]/g)].map(match => match[1])))
 for (const key of ['player.artist_videos', 'player.artist_collections', 'player.artist_series']) keys.add(key)
 for (const locale of ['zh-CN', 'zh-TW', 'en', 'ja']) {

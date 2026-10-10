@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watchEffect } from 'vue'
 import { usePlayerStore } from '@/stores/player'
 import { useListenTogetherStore } from '@/stores/listenTogether'
 import { useI18n } from 'vue-i18n'
@@ -7,6 +7,9 @@ import QueuePanel from './QueuePanel.vue'
 import ListenTogetherPanel from './ListenTogetherPanel.vue'
 import BilibiliCoverImage from './BilibiliCoverImage.vue'
 import EditableRangeValue from './ui/EditableRangeValue.vue'
+import TrackContextMenu from './TrackContextMenu.vue'
+import { createContextMenuItem } from '@/utils/contextMenu'
+import { wheelAdjustedVolume } from '@/utils/volume'
 import { getTrackCoverUrl } from '@/utils/trackCover'
 import { formatTimeMs as formatTime } from '@/utils/timeFormat'
 import { useEscapeClose } from '@/composables/useEscapeClose'
@@ -59,6 +62,15 @@ const hoverX = ref(0) // tooltip 的绝对 X 位置（相对于 progress-track�
 const displayProgress = computed(() =>
   isDraggingProgress.value ? dragRatio.value : player.interpolatedProgress
 )
+const progressFillRef = ref<HTMLDivElement>()
+const progressThumbRef = ref<HTMLDivElement>()
+
+// 进度逐帧变化，直接写样式：放进模板绑定会让整个迷你播放器每帧重渲染
+watchEffect(() => {
+  const progress = Math.max(0, Math.min(1, displayProgress.value))
+  if (progressFillRef.value) progressFillRef.value.style.transform = `scaleX(${progress})`
+  if (progressThumbRef.value) progressThumbRef.value.style.transform = `translateX(${progress * 100}%)`
+}, { flush: 'post' })
 
 /** 悬浮位置对应的时间（ms） */
 const hoverTimeMs = computed(() => {
@@ -124,6 +136,20 @@ const volumeIcon = computed(() => {
 })
 
 const volumePercent = computed(() => Math.round(player.volume * 100))
+function onVolumeWheel(event: WheelEvent) {
+  const next = wheelAdjustedVolume(player.volume, event.deltaY)
+  if (next !== player.volume) void player.setVolume(next)
+}
+
+const trackMenuRef = ref<InstanceType<typeof TrackContextMenu> | null>(null)
+
+function trackMenuExtras() {
+  return [createContextMenuItem(t('tray.open_now_playing'), { id: 'open-now-playing', icon: 'open_in_full' })]
+}
+
+function openTrackMenu(event: MouseEvent) {
+  if (player.currentTrack) trackMenuRef.value?.open(event, player.currentTrack)
+}
 
 function handleMiniPlayerPointerDown(e: PointerEvent) {
   if (!showVolumeSlider.value) return
@@ -205,7 +231,8 @@ defineExpose({
       @mouseleave="onProgressMouseLeave"
       @click.stop
     >
-      <div class="progress-fill" :style="{ width: `${displayProgress * 100}%` }" />
+      <div ref="progressFillRef" class="progress-fill" />
+      <div ref="progressThumbRef" class="progress-thumb-track"><span class="progress-thumb" /></div>
       <!-- 悬浮时间提示 -->
       <div
         v-if="showTooltip"
@@ -217,7 +244,7 @@ defineExpose({
     <!-- 三栏主体 -->
     <div class="mp-body">
       <!-- 左：封面 + 歌曲信息 -->
-      <div class="mp-left" @click="emit('expand')">
+      <div class="mp-left" @click="emit('expand')" @contextmenu="openTrackMenu">
         <div ref="coverRef" class="mp-cover" :class="{ playing: player.isPlaying, 'mp-cover-hidden': props.coverHiddenByFlip }">
           <BilibiliCoverImage
             v-if="displayCoverUrl"
@@ -249,14 +276,23 @@ defineExpose({
         <button
           class="mp-ctrl-btn small"
           :class="{ active: player.shuffleEnabled }"
+          :title="t('shortcuts.shuffle')"
+          :aria-label="t('shortcuts.shuffle')"
+          :aria-pressed="player.shuffleEnabled"
           @click="player.toggleShuffle()"
         >
           <span class="material-symbols-rounded">shuffle</span>
         </button>
-        <button class="mp-ctrl-btn" @click="player.previous()">
+        <button class="mp-ctrl-btn" :title="t('tray.previous')" :aria-label="t('tray.previous')" @click="player.previous()">
           <span class="material-symbols-rounded filled">skip_previous</span>
         </button>
-        <button class="mp-play-btn" @click="player.togglePlayPause()" :disabled="player.isLoadingAudio">
+        <button
+          class="mp-play-btn"
+          :title="player.isPlaying ? t('tray.pause') : t('tray.play')"
+          :aria-label="player.isPlaying ? t('tray.pause') : t('tray.play')"
+          :disabled="player.isLoadingAudio"
+          @click="player.togglePlayPause()"
+        >
           <transition name="mp-icon">
             <span
               v-if="player.isLoadingAudioSlow"
@@ -270,12 +306,14 @@ defineExpose({
             >{{ player.isPlaying ? 'pause' : 'play_arrow' }}</span>
           </transition>
         </button>
-        <button class="mp-ctrl-btn" @click="player.next()">
+        <button class="mp-ctrl-btn" :title="t('tray.next')" :aria-label="t('tray.next')" @click="player.next()">
           <span class="material-symbols-rounded filled">skip_next</span>
         </button>
         <button
           class="mp-ctrl-btn small"
           :class="{ active: player.repeatMode !== 'off' }"
+          :title="t('shortcuts.repeat')"
+          :aria-label="t('shortcuts.repeat')"
           @click="player.toggleRepeatMode()"
         >
           <span class="material-symbols-rounded">{{ player.repeatMode === 'one' ? 'repeat_one' : 'repeat' }}</span>
@@ -295,7 +333,15 @@ defineExpose({
           <span class="material-symbols-rounded" :class="{ filled: desktopLyricsOpen }">lyrics</span>
         </button>
         <div ref="volumeWrapRef" class="mp-volume-wrap">
-          <button class="mp-tool-btn" :class="{ active: showVolumeSlider }" @click="showVolumeSlider = !showVolumeSlider">
+          <button
+            class="mp-tool-btn"
+            :class="{ active: showVolumeSlider }"
+            :title="t('player.volume')"
+            :aria-label="t('player.volume')"
+            :aria-expanded="showVolumeSlider"
+            @click="showVolumeSlider = !showVolumeSlider"
+            @wheel.prevent="onVolumeWheel"
+          >
             <span class="material-symbols-rounded">{{ volumeIcon }}</span>
           </button>
           <Transition name="mp-popover">
@@ -328,14 +374,21 @@ defineExpose({
         <button
           class="mp-tool-btn"
           :class="{ active: lt.isConnected }"
+          :title="t('listen_together.title')"
+          :aria-label="t('listen_together.title')"
           @click="showLtPanel = !showLtPanel; if (showLtPanel) showQueue = false"
         >
           <span class="material-symbols-rounded">group</span>
         </button>
-        <button class="mp-tool-btn" @click="showQueue = !showQueue; if (showQueue) showLtPanel = false">
+        <button
+          class="mp-tool-btn"
+          :title="t('player.queue')"
+          :aria-label="t('player.queue')"
+          @click="showQueue = !showQueue; if (showQueue) showLtPanel = false"
+        >
           <span class="material-symbols-rounded">queue_music</span>
         </button>
-        <button class="mp-tool-btn" @click="emit('expand')">
+        <button class="mp-tool-btn" :title="t('tray.open_now_playing')" :aria-label="t('tray.open_now_playing')" @click="emit('expand')">
           <span class="material-symbols-rounded">keyboard_arrow_up</span>
         </button>
       </div>
@@ -350,6 +403,12 @@ defineExpose({
 
     <!-- 一起听弹窗（组件内部自带 Teleport） -->
     <ListenTogetherPanel v-model:open="showLtPanel" />
+    <TrackContextMenu
+      ref="trackMenuRef"
+      :playable="false"
+      :extra-items="trackMenuExtras"
+      @action="id => id === 'open-now-playing' && emit('expand')"
+    />
   </div>
 </template>
 
@@ -392,39 +451,47 @@ defineExpose({
   }
 }
 
+/* 进度逐帧变化：填充用 scaleX、圆点用 translateX，只走合成层，不触发布局 */
 .progress-fill {
-  height: 100%;
+  position: absolute;
+  inset: 0;
   /* 静置时降低已播放段亮度，避免通栏主题色过于扎眼 */
   background: color-mix(in srgb, var(--md-primary) 60%, transparent);
-  border-radius: 0 2px 2px 0;
-  transition: background 200ms ease; /* width 由 rAF 逐帧更新，不参与 transition */
-  position: relative;
+  transform: scaleX(0);
+  transform-origin: left center;
+  transition: background 200ms ease;
+  pointer-events: none;
 
   // 交互时需要清晰：恢复全亮
   .progress-track.hovering &,
   .progress-track.dragging & {
     background: var(--md-primary);
   }
+}
 
-  // thumb 圆点（始终可见）
-  &::after {
-    content: '';
-    position: absolute;
-    right: -5px;
-    top: 50%;
-    transform: translateY(-50%);
-    width: 10px;
-    height: 10px;
-    border-radius: 50%;
-    background: color-mix(in srgb, var(--md-primary) 60%, transparent);
-    box-shadow: 0 0 4px rgba(0,0,0,0.15);
-    transition: transform 150ms var(--ease-standard), background 200ms ease;
-  }
+.progress-thumb-track {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
 
-  .progress-track.hovering &::after,
-  .progress-track.dragging &::after {
+// thumb 圆点（始终可见）
+.progress-thumb {
+  position: absolute;
+  left: 0;
+  top: 50%;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--md-primary) 60%, transparent);
+  box-shadow: 0 0 4px rgba(0,0,0,0.15);
+  transform: translate(-50%, -50%);
+  transition: transform 150ms var(--ease-standard), background 200ms ease;
+
+  .progress-track.hovering &,
+  .progress-track.dragging & {
     background: var(--md-primary);
-    transform: translateY(-50%) scale(1.3);
+    transform: translate(-50%, -50%) scale(1.3);
   }
 }
 

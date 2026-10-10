@@ -4,6 +4,7 @@ import { useDownloadStore } from '@/stores/download'
 import type { TrackInfo } from '@/stores/player'
 import { createContextMenuItem } from '@/utils/contextMenu'
 import { createLogger } from '@/utils/logger'
+import { isLocalTrack } from '@/utils/localTrack'
 
 const log = createLogger('track-download-menu')
 
@@ -12,7 +13,7 @@ export function useTrackDownloadMenu(readTrack: () => TrackInfo | null | undefin
   const { t } = useI18n()
 
   function disabled(track: TrackInfo | null | undefined) {
-    return !track || track.id.startsWith('local:') || downloads.isDownloading(track.id)
+    return !track || isLocalTrack(track) || downloads.isDownloading(track.id)
   }
 
   const downloadMenuItem = computed(() => {
@@ -41,7 +42,7 @@ export function useTrackDownloadMenu(readTrack: () => TrackInfo | null | undefin
 
   onMounted(() => {
     void downloads.initEvents().catch(error => log.error('Initialize download events failed:', error))
-    void downloads.loadDownloads().catch(error => log.error('Load downloads failed:', error))
+    void downloads.ensureDownloadsLoaded().catch(error => log.error('Load downloads failed:', error))
   })
 
   return { downloadMenuItem, downloadFromMenu }

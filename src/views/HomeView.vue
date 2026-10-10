@@ -21,6 +21,9 @@ import { getPlaybackSourceKind } from '@/modules/playback/playbackSource'
 import { useHomeFeedStore } from '@/stores/homeFeed'
 import { NETEASE_HOME_SECTIONS } from '@/modules/library/neteaseHome'
 import HomeFeedSection from '@/components/HomeFeedSection.vue'
+import TrackContextMenu from '@/components/TrackContextMenu.vue'
+import CollectionContextMenu from '@/components/CollectionContextMenu.vue'
+import { collectionWebUrl, type CollectionMenuTarget } from '@/utils/collectionLinks'
 import { buildYoutubeHomeSections } from '@/modules/youtube/youtubeHomeLayout'
 import { useEscapeClose } from '@/composables/useEscapeClose'
 
@@ -209,14 +212,41 @@ function playHomeSongs(songs: TrackInfo[], index: number) {
   if (songs[index]) player.playAll(songs, songs[index].id, songs[index].playlistKey)
 }
 
-function openPlatformPlaylist(pl: any) {
-  if (pl.platform === 'bilibili') {
-    router.push({ name: 'bili-playlist', params: { mediaId: pl.id } })
-  } else if (pl.platform === 'youtube') {
-    router.push({ name: 'youtube-playlist', params: { browseId: pl.id } })
-  } else {
-    router.push({ name: 'netease-playlist', params: { id: pl.id } })
+// 右键菜单里的「播放」与点击行为一致：推荐歌曲整组入队，最近播放、本地音乐卡片单曲播放
+const trackMenuRef = ref<InstanceType<typeof TrackContextMenu> | null>(null)
+let playFromMenu: (() => void) | null = null
+
+function openSongMenu(event: MouseEvent, songs: TrackInfo[], index: number) {
+  const track = songs[index]
+  if (!track) return
+  playFromMenu = () => playHomeSongs(songs, index)
+  trackMenuRef.value?.open(event, track)
+}
+
+function openCardMenu(event: MouseEvent, track: TrackInfo) {
+  playFromMenu = () => player.play(track)
+  trackMenuRef.value?.open(event, track)
+}
+
+function platformPlaylistTarget(platform: string | undefined, rawId: string | number): CollectionMenuTarget {
+  const id = String(rawId)
+  if (platform === 'bilibili') {
+    return { route: { name: 'bili-playlist', params: { mediaId: id } }, webUrl: collectionWebUrl('bilibili', 'playlist', id) }
   }
+  if (platform === 'youtube') {
+    return { route: { name: 'youtube-playlist', params: { browseId: id } }, webUrl: collectionWebUrl('youtube', 'playlist', id) }
+  }
+  return { route: { name: 'netease-playlist', params: { id } }, webUrl: collectionWebUrl('netease', 'playlist', id) }
+}
+
+const collectionMenuRef = ref<InstanceType<typeof CollectionContextMenu> | null>(null)
+
+function openPlaylistMenu(event: MouseEvent, platform: string | undefined, id: string | number) {
+  collectionMenuRef.value?.open(event, platformPlaylistTarget(platform, id))
+}
+
+function openPlatformPlaylist(pl: any) {
+  void router.push(platformPlaylistTarget(pl.platform, pl.id).route)
 }
 
 // 启动时恢复上次扫描 + 拉取推荐
@@ -353,6 +383,8 @@ function formatNotifTime(ts: number): string {
         :title="section.title"
         :section="{ songs: section.songs, playlists: section.playlists, loading: false, error: null }"
         @play="playHomeSongs"
+        @song-menu="openSongMenu"
+        @playlist-menu="(event, playlist) => openPlaylistMenu(event, 'youtube', playlist.id)"
         @playlist="playlist => router.push({ name: 'youtube-playlist', params: { browseId: playlist.id } })"
       />
     </template>
@@ -373,6 +405,8 @@ function formatNotifTime(ts: number): string {
         :section="homeFeed.sections[definition.key]"
         @retry="homeFeed.retry(definition.key)"
         @play="playHomeSongs"
+        @song-menu="openSongMenu"
+        @playlist-menu="(event, playlist) => openPlaylistMenu(event, 'netease', playlist.id)"
         @playlist="playlist => router.push({ name: 'netease-playlist', params: { id: playlist.id } })"
       />
       <section v-if="definition.key === 'top_new' && bilibiliPlaylists.length" class="section">
@@ -387,7 +421,7 @@ function formatNotifTime(ts: number): string {
           </button>
         </div>
         <div class="daily-scroll">
-          <button v-for="playlist in bilibiliPlaylists" :key="playlist.id" type="button" class="playlist-card" @click="router.push({ name: 'bili-playlist', params: { mediaId: playlist.id } })">
+          <button v-for="playlist in bilibiliPlaylists" :key="playlist.id" type="button" class="playlist-card" @click="router.push({ name: 'bili-playlist', params: { mediaId: playlist.id } })" @contextmenu="openPlaylistMenu($event, 'bilibili', playlist.id)">
             <div class="playlist-cover">
               <span class="material-symbols-rounded filled cover-fallback">video_library</span>
               <BilibiliCoverImage v-if="playlist.coverUrl" :src="playlist.coverUrl" :alt="playlist.name" />
@@ -414,6 +448,7 @@ function formatNotifTime(ts: number): string {
           :key="pl.id"
           class="playlist-card"
           @click="openPlatformPlaylist(pl)"
+          @contextmenu="openPlaylistMenu($event, pl.platform, pl.id)"
         >
           <div class="playlist-cover">
             <span class="material-symbols-rounded filled cover-fallback">queue_music</span>
@@ -441,6 +476,7 @@ function formatNotifTime(ts: number): string {
           :key="track.id + '-recent-' + index"
           class="daily-card"
           @click="player.play(track)"
+          @contextmenu="openCardMenu($event, track)"
         >
           <div class="daily-cover">
             <span class="material-symbols-rounded filled cover-fallback">music_note</span>
@@ -471,6 +507,7 @@ function formatNotifTime(ts: number): string {
           :key="track.id"
           class="daily-card"
           @click="player.play(track)"
+          @contextmenu="openCardMenu($event, track)"
         >
           <div class="daily-cover">
             <span class="material-symbols-rounded filled cover-fallback">music_note</span>
@@ -485,6 +522,8 @@ function formatNotifTime(ts: number): string {
         </div>
       </div>
     </section>
+    <TrackContextMenu ref="trackMenuRef" @play="playFromMenu?.()" />
+    <CollectionContextMenu ref="collectionMenuRef" />
   </div>
 </template>
 

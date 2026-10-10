@@ -10,8 +10,12 @@ import { useTrackSelection } from '@/composables/useTrackSelection'
 import { duplicateScanTrackIds, existingScanTrackIds, filterScanTracks } from '@/modules/library/localScanPreview'
 import AddToPlaylistDialog from '@/components/AddToPlaylistDialog.vue'
 import TrackSelectionToolbar from '@/components/TrackSelectionToolbar.vue'
+import TrackContextMenu from '@/components/TrackContextMenu.vue'
 import M3Dialog from '@/components/ui/M3Dialog.vue'
 import M3Input from '@/components/ui/M3Input.vue'
+import ContextMenu from '@/components/ui/ContextMenu.vue'
+import { invoke } from '@tauri-apps/api/core'
+import { createContextMenuItem, createContextMenuSeparator, type ContextMenuActionItem } from '@/utils/contextMenu'
 
 const props = withDefaults(defineProps<{ embedded?: boolean; searchQuery?: string }>(), { embedded: false, searchQuery: '' })
 const { t } = useI18n()
@@ -34,6 +38,44 @@ const editTitle = ref('')
 const editArtist = ref('')
 const editAlbum = ref('')
 const tagEditError = ref<string | null>(null)
+const trackMenuRef = ref<InstanceType<typeof TrackContextMenu> | null>(null)
+const showEmptyState = computed(() => !tracks.value.length && library.isLoaded && !library.isScanning && !library.scanError)
+
+function trackMenuExtras() {
+  return [createContextMenuItem(t('library.local_tags_edit'), { id: 'edit-tags', icon: 'edit', disabled: library.isSavingTags })]
+}
+
+function handleTrackMenuAction(id: string, track: TrackInfo) {
+  if (id === 'edit-tags') openTagEditor(track)
+}
+
+const folderMenu = ref<{ open: boolean; x: number; y: number; path: string; available: boolean }>({
+  open: false, x: 0, y: 0, path: '', available: false,
+})
+const folderMenuItems = computed(() => [
+  createContextMenuItem(t('library.show_in_folder'), { id: 'reveal', icon: 'folder_open', disabled: !folderMenu.value.available }),
+  createContextMenuItem(t('library.local_scan_rescan'), { id: 'rescan', icon: 'refresh', disabled: library.isScanning }),
+  createContextMenuSeparator('folder-danger'),
+  createContextMenuItem(t('library.local_remove_folder'), { id: 'remove', icon: 'folder_delete', danger: true }),
+])
+
+function openFolderMenu(event: MouseEvent, folder: { path: string; available: boolean }) {
+  event.preventDefault()
+  folderMenu.value = { open: true, x: event.clientX, y: event.clientY, path: folder.path, available: folder.available }
+}
+
+async function handleFolderMenuClick(item: ContextMenuActionItem) {
+  const path = folderMenu.value.path
+  if (item.id === 'remove') return removeFolder(path)
+  if (item.id === 'rescan') return library.rescan()
+  if (item.id === 'reveal') {
+    try {
+      await invoke('reveal_in_file_manager', { path })
+    } catch (error) {
+      toast.error(String(error))
+    }
+  }
+}
 
 const existingIds = computed(() => existingScanTrackIds(tracks.value, library.playlistTracks))
 const duplicateIds = computed(() => duplicateScanTrackIds(tracks.value))
@@ -167,14 +209,21 @@ onMounted(() => {
         <button v-if="library.hasFolders && !library.isScanning" class="scan-icon-button outlined" :title="t('library.local_scan_rescan')" :aria-label="t('library.local_scan_rescan')" @click="library.rescan()">
           <span class="material-symbols-rounded">refresh</span>
         </button>
-        <button class="scan-button secondary" @click="addFolders">
+        <button v-if="!showEmptyState || library.hasFolders" class="scan-button secondary" @click="addFolders">
           <span class="material-symbols-rounded">create_new_folder</span>{{ t('library.local_add_folder') }}
         </button>
       </div>
     </div>
 
     <TransitionGroup v-if="library.hasFolders" tag="div" name="folder-chip" class="folder-chips">
-      <div v-for="folder in library.folders" :key="folder.path" class="folder-chip" :class="{ unavailable: !folder.available }" :title="folder.path">
+      <div
+        v-for="folder in library.folders"
+        :key="folder.path"
+        class="folder-chip"
+        :class="{ unavailable: !folder.available }"
+        :title="folder.path"
+        @contextmenu="openFolderMenu($event, folder)"
+      >
         <span class="material-symbols-rounded">{{ folder.available ? 'folder' : 'folder_off' }}</span>
         <span class="folder-chip-name">{{ folderName(folder.path) }}</span>
         <span class="folder-chip-count">{{ folder.available ? folder.trackCount : t('library.local_folder_unavailable') }}</span>
@@ -216,7 +265,13 @@ onMounted(() => {
         @play="playSelected" @queue="queueSelected" @playlist="importSelected"
       />
       <div class="scan-track-list">
-        <div v-for="track in displayedTracks" :key="track.id" class="scan-track" :class="{ selected: selectedIds.has(track.id) }">
+        <div
+          v-for="track in displayedTracks"
+          :key="track.id"
+          class="scan-track"
+          :class="{ selected: selectedIds.has(track.id) }"
+          @contextmenu="trackMenuRef?.open($event, track)"
+        >
           <input type="checkbox" :checked="selectedIds.has(track.id)" :aria-label="track.title" @change="toggleSelected(track.id)" />
           <div class="scan-cover">
             <img v-if="track.coverUrl && !failedCovers.has(track.id)" :src="track.coverUrl" loading="lazy" alt="" @error="failedCovers.add(track.id)" />
@@ -239,7 +294,7 @@ onMounted(() => {
         {{ t('library.local_scan_show_more', { count: filteredTracks.length - visibleLimit }) }}
       </button>
     </template>
-    <div v-else-if="library.isLoaded && !library.isScanning && !library.scanError" class="scan-empty">
+    <div v-else-if="showEmptyState" class="scan-empty scan-empty--state">
       <span class="material-symbols-rounded">{{ library.hasFolders ? 'music_off' : 'library_music' }}</span>
       <p>{{ t(library.hasFolders ? 'library.local_library_no_audio' : 'library.local_library_empty') }}</p>
       <button v-if="!library.hasFolders" class="scan-button" @click="addFolders">
@@ -252,6 +307,19 @@ onMounted(() => {
       <div v-for="(item, index) in library.scanSkipped.slice(0, 100)" :key="index"><strong>{{ item.path }}</strong><p>{{ item.reason }}</p></div>
     </details>
     <AddToPlaylistDialog v-model:open="showAddToPlaylist" :tracks="importTargets" />
+    <ContextMenu
+      v-model:open="folderMenu.open"
+      :x="folderMenu.x"
+      :y="folderMenu.y"
+      :items="folderMenuItems"
+      @click="handleFolderMenuClick"
+    />
+    <TrackContextMenu
+      ref="trackMenuRef"
+      :extra-items="trackMenuExtras"
+      @play="playTrack"
+      @action="handleTrackMenuAction"
+    />
     <M3Dialog v-model:open="showTagEditor" :title="t('library.local_tags_edit')" icon="edit" :confirm-text="t('library.local_tags_save')" :confirm-disabled="library.isSavingTags || !editTitle.trim() || !editArtist.trim() || !editAlbum.trim()" @confirm="saveTags">
       <p>{{ t('library.local_tags_hint') }}</p>
       <p class="scan-directory">{{ editingTrack?.audioUrl }}</p>
@@ -266,10 +334,9 @@ onMounted(() => {
 <style scoped lang="scss">
 .local-files-view { padding: 24px 32px 100px; &.embedded { padding: 8px 0 32px; } }
 .scan-heading { display: flex; align-items: center; justify-content: space-between; gap: 20px; flex-wrap: wrap; h2 { font-size: 22px; margin: 0 0 8px; } p { margin: 0; color: var(--md-on-surface-variant); font-size: 13px; } }
-.scan-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.scan-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .scan-button { display: inline-flex; align-items: center; justify-content: center; gap: 8px; padding: 10px 18px; border-radius: 24px; color: var(--md-on-primary); background: var(--md-primary); font-size: 13px; font-weight: 600; cursor: pointer; &.secondary { background: var(--md-surface-container-high); color: var(--md-on-surface); } &:disabled { opacity: .4; cursor: default; } }
 .scan-directory { color: var(--md-on-surface-variant); font-size: 12px; overflow-wrap: anywhere; margin: 12px 0 20px; }
-.scan-actions { align-items: center; }
 .scan-icon-button.outlined { width: 40px; height: 40px; border: 1px solid var(--md-outline-variant); }
 .folder-chips { display: flex; flex-wrap: wrap; gap: 8px; margin: 18px 0 4px; }
 .folder-chip {
@@ -307,6 +374,11 @@ input[type='checkbox'] { width: 18px; height: 18px; accent-color: var(--md-prima
 .scan-duration { font-size: 12px; color: var(--md-on-surface-variant); }
 .scan-icon-button { width: 36px; height: 36px; border-radius: 50%; display: grid; place-items: center; color: var(--md-on-surface-variant); cursor: pointer; &:hover { color: var(--md-primary); background: var(--md-primary-container); } }
 .scan-empty { text-align: center; padding: 64px 16px; color: var(--md-on-surface-variant); > .material-symbols-rounded { font-size: 54px; opacity: .5; } }
+.scan-empty--state {
+  display: flex; flex-direction: column; align-items: center; gap: 12px; padding: 72px 16px 56px;
+  p { margin: 0; font-size: 14px; }
+  .scan-button { margin-top: 8px; }
+}
 .scan-show-more { display: flex; margin: 20px auto; }
 .scan-skipped { margin: 24px 0; font-size: 12px; color: var(--md-on-surface-variant); summary { cursor: pointer; } > div { padding: 12px 0; overflow-wrap: anywhere; } p { margin: 5px 0 0; } }
 @keyframes local-scan-spin { to { transform: rotate(360deg); } }

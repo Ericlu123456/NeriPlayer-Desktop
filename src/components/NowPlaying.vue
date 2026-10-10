@@ -70,7 +70,14 @@ import EditableRangeValue from './ui/EditableRangeValue.vue'
 import AudioEffectsPanel from './AudioEffectsPanel.vue'
 import LyricsMatchPanel from './LyricsMatchPanel.vue'
 import ContextMenu from './ui/ContextMenu.vue'
-import type { ContextMenuActionItem } from '@/utils/contextMenu'
+import {
+  createContextMenuItem,
+  createContextMenuSeparator,
+  type ContextMenuActionItem,
+  type ContextMenuItem,
+} from '@/utils/contextMenu'
+import { wheelAdjustedVolume } from '@/utils/volume'
+import { writeClipboardText } from '@/utils/clipboard'
 import { playbackSessionTrackKey } from '@/modules/playback/playbackRequest'
 import { createLogger } from '@/utils/logger'
 import { getTrackCoverUrl } from '@/utils/trackCover'
@@ -834,9 +841,10 @@ type CoverSnapshot = {
 function getCoverSnapshot(): CoverSnapshot | null {
   const src = coverUrl.value
   if (!src) return null
+  // 唱片在转，取它的包围盒会比圆盘大一圈；取不转的外层
   const targetEl = settings.coverStyle === 'card'
     ? cardCoverRef.value
-    : discRef.value
+    : coverWrapRef.value
   if (!targetEl) return null
   const rect = targetEl.getBoundingClientRect()
   return {
@@ -866,37 +874,17 @@ watch(nowPlayingTrackKey, () => {
   }, 560)
 })
 
-// 唱片旋转（JS 驱动，停止时保持角度 + 缓动）
-const discRef = ref<HTMLDivElement>()
-let discAngle = 0            // 当前累计角度（度）
-let discAnimFrame = 0
-let discLastTime = 0
-const DISC_RPM = 2.4         // 每秒转过的度数 = 360 / 25s ≈ 14.4 deg/s
-const DEG_PER_MS = 360 / 25000
+// 唱片旋转走 CSS 动画（合成线程），暂停时 animation-play-state 停在原角度
+const coverWrapRef = ref<HTMLDivElement>()
 
-function animateDisc(timestamp: number) {
-  // 暂停或卡片封面时停表，角度留在原处；恢复由 startDiscLoop 接上
-  if (!player.isPlaying || !discRef.value) {
-    discAnimFrame = 0
-    discLastTime = 0
-    return
-  }
-  if (!discLastTime) discLastTime = timestamp
-  const dt = Math.min(64, timestamp - discLastTime)
-  discLastTime = timestamp
+// 逐帧变化的播放位置以读取函数交给进度条与歌词，本组件的模板不读它，播放时不会每帧整页重渲染
+const readInterpolatedProgress = () => player.interpolatedProgress
+const readInterpolatedPositionMs = () => player.interpolatedPositionMs
 
-  discAngle = (discAngle + DEG_PER_MS * dt) % 360
-  discRef.value.style.transform = `rotate(${discAngle}deg)`
-  discAnimFrame = requestAnimationFrame(animateDisc)
+function onVolumeWheel(event: WheelEvent) {
+  const next = wheelAdjustedVolume(player.volume, event.deltaY)
+  if (next !== player.volume) void player.setVolume(next)
 }
-
-function startDiscLoop() {
-  if (discAnimFrame) return
-  if (discRef.value) discRef.value.style.transform = `rotate(${discAngle}deg)`
-  discAnimFrame = requestAnimationFrame(animateDisc)
-}
-
-watch([() => player.isPlaying, discRef], startDiscLoop, { flush: 'post' })
 
 // ESC 分层关闭: 每次只收起最上层, 全部收起后才由 App 全局回退关闭本页 (对齐 Android 返回语义)
 function handleEscapeLayered(event: KeyboardEvent) {
@@ -924,12 +912,10 @@ function handleEscapeLayered(event: KeyboardEvent) {
 }
 
 onMounted(() => {
-  startDiscLoop()
   document.addEventListener('keydown', handleEscapeLayered)
 })
 onUnmounted(() => {
   document.removeEventListener('keydown', handleEscapeLayered)
-  cancelAnimationFrame(discAnimFrame)
   if (trackSwitchAnimTimer) clearTimeout(trackSwitchAnimTimer)
   if (controlFeedbackPulseTimer) clearTimeout(controlFeedbackPulseTimer)
   if (moreSheetSwitchTimer) clearTimeout(moreSheetSwitchTimer)
@@ -1027,17 +1013,32 @@ watch(() => player.hasPlaybackSession, (hasSession) => {
   contextMenu.value.show = false
 })
 
-const contextMenuItems = computed(() => {
+const contextMenuItems = computed<ContextMenuItem[]>(() => {
   if (contextMenu.value.type === 'artist-page') {
     return artistLinks.value.map(artist => ({ id: artist.id, label: artist.name, icon: 'person' }))
   }
+  const track = player.currentTrack
   if (contextMenu.value.type === 'title') {
-    return [{ id: 'copy-title', label: t('player.copy_title'), icon: 'content_copy' }]
+    return [
+      createContextMenuItem(t('player.copy_title'), { id: 'copy-title', icon: 'content_copy' }),
+      createContextMenuItem(t('player.copy_track_info'), { id: 'copy-info', icon: 'copy_all', disabled: !track?.artist.trim() }),
+      createContextMenuItem(t('player.share'), { id: 'share', icon: 'share' }),
+      createContextMenuSeparator('title-actions'),
+      createContextMenuItem(t('player.add_to_playlist'), { id: 'add-to-playlist', icon: 'playlist_add' }),
+    ]
   }
   if (contextMenu.value.type === 'artist') {
-    return [{ id: 'copy-artist', label: t('player.copy_artist'), icon: 'content_copy' }]
+    return [
+      createContextMenuItem(t('player.open_artist'), { id: 'open-artist', icon: 'person', disabled: artistLinksLoading.value || !track?.artist.trim() }),
+      createContextMenuItem(t('player.copy_artist'), { id: 'copy-artist', icon: 'content_copy', disabled: !track?.artist.trim() }),
+    ]
   }
-  return [{ id: 'save-cover', label: t('player.save_cover'), icon: 'save' }]
+  return [
+    createContextMenuItem(t('player.save_cover'), { id: 'save-cover', icon: 'save', disabled: !coverUrl.value }),
+    createContextMenuSeparator('cover-style'),
+    createContextMenuItem(t('settings.cover_style_card'), { id: 'cover-style-card', icon: settings.coverStyle === 'card' ? 'check' : 'crop_square' }),
+    createContextMenuItem(t('settings.cover_style_disc'), { id: 'cover-style-disc', icon: settings.coverStyle === 'disc' ? 'check' : 'album' }),
+  ]
 })
 
 function openContextMenu(e: MouseEvent, type: 'title' | 'artist' | 'cover') {
@@ -1051,7 +1052,7 @@ function closeContextMenu() {
 
 async function copyText(text: string) {
   try {
-    await navigator.clipboard.writeText(text)
+    await writeClipboardText(text)
     toast.success(t('player.copied'))
   } catch {
     toast.error(t('player.copy_failed'))
@@ -1066,35 +1067,64 @@ function handleContextMenuClick(item: ContextMenuActionItem) {
       void router.push(artist.route).then(() => emit('collapse'))
     }
     closeContextMenu()
-  } else if (item.id === 'copy-title') {
-    void copyText(player.currentTrack?.title || '')
-  } else if (item.id === 'copy-artist') {
-    void copyText(player.currentTrack?.artist || '')
-  } else if (item.id === 'save-cover') {
-    void saveCoverArt()
+    return
   }
+  const track = player.currentTrack
+  const { x, y } = contextMenu.value
+  switch (item.id) {
+    case 'copy-title': void copyText(track?.title || ''); break
+    case 'copy-info': void copyText(track ? `${track.title} - ${track.artist}` : ''); break
+    case 'copy-artist': void copyText(track?.artist || ''); break
+    case 'share': closeContextMenu(); void shareSong(); break
+    case 'add-to-playlist': closeContextMenu(); showAddToPlaylist.value = true; break
+    case 'open-artist': closeContextMenu(); void openArtistPage(new MouseEvent('click', { clientX: x, clientY: y })); break
+    case 'save-cover': void saveCoverArt(); break
+    case 'cover-style-card': settings.coverStyle = 'card'; closeContextMenu(); break
+    case 'cover-style-disc': settings.coverStyle = 'disc'; closeContextMenu(); break
+  }
+}
+
+/** 网络封面走后端代理（带 Referer，绕开图床的跨域限制），本地封面直接读 asset 地址 */
+async function readCoverBytes(src: string): Promise<{ bytes: Uint8Array; extension: string }> {
+  let dataUrl = src.startsWith('data:') ? src : ''
+  if (!dataUrl && normalizeProxiedCoverUrl(src)) dataUrl = await resolveCoverImage(src)
+  const match = /^data:image\/([\w+.-]+);base64,(.*)$/is.exec(dataUrl)
+  if (match) {
+    const binary = atob(match[2])
+    const bytes = new Uint8Array(binary.length)
+    for (let index = 0; index < binary.length; index++) bytes[index] = binary.charCodeAt(index)
+    return { bytes, extension: imageExtension(match[1]) }
+  }
+  const response = await fetch(src)
+  if (!response.ok) throw new Error(`cover request failed: ${response.status}`)
+  const blob = await response.blob()
+  return { bytes: new Uint8Array(await blob.arrayBuffer()), extension: imageExtension(blob.type.replace(/^image\//, '')) }
+}
+
+function imageExtension(subtype: string): string {
+  const normalized = subtype.toLowerCase()
+  if (normalized === 'jpeg' || normalized === 'pjpeg') return 'jpg'
+  return /^(png|webp|gif|avif|bmp)$/.test(normalized) ? normalized : 'jpg'
 }
 
 async function saveCoverArt() {
   closeContextMenu()
-  const url = player.currentTrack?.coverUrl
-  if (!url) return
+  const src = coverUrl.value || player.currentTrack?.coverUrl
+  if (!src) return
 
   try {
+    const { bytes, extension } = await readCoverBytes(src)
     const { save } = await import('@tauri-apps/plugin-dialog')
+    const baseName = (player.currentTrack?.title || 'cover').replace(/[\\/:*?"<>|]+/g, '_').trim() || 'cover'
     const filePath = await save({
-      defaultPath: `${player.currentTrack?.title || 'cover'}.jpg`,
-      filters: [{ name: 'Image', extensions: ['jpg', 'png', 'webp'] }],
+      defaultPath: `${baseName}.${extension}`,
+      filters: [{ name: 'Image', extensions: [extension] }],
     })
     if (!filePath) return
 
-    const response = await fetch(url, { referrerPolicy: 'no-referrer' })
-    const blob = await response.blob()
-    const arrayBuffer = await blob.arrayBuffer()
-
     await invoke('save_file_bytes', {
       path: filePath,
-      data: Array.from(new Uint8Array(arrayBuffer)),
+      data: Array.from(bytes),
     })
     toast.success(t('player.cover_saved'))
   } catch (e) {
@@ -1735,7 +1765,7 @@ async function shareSong() {
     ? `${track.title} - ${track.artist}\n${url}`
     : `${track.title} - ${track.artist}`
   try {
-    await navigator.clipboard.writeText(text)
+    await writeClipboardText(text)
     toast.success(t('player.share_copied'))
   } catch {
     toast.error(t('player.copy_failed'))
@@ -2069,6 +2099,7 @@ const sliderActiveColor = computed(() => {
       <section class="np-left">
         <div class="np-left-stack">
         <div
+          ref="coverWrapRef"
           class="cover-wrap"
           :class="{
             'cover-wrap--card': settings.coverStyle === 'card',
@@ -2097,7 +2128,7 @@ const sliderActiveColor = computed(() => {
             </transition>
           </div>
           <!-- Disc 模式（黑胶唱片） -->
-          <div v-else ref="discRef" class="cover-disc">
+          <div v-else class="cover-disc" :class="{ 'cover-disc--spinning': player.isPlaying }">
             <div class="cover-inner">
               <transition :name="coverTransitionName">
                 <img
@@ -2116,9 +2147,8 @@ const sliderActiveColor = computed(() => {
                 >music_note</span>
               </transition>
             </div>
-            <div class="cover-groove" />
-            <div class="cover-hole" />
           </div>
+          <div v-if="settings.coverStyle !== 'card'" class="cover-disc-sheen" aria-hidden="true" />
           <!-- 来源徽章（对齐 Android PlaybackSourceBadge） -->
           <transition name="np-badge-swap" mode="out-in">
             <div
@@ -2150,7 +2180,7 @@ const sliderActiveColor = computed(() => {
 
         <div class="np-slider-area">
           <WaveformSlider
-            :progress="player.interpolatedProgress"
+            :progress="readInterpolatedProgress"
             :is-playing="player.isPlaying"
             :active-color="sliderActiveColor"
             @seek="onSeek"
@@ -2204,17 +2234,33 @@ const sliderActiveColor = computed(() => {
           <button
             class="ctrl-btn"
             :class="{ active: player.shuffleEnabled }"
+            :title="t('shortcuts.shuffle')"
+            :aria-label="t('shortcuts.shuffle')"
+            :aria-pressed="player.shuffleEnabled"
             @click="handleToggleShuffle()"
           >
             <span class="material-symbols-rounded">shuffle</span>
           </button>
 
-          <button class="ctrl-btn ctrl-btn--transport" :class="{ 'ctrl-btn--switching': isTrackSwitchAnimating }" @click="handlePrevClick()">
+          <button
+            class="ctrl-btn ctrl-btn--transport"
+            :class="{ 'ctrl-btn--switching': isTrackSwitchAnimating }"
+            :title="t('tray.previous')"
+            :aria-label="t('tray.previous')"
+            @click="handlePrevClick()"
+          >
             <span class="material-symbols-rounded filled" style="font-size: 30px">skip_previous</span>
           </button>
 
           <!-- 播放/暂停 带动画 -->
-          <button class="play-btn play-btn--transport" :class="{ 'play-btn--switching': isTrackSwitchAnimating }" @click="handleTogglePlayPause()" :disabled="player.isLoadingAudio">
+          <button
+            class="play-btn play-btn--transport"
+            :class="{ 'play-btn--switching': isTrackSwitchAnimating }"
+            :title="player.isPlaying ? t('tray.pause') : t('tray.play')"
+            :aria-label="player.isPlaying ? t('tray.pause') : t('tray.play')"
+            :disabled="player.isLoadingAudio"
+            @click="handleTogglePlayPause()"
+          >
             <transition name="play-icon">
               <span
                 v-if="player.isLoadingAudioSlow"
@@ -2229,13 +2275,21 @@ const sliderActiveColor = computed(() => {
             </transition>
           </button>
 
-          <button class="ctrl-btn ctrl-btn--transport" :class="{ 'ctrl-btn--switching': isTrackSwitchAnimating }" @click="handleNextClick()">
+          <button
+            class="ctrl-btn ctrl-btn--transport"
+            :class="{ 'ctrl-btn--switching': isTrackSwitchAnimating }"
+            :title="t('tray.next')"
+            :aria-label="t('tray.next')"
+            @click="handleNextClick()"
+          >
             <span class="material-symbols-rounded filled" style="font-size: 30px">skip_next</span>
           </button>
 
           <button
             class="ctrl-btn"
             :class="{ active: player.repeatMode !== 'off' }"
+            :title="t('shortcuts.repeat')"
+            :aria-label="t('shortcuts.repeat')"
             @click="handleToggleRepeatMode()"
           >
             <span class="material-symbols-rounded">{{ player.repeatMode === 'one' ? 'repeat_one' : 'repeat' }}</span>
@@ -2252,6 +2306,9 @@ const sliderActiveColor = computed(() => {
             class="tool-btn tool-btn--feedback fav-btn"
             :class="{ active: isFavorite }"
             :disabled="!player.currentTrack"
+            :title="t('library.liked_songs')"
+            :aria-label="t('library.liked_songs')"
+            :aria-pressed="isFavorite"
             @click="toggleFavorite"
           >
             <transition name="np-favorite-swap" mode="out-in">
@@ -2262,7 +2319,7 @@ const sliderActiveColor = computed(() => {
               >favorite</span>
             </transition>
           </button>
-          <button class="tool-btn tool-btn--feedback" @click="handleOpenQueue()">
+          <button class="tool-btn tool-btn--feedback" :title="t('player.queue')" :aria-label="t('player.queue')" @click="handleOpenQueue()">
             <span class="material-symbols-rounded">queue_music</span>
           </button>
           <!-- 睡眠定时器 -->
@@ -2270,6 +2327,8 @@ const sliderActiveColor = computed(() => {
             <button
               class="tool-btn tool-btn--feedback"
               :class="{ active: player.sleepTimerMode || showSleepMenu }"
+              :title="t('player.sleep_timer')"
+              :aria-label="t('player.sleep_timer')"
               @click="triggerControlFeedbackPulse(); toggleToolbarPanel('sleep')"
             >
               <span class="material-symbols-rounded">timer</span>
@@ -2301,7 +2360,10 @@ const sliderActiveColor = computed(() => {
             <button
               class="tool-btn tool-btn--feedback"
               :class="{ active: showVolumeSlider }"
+              :title="t('player.volume')"
+              :aria-label="t('player.volume')"
               @click="triggerControlFeedbackPulse(); toggleToolbarPanel('volume')"
+              @wheel.prevent="onVolumeWheel"
             >
               <span class="material-symbols-rounded">{{ player.volume === 0 ? 'volume_off' : player.volume < 0.5 ? 'volume_down' : 'volume_up' }}</span>
             </button>
@@ -2335,7 +2397,13 @@ const sliderActiveColor = computed(() => {
           </div>
           <!-- 音效 (AudioFX) -->
           <div class="speed-wrap">
-            <button class="tool-btn tool-btn--feedback" :class="{ active: showAudioFxPanel || player.hasActiveEffects }" @click="triggerControlFeedbackPulse(); toggleToolbarPanel('audiofx')">
+            <button
+              class="tool-btn tool-btn--feedback"
+              :class="{ active: showAudioFxPanel || player.hasActiveEffects }"
+              :title="t('player.audio_effects')"
+              :aria-label="t('player.audio_effects')"
+              @click="triggerControlFeedbackPulse(); toggleToolbarPanel('audiofx')"
+            >
               <span class="material-symbols-rounded">tune</span>
             </button>
             <Transition name="np-popover">
@@ -2344,7 +2412,12 @@ const sliderActiveColor = computed(() => {
               </div>
             </Transition>
           </div>
-          <button class="tool-btn tool-btn--feedback" @click="triggerControlFeedbackPulse(); toggleToolbarPanel('add')">
+          <button
+            class="tool-btn tool-btn--feedback"
+            :title="t('player.add_to_playlist')"
+            :aria-label="t('player.add_to_playlist')"
+            @click="triggerControlFeedbackPulse(); toggleToolbarPanel('add')"
+          >
             <span class="material-symbols-rounded">playlist_add</span>
           </button>
           <!-- 评论（对齐 Android：仅网易云、B 站） -->
@@ -2367,7 +2440,7 @@ const sliderActiveColor = computed(() => {
         <LyricsView
           v-if="displayLyrics.length > 0"
           :lyrics="displayLyrics"
-          :current-time-ms="player.interpolatedPositionMs"
+          :current-time-ms="readInterpolatedPositionMs"
           :preview-time-ms="previewPositionMs"
           :is-playing="player.isPlaying"
           :lyric-offset-ms="currentLyricTotalOffsetMs"
@@ -3407,42 +3480,65 @@ const sliderActiveColor = computed(() => {
   opacity: 0.35;
 }
 
-/* Disc 模式（黑胶唱片） */
-
+/* Disc 模式（黑胶唱片）：盘面与纹路中心对称，转起来只有中间的封面在动；高光层在外面，不随盘转 */
 .cover-disc {
+  --disc-label-size: 70%;
+  position: relative;
   width: 100%;
   height: 100%;
   border-radius: 50%;
-  background: conic-gradient(
-    from 0deg,
-    #2d2640,
-    #1e1a2e,
-    #252030,
-    #2d2640
-  );
   display: flex;
   align-items: center;
   justify-content: center;
-  position: relative;
-  will-change: transform;
-  filter: drop-shadow(0 16px 48px rgba(0,0,0,0.5));
+  background:
+    repeating-radial-gradient(circle closest-side, rgba(255,255,255,0.035) 0 1px, transparent 1px 3px),
+    radial-gradient(circle closest-side, #19191c 0%, #0c0c0e 82%, #1b1b1f 97%, #0a0a0b 100%);
+  box-shadow:
+    inset 0 0 0 1px rgba(255,255,255,0.06),
+    0 16px 48px rgba(0,0,0,0.5);
+  animation: np-disc-spin 25s linear infinite paused;
+}
+
+.cover-disc--spinning {
+  animation-play-state: running;
+}
+
+@keyframes np-disc-spin {
+  to { transform: rotate(360deg); }
 }
 
 .cover-inner {
   position: relative;
-  width: 78%;
-  height: 78%;
+  width: var(--disc-label-size);
+  height: var(--disc-label-size);
   border-radius: 50%;
-  background: linear-gradient(135deg,
-    #2d2640 0%,
-    #1a1724 50%,
-    #1e1a2e 100%
-  );
+  background: linear-gradient(135deg, #2a2a2f 0%, #18181b 100%);
+  box-shadow:
+    0 0 0 3px rgba(0,0,0,0.55),
+    0 0 0 4px rgba(255,255,255,0.07);
   display: flex;
   align-items: center;
   justify-content: center;
   color: white;
   overflow: hidden;
+}
+
+.cover-disc-sheen {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  pointer-events: none;
+  background: conic-gradient(
+    from 20deg,
+    transparent 0deg,
+    rgba(255,255,255,0.12) 28deg,
+    transparent 64deg,
+    transparent 180deg,
+    rgba(255,255,255,0.08) 208deg,
+    transparent 244deg
+  );
+  -webkit-mask: radial-gradient(circle closest-side, transparent 71%, #000 72%);
+  mask: radial-gradient(circle closest-side, transparent 71%, #000 72%);
 }
 
 .cover-img {
@@ -3462,24 +3558,6 @@ const sliderActiveColor = computed(() => {
   justify-content: center;
   font-size: 48px;
   opacity: 0.35;
-}
-
-.cover-groove {
-  position: absolute;
-  width: 90%;
-  height: 90%;
-  border-radius: 50%;
-  border: 1px solid rgba(255,255,255,0.04);
-  pointer-events: none;
-}
-
-.cover-hole {
-  position: absolute;
-  width: 40px;
-  height: 40px;
-  border-radius: 50%;
-  background: rgba(0,0,0,0.6);
-  border: 2px solid rgba(255,255,255,0.06);
 }
 
 /* 曲目信息：固定高度 + 绝对叠层，切歌不塌布局 */
@@ -4254,11 +4332,11 @@ const sliderActiveColor = computed(() => {
   border: 1px solid rgba(255, 255, 255, 0.1);
 }
 
-/* 黑胶是圆形，右下角落在唱片外：改为底部居中（不用 transform，避免与切换动画冲突） */
+/* 黑胶是圆形，右下角落在唱片外：改为居中压在封面下方的盘面上（不用 transform，避免与切换动画冲突） */
 .source-badge--disc {
   left: 0;
   right: 0;
-  bottom: 2px;
+  bottom: calc(7.5% - 12px);
   width: fit-content;
   margin: 0 auto;
 }
@@ -4281,11 +4359,6 @@ const sliderActiveColor = computed(() => {
   font-weight: 600;
   color: rgba(255, 255, 255, 0.8);
   letter-spacing: 0.3px;
-}
-
-@keyframes badge-in {
-  from { opacity: 0; transform: scale(0.7); }
-  to { opacity: 1; transform: scale(1); }
 }
 
 .np-badge-swap-enter-active,

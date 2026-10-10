@@ -21,6 +21,8 @@ const BILIBILI_REFERER: &str = "https://www.bilibili.com/";
 const QQ_REFERER: &str = "https://y.qq.com/";
 const NETEASE_REFERER: &str = "https://music.163.com/";
 const YOUTUBE_REFERER: &str = "https://music.youtube.com/";
+const COVER_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+const COVER_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 const COVER_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
 
 struct CachedCover {
@@ -60,7 +62,7 @@ pub async fn fetch_bilibili_cover(
     let cache_key_url = cover_url.clone();
     let setup_host = cover_host.clone();
     let cache = tokio::task::spawn_blocking(move || {
-        log::info!(
+        log::debug!(
             target: "cover-cache",
             "setup worker started host={}, queued_ms={}",
             setup_host,
@@ -75,7 +77,7 @@ pub async fn fetch_bilibili_cover(
     })
     .await
     .map_err(|err| AppError::Other(err.to_string()))??;
-    log::info!(
+    log::debug!(
         target: "cover-fetch",
         "cache ready host={}, setup_ms={}, force_refresh={}",
         cover_host,
@@ -96,7 +98,7 @@ pub async fn fetch_bilibili_cover(
         })
         .await
         .map_err(|err| AppError::Other(err.to_string()))?;
-        log::info!(
+        log::debug!(
             target: "cover-cache",
             "lookup host={}, hit={}, elapsed_ms={}",
             cover_host,
@@ -104,7 +106,7 @@ pub async fn fetch_bilibili_cover(
             lookup_started.elapsed().as_millis(),
         );
         if let Some((data_url, bytes)) = cached {
-            log::info!(
+            log::debug!(
                 target: "cover-cache",
                 "hit host={}, bytes={}, data_url_chars={}",
                 cover_host,
@@ -116,29 +118,13 @@ pub async fn fetch_bilibili_cover(
     }
 
     let request_started = Instant::now();
-    log::info!(
+    log::debug!(
         target: "cover-fetch",
         "request start host={}, force_refresh={}",
         cover_host,
         force_refresh == Some(true),
     );
-    let mut client_builder = reqwest::Client::builder()
-        .cookie_provider(state.cookie_jar.clone())
-        .user_agent(COVER_USER_AGENT)
-        .redirect(reqwest::redirect::Policy::custom(|attempt| {
-            if attempt.previous().len() >= 5 || validate_cover_url(attempt.url()).is_err() {
-                attempt.stop()
-            } else {
-                attempt.follow()
-            }
-        }));
-    if state.bypasses_system_proxy() {
-        client_builder = client_builder.no_proxy();
-    }
-    let client = client_builder
-        .build()
-        .map_err(|err| AppError::Other(err.to_string()))?;
-    let response = client
+    let response = cover_client(&state)?
         .get(cover_url.clone())
         .header(REFERER, cover_referer(&cover_url))
         .header(USER_AGENT, COVER_USER_AGENT)
@@ -150,7 +136,7 @@ pub async fn fetch_bilibili_cover(
         .await?
         .error_for_status()?;
 
-    log::info!(
+    log::debug!(
         target: "cover-fetch",
         "response host={}, status={}, content_length={:?}, elapsed_ms={}",
         cover_host,
@@ -177,7 +163,7 @@ pub async fn fetch_bilibili_cover(
     }
     let mime_type = detect_image_mime(&bytes)
         .ok_or_else(|| AppError::Api("Cover response is not a supported image".into()))?;
-    log::info!(
+    log::debug!(
         target: "cover-fetch",
         "body ready host={}, bytes={}, mime={}, elapsed_ms={}",
         cover_host,
@@ -198,7 +184,7 @@ pub async fn fetch_bilibili_cover(
     })
     .await
     .map_err(|err| AppError::Other(err.to_string()))??;
-    log::info!(
+    log::debug!(
         target: "cover-cache",
         "published host={}, bytes={}, elapsed_ms={}, total_ms={}",
         cover_host,
@@ -206,7 +192,7 @@ pub async fn fetch_bilibili_cover(
         publish_started.elapsed().as_millis(),
         request_started.elapsed().as_millis(),
     );
-    log::info!(
+    log::debug!(
         target: "cover-cache",
         "publish worker host={}, worker_ms={}, data_url_chars={}",
         cover_host,
@@ -215,6 +201,38 @@ pub async fn fetch_bilibili_cover(
     );
 
     Ok(data_url)
+}
+
+/// 按「是否绕过系统代理」各缓存一个客户端：每张封面都新建客户端会重复 TLS 初始化，连接也没法复用
+static COVER_CLIENTS: parking_lot::Mutex<[Option<reqwest::Client>; 2]> =
+    parking_lot::const_mutex([None, None]);
+
+fn cover_client(state: &AppState) -> AppResult<reqwest::Client> {
+    let no_proxy = state.bypasses_system_proxy();
+    let slot = usize::from(no_proxy);
+    if let Some(client) = COVER_CLIENTS.lock()[slot].clone() {
+        return Ok(client);
+    }
+    let mut builder = reqwest::Client::builder()
+        .cookie_provider(state.cookie_jar.clone())
+        .user_agent(COVER_USER_AGENT)
+        .connect_timeout(COVER_CONNECT_TIMEOUT)
+        .read_timeout(COVER_READ_TIMEOUT)
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            if attempt.previous().len() >= 5 || validate_cover_url(attempt.url()).is_err() {
+                attempt.stop()
+            } else {
+                attempt.follow()
+            }
+        }));
+    if no_proxy {
+        builder = builder.no_proxy();
+    }
+    let client = builder
+        .build()
+        .map_err(|err| AppError::Other(err.to_string()))?;
+    COVER_CLIENTS.lock()[slot] = Some(client.clone());
+    Ok(client)
 }
 
 fn normalize_cover_url(raw_url: &str) -> AppResult<Url> {

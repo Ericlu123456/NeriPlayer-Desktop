@@ -6,6 +6,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { normalizeTrack, usePlayerStore, type TrackInfo } from '@/stores/player'
 import { useToastStore } from '@/stores/toast'
 import BilibiliCoverImage from '@/components/BilibiliCoverImage.vue'
+import TrackContextMenu from '@/components/TrackContextMenu.vue'
 import { useArtistFavorite } from '@/modules/library/favoriteArtistState'
 import { playlistDetailCacheKey, previewCachedDetail, writePlaylistDetailCache, type CachedDetailPreview } from '@/modules/library/playlistDetailCache'
 import { recordPlaylistOpen } from '@/modules/library/playlistUsage'
@@ -37,6 +38,7 @@ const selectedContent = ref<ArtistContent | null>(null)
 const collection = ref<ArtistCollection | null>(null)
 const loadingCollection = ref(false)
 const collectionError = ref('')
+const trackMenuRef = ref<InstanceType<typeof TrackContextMenu> | null>(null)
 let generation = 0
 let contentsGeneration = 0
 let collectionGeneration = 0
@@ -237,7 +239,7 @@ onUnmounted(() => { generation++; contentsGeneration++; collectionGeneration++ }
       <div v-if="selectedContent ? collectionError : error" class="creator-error"><span>{{ selectedContent ? collectionError : error }}</span><button @click="selectedContent ? loadCollection(selectedContent, !!collection) : load(failedLoadMore)">{{ t('player.retry') }}</button></div>
       <div v-if="loadingCollection && !collection" class="state-center"><span class="material-symbols-rounded spinning">progress_activity</span></div>
       <div class="track-list">
-        <button v-for="(track, index) in activeTracks" :key="track.id" class="track-item" :class="{ active: player.currentTrack?.id === track.id }" @click="playTrack(track)">
+        <button v-for="(track, index) in activeTracks" :key="track.id" class="track-item" :class="{ active: player.currentTrack?.id === track.id }" @click="playTrack(track)" @contextmenu="trackMenuRef?.open($event, track)">
           <span class="track-index">{{ index + 1 }}</span><div class="track-cover"><BilibiliCoverImage :src="track.coverUrl" loading="lazy"><span class="material-symbols-rounded filled">music_note</span></BilibiliCoverImage></div><div class="track-info"><div class="track-title">{{ track.title }}</div><div class="track-meta">{{ track.artist }}</div></div><span class="track-duration">{{ formatTrackDuration(track.durationMs) }}</span>
         </button>
       </div>
@@ -247,6 +249,7 @@ onUnmounted(() => { generation++; contentsGeneration++; collectionGeneration++ }
     </template>
     </div>
     </Transition>
+    <TrackContextMenu ref="trackMenuRef" @play="playTrack" />
   </div>
 </template>
 

@@ -8,7 +8,11 @@
       "identifier": "opener:allow-open-url",
       "allow": [
         { "url": "https://github.com/*" },
-        { "url": "https://ffmpeg.org/*" }
+        { "url": "https://ffmpeg.org/*" },
+        { "url": "https://music.163.com/*" },
+        { "url": "https://www.bilibili.com/*" },
+        { "url": "https://space.bilibili.com/*" },
+        { "url": "https://music.youtube.com/*" }
       ]
     },
     "store:default",

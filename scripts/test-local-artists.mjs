@@ -109,6 +109,7 @@ async function mountArtist(data = artistTracks) {
     groupLocalArtists, localArtistStableKey, loadArtistSourceTracks: async () => data,
     createLogger: () => ({ error() {} }), formatTrackDuration: () => '1:00',
     BilibiliCoverImage: Vue.defineComponent({ setup: () => () => Vue.h('img') }),
+    TrackContextMenu: Vue.defineComponent({ setup: () => () => null }),
     recordPlaylistOpen: open => opened.push(open),
     ...await import(matcherUrl),
   }

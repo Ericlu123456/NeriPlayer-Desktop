@@ -1861,38 +1861,17 @@ pub async fn cancel_all_downloads(app: AppHandle, state: State<'_, AppState>) ->
     Ok(cancelled)
 }
 
-/// 在系统文件管理器中显示文件
+/// 在系统文件管理器中显示并选中文件（Windows 资源管理器、macOS Finder、Linux 走 FileManager1 D-Bus 接口）
 #[tauri::command]
 pub async fn reveal_file(path: String) -> AppResult<()> {
-    let p = std::path::Path::new(&path);
-    if !p.exists() {
+    let path = std::path::PathBuf::from(path);
+    if !path.exists() {
         return Err(AppError::NotFound("File not found".into()));
     }
-    #[cfg(target_os = "windows")]
-    {
-        std::process::Command::new("explorer")
-            .args(["/select,", &path])
-            .spawn()
-            .map_err(|e| AppError::Other(e.to_string()))?;
-    }
-    #[cfg(target_os = "macos")]
-    {
-        std::process::Command::new("open")
-            .args(["-R", &path])
-            .spawn()
-            .map_err(|e| AppError::Other(e.to_string()))?;
-    }
-    #[cfg(target_os = "linux")]
-    {
-        // xdg-open on parent directory
-        if let Some(parent) = p.parent() {
-            std::process::Command::new("xdg-open")
-                .arg(parent)
-                .spawn()
-                .map_err(|e| AppError::Other(e.to_string()))?;
-        }
-    }
-    Ok(())
+    tauri::async_runtime::spawn_blocking(move || tauri_plugin_opener::reveal_item_in_dir(path))
+        .await
+        .map_err(|error| AppError::Other(error.to_string()))?
+        .map_err(|error| AppError::Other(format!("reveal failed: {error}")))
 }
 
 #[cfg(test)]

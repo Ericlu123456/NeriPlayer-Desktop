@@ -11,6 +11,7 @@ import {
   type TrackStat,
 } from '@/stores/playbackStats'
 import BilibiliCoverImage from '@/components/BilibiliCoverImage.vue'
+import TrackContextMenu from '@/components/TrackContextMenu.vue'
 import { useEscapeClose } from '@/composables/useEscapeClose'
 import { useToastStore } from '@/stores/toast'
 
@@ -37,8 +38,8 @@ function formatListenTime(ms: number): string {
   const totalMinutes = Math.floor(Math.max(0, ms) / 60_000)
   const hours = Math.floor(totalMinutes / 60)
   const minutes = totalMinutes % 60
-  if (hours > 0) return `${hours}h ${minutes}m`
-  return `${minutes}m`
+  if (hours > 0) return `${hours}${t('common.hour_short')} ${minutes}${t('common.minute_short')}`
+  return `${minutes}${t('common.minute_short')}`
 }
 
 // 用 scaleX 而不是 width：只走合成层，切区间时不会每帧触发布局
@@ -65,8 +66,9 @@ function isCurrent(item: TrackStat): boolean {
 
 /// 对齐 Android（onSongClick(listOf(stat.toSongItem()), 0)）：只播点中的这一首。
 /// 统计记录的身份由后端按同步模型还原（Android 同步来的是裸 id + 平台标记）
-async function playStat(item: TrackStat) {
-  if (startingIdentity.value) return
+/** 按统计记录还原可播放的曲目；还原不了时提示原因并返回 null */
+async function resolveStatTrack(item: TrackStat): Promise<TrackInfo | null> {
+  if (startingIdentity.value) return null
   startingIdentity.value = item.identityKey
   try {
     const [raw] = await invoke<Array<Record<string, unknown> | null>>('get_playback_stat_tracks', {
@@ -75,14 +77,33 @@ async function playStat(item: TrackStat) {
     const selected = raw ? normalizeTrack(raw) : null
     if (!selected || !isPlayable(selected)) {
       toast.show(t(selected?.source === 'local' ? 'stats.local_file_unavailable' : 'stats.track_unavailable'), 'info')
-      return
+      return null
     }
-    player.playAll([selected], selected.id, selected.playlistKey)
+    return selected
   } catch (error) {
     toast.error(String(error))
+    return null
   } finally {
     startingIdentity.value = ''
   }
+}
+
+function playResolved(track: TrackInfo) {
+  player.playAll([track], track.id, track.playlistKey)
+}
+
+async function playStat(item: TrackStat) {
+  const track = await resolveStatTrack(item)
+  if (track) playResolved(track)
+}
+
+const trackMenuRef = ref<InstanceType<typeof TrackContextMenu> | null>(null)
+
+async function openStatMenu(event: MouseEvent, item: TrackStat) {
+  event.preventDefault()
+  const { clientX, clientY } = event
+  const track = await resolveStatTrack(item)
+  if (track) trackMenuRef.value?.openAt(clientX, clientY, track)
 }
 
 async function confirmClear() {
@@ -158,7 +179,7 @@ onUnmounted(() => {
     <template v-else>
       <div class="section-title">{{ t('stats.most_played') }}</div>
       <div class="chart">
-        <button v-for="item in topTracks" :key="item.identityKey" type="button" class="chart-row" :class="{ active: isCurrent(item) }" @click="playStat(item)">
+        <button v-for="item in topTracks" :key="item.identityKey" type="button" class="chart-row" :class="{ active: isCurrent(item) }" @click="playStat(item)" @contextmenu="openStatMenu($event, item)">
           <div class="chart-name">{{ item.name || t('stats.unknown_track') }}</div>
           <div class="chart-track">
             <div class="chart-bar" :style="{ transform: `scaleX(${barScale(item)})` }" />
@@ -174,6 +195,7 @@ onUnmounted(() => {
           class="track-item"
           :class="{ active: isCurrent(item) }"
           @click="playStat(item)"
+          @contextmenu="openStatMenu($event, item)"
         >
           <div class="track-index">
             <span v-if="startingIdentity === item.identityKey" class="material-symbols-rounded spinning index-spinner">progress_activity</span>
@@ -213,6 +235,7 @@ onUnmounted(() => {
         </div>
       </div>
     </Teleport>
+    <TrackContextMenu ref="trackMenuRef" @play="playResolved" />
   </div>
 </template>
 

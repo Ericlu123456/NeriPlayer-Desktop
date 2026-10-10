@@ -17,6 +17,12 @@ interface TrayPopupState {
 
 /** 图标字体没加载完就弹出会先闪一下图标名文字 */
 const FONT_READY_TIMEOUT_MS = 800
+/** 每次弹出的入场位移；不做淡入，透明窗口半透明的那几帧像是透出了背后的窗口 */
+const ENTER_KEYFRAMES: Keyframe[] = [
+  { transform: 'translateY(6px) scale(0.98)' },
+  { transform: 'none' },
+]
+const ENTER_OPTIONS: KeyframeAnimationOptions = { duration: 160, easing: 'cubic-bezier(0.2, 0, 0, 1)' }
 
 const { t } = useI18n()
 const state = ref<TrayPopupState>({
@@ -28,8 +34,9 @@ const state = ref<TrayPopupState>({
 })
 const coverFailed = ref(false)
 const cardRef = ref<HTMLElement | null>(null)
-let release: UnlistenFn | null = null
+let releases: UnlistenFn[] = []
 let disposed = false
+let receivedState = false
 
 const track = computed(() => state.value.track)
 const coverSrc = computed(() => (coverFailed.value ? '' : track.value?.coverUrl || ''))
@@ -48,6 +55,13 @@ function applyState(next: TrayPopupState) {
 function act(action: string) {
   if (!isTauri()) return
   void invoke('tray_popup_action', { action }).catch(() => {})
+}
+
+function playEnter() {
+  const card = cardRef.value
+  if (!card || window.matchMedia('(prefers-reduced-motion: reduce)').matches) return
+  card.getAnimations().forEach(animation => animation.cancel())
+  card.animate(ENTER_KEYFRAMES, ENTER_OPTIONS)
 }
 
 function onKeydown(event: KeyboardEvent) {
@@ -74,17 +88,26 @@ onMounted(async () => {
   document.documentElement.classList.add('tray-popup-page')
   window.addEventListener('keydown', onKeydown)
   if (!isTauri()) return
-  const unlisten = await listen<TrayPopupState>('tray-popup:state', event => applyState(event.payload))
+  const unlisten = await Promise.all([
+    listen<TrayPopupState>('tray-popup:state', event => {
+      receivedState = true
+      applyState(event.payload)
+    }),
+    listen('tray-popup:shown', playEnter),
+  ])
   if (disposed) {
-    unlisten()
+    unlisten.forEach(release => release())
     return
   }
-  release = unlisten
+  releases = unlisten
   try {
-    applyState(await invoke<TrayPopupState>('get_tray_popup_state'))
+    const initialState = await invoke<TrayPopupState>('get_tray_popup_state')
+    // 初始化请求在途期间可能已收到更新，不能再用旧快照覆盖
+    if (!disposed && !receivedState) applyState(initialState)
   } catch {
     // 拿不到状态时按空闲态显示，后端推送到达后再更新
   }
+  if (disposed) return
   await nextTick()
   await fontsReady()
   if (!disposed) void invoke('tray_popup_ready', { layout: measureLayout() }).catch(() => {})
@@ -93,14 +116,14 @@ onMounted(async () => {
 onUnmounted(() => {
   disposed = true
   window.removeEventListener('keydown', onKeydown)
-  release?.()
-  release = null
+  releases.forEach(release => release())
+  releases = []
   document.documentElement.classList.remove('tray-popup-page')
 })
 </script>
 
 <template>
-  <main class="tray-popup" @contextmenu.prevent>
+  <main class="tray-popup">
     <section ref="cardRef" class="tp-card" role="menu" :aria-label="t('tray.menu_label')">
       <button
         class="tp-hero"
@@ -201,12 +224,6 @@ onUnmounted(() => {
   border: 1px solid color-mix(in srgb, var(--md-outline-variant) 70%, transparent);
   box-shadow: 0 4px 12px rgb(0 0 0 / 28%), 0 1px 3px rgb(0 0 0 / 18%);
   overflow: hidden;
-  animation: tp-enter 160ms cubic-bezier(0.2, 0, 0, 1);
-}
-
-@keyframes tp-enter {
-  from { opacity: 0; transform: translateY(6px) scale(0.98); }
-  to { opacity: 1; transform: none; }
 }
 
 button {
@@ -263,7 +280,7 @@ button:focus-visible {
   opacity: 0.38;
 }
 
-:global(html.light-theme) .tp-hero-backdrop img {
+:global(html.light-theme .tp-hero-backdrop img) {
   opacity: 0.28;
 }
 
@@ -458,7 +475,7 @@ button:focus-visible {
   color: #e5484d;
 }
 
-:global(html.dark-theme) .tp-item--quit:hover {
+:global(html.dark-theme .tp-item--quit:hover) {
   color: #ff8b8f;
 }
 

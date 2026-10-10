@@ -106,9 +106,9 @@ impl MediaSessionController {
 
                 log::info!(target: "media-session", "MediaControls initialized");
 
-                // 命令循环
+                // 媒体事件由 souvlaki 分派，命令通道无需定时轮询
                 loop {
-                    match cmd_rx.recv_timeout(Duration::from_millis(100)) {
+                    match cmd_rx.recv() {
                         Ok(MediaSessionCmd::UpdateMetadata {
                             title,
                             artist,
@@ -148,8 +148,7 @@ impl MediaSessionController {
                         Ok(MediaSessionCmd::Stop) => {
                             let _ = controls.set_playback(MediaPlayback::Stopped);
                         }
-                        Err(mpsc::RecvTimeoutError::Timeout) => continue,
-                        Err(mpsc::RecvTimeoutError::Disconnected) => {
+                        Err(mpsc::RecvError) => {
                             log::warn!(target: "media-session", "channel disconnected, exiting");
                             break;
                         }

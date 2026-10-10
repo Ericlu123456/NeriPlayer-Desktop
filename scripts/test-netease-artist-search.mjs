@@ -78,6 +78,8 @@ async function mountArtist(data = fixture) {
     formatTrackDuration: () => '1:00',
     createLogger: () => ({ error() {} }),
     BilibiliCoverImage: defineComponent({ setup: () => () => h('img') }),
+    TrackContextMenu: defineComponent({ setup: () => () => null }),
+    CollectionContextMenu: defineComponent({ setup: () => () => null }),
     invoke: async (command, input) => {
       calls.push({ command, input })
       if (command === 'get_netease_artist_detail') return { data: { artist: { name: 'Artist', alias: [], musicSize: data.songs.length, albumSize: data.hotAlbums.length } } }

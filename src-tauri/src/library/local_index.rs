@@ -320,8 +320,16 @@ fn canonical_key(path: &str) -> String {
         .unwrap_or_else(|_| path.to_string())
 }
 
+/// Windows、macOS 默认文件系统不分大小写，Linux 分：/Music/A.flac 与 /Music/a.flac 是两首歌
+const CASE_INSENSITIVE_PATHS: bool = cfg!(any(windows, target_os = "macos"));
+
 fn paths_equal(left: &Path, right: &Path) -> bool {
-    strip_verbatim(left).eq_ignore_ascii_case(&strip_verbatim(right))
+    let (left, right) = (strip_verbatim(left), strip_verbatim(right));
+    if CASE_INSENSITIVE_PATHS {
+        left.to_lowercase() == right.to_lowercase()
+    } else {
+        left == right
+    }
 }
 
 fn folder_of(runtime: &Runtime, path: &Path) -> Option<String> {
@@ -337,13 +345,15 @@ fn folder_of(runtime: &Runtime, path: &Path) -> Option<String> {
 }
 
 fn starts_with_folder(path: &str, folder: &str) -> bool {
-    let (path, folder) = if cfg!(any(windows, target_os = "macos")) {
+    let (path, folder) = if CASE_INSENSITIVE_PATHS {
         (path.to_lowercase(), folder.to_lowercase())
     } else {
         (path.to_string(), folder.to_string())
     };
+    // 去掉根目录和目录末尾的分隔符，Unix 文件名里的反斜杠仍需保留
+    let folder = folder.trim_end_matches(std::path::is_separator);
     path == folder
-        || path.strip_prefix(&folder).is_some_and(|rest| rest.starts_with(['/', '\\']))
+        || path.strip_prefix(folder).is_some_and(|rest| rest.starts_with(std::path::is_separator))
 }
 
 fn on_fs_event(result: notify::Result<notify::Event>) {
@@ -539,6 +549,39 @@ mod tests {
         assert!(starts_with_folder("/music/a/song.mp3", "/music/a"));
         assert!(starts_with_folder("/music/a", "/music/a"));
         assert!(!starts_with_folder("/music/ab/song.mp3", "/music/a"));
+    }
+
+    #[test]
+    fn folder_prefix_matches_root_and_trailing_separators() {
+        assert!(starts_with_folder("/music/song.mp3", "/"));
+        assert!(starts_with_folder("/", "/"));
+        assert!(starts_with_folder("/music/song.mp3", "/music/"));
+        assert!(!starts_with_folder("/music-other/song.mp3", "/music/"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn folder_prefix_matches_windows_drive_and_unc_roots() {
+        assert!(starts_with_folder(r"D:\Music\song.mp3", r"D:\"));
+        assert!(starts_with_folder(r"d:\music\song.mp3", r"D:\Music\"));
+        assert!(starts_with_folder(r"\\nas\music\song.mp3", r"\\nas\music\"));
+        assert!(!starts_with_folder(r"D:\Musical\song.mp3", r"D:\Music\"));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn folder_prefix_preserves_literal_backslashes_in_unix_names() {
+        assert!(starts_with_folder(r"/music\/song.mp3", r"/music\"));
+        assert!(!starts_with_folder("/music/song.mp3", r"/music\"));
+        assert!(!starts_with_folder(r"/music\other/song.mp3", "/music"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_path_comparisons_preserve_case() {
+        assert!(paths_equal(Path::new("/Music/A.flac"), Path::new("/Music/A.flac")));
+        assert!(!paths_equal(Path::new("/Music/A.flac"), Path::new("/Music/a.flac")));
+        assert!(!starts_with_folder("/Music/song.mp3", "/music"));
     }
 
     #[test]

@@ -24,7 +24,8 @@ const { t } = useI18n()
 
 const props = withDefaults(defineProps<{
   lyrics: PlayerLyricLine[]
-  currentTimeMs: number
+  /** 传读取函数时只有本组件逐帧跟随，父组件不必因播放时间变化每帧重渲染 */
+  currentTimeMs: number | (() => number)
   previewTimeMs?: number | null
   isPlaying: boolean
   lyricOffsetMs?: number
@@ -91,7 +92,7 @@ const offsetMs = computed(() => {
 
 const effectiveTimeMs = computed(() => {
   if (props.previewTimeMs != null) return props.previewTimeMs
-  return props.currentTimeMs
+  return typeof props.currentTimeMs === 'function' ? props.currentTimeMs() : props.currentTimeMs
 })
 
 const amllTimeMs = computed(() => Math.max(0, effectiveTimeMs.value + offsetMs.value))

@@ -5,6 +5,7 @@ import { listen } from '@tauri-apps/api/event'
 import { usePlayerStore, type TrackInfo } from './player'
 import { useSettingsStore } from './settings'
 import { createLogger } from '@/utils/logger'
+import { isMacPlatform } from '@/modules/shortcuts/platform'
 
 const log = createLogger('library')
 const LEGACY_SCAN_DIR_KEY = 'neri:last_scan_dir'
@@ -44,13 +45,19 @@ interface ScanProgress {
   currentPath: string
 }
 
-function isInsideFolder(path: string, folder: string): boolean {
-  const caseInsensitive = /^[a-zA-Z]:[\\/]|^\\\\/.test(folder) || navigator.platform.startsWith('Mac')
-  const normalizedPath = caseInsensitive ? path.toLowerCase() : path
-  const normalizedFolder = caseInsensitive ? folder.toLowerCase() : folder
+export function isInsideFolder(path: string, folder: string): boolean {
+  const windowsPath = /^[a-zA-Z]:[\\/]|^\\\\/.test(folder)
+  const caseInsensitive = windowsPath || isMacPlatform
+  const normalize = (value: string) => {
+    const separators = windowsPath ? value.replace(/\//g, '\\') : value
+    return caseInsensitive ? separators.toLowerCase() : separators
+  }
+  const normalizedPath = normalize(path)
+  // 去掉末尾分隔符，盘符根目录 D:\ 与 / 才能和其下的文件对上
+  const normalizedFolder = normalize(folder).replace(windowsPath ? /[\\/]+$/ : /\/+$/, '')
   if (normalizedPath === normalizedFolder) return true
   return normalizedPath.startsWith(normalizedFolder)
-    && ['/', '\\'].includes(normalizedPath.charAt(normalizedFolder.length))
+    && (windowsPath ? ['/', '\\'] : ['/']).includes(normalizedPath.charAt(normalizedFolder.length))
 }
 
 /// 本地音乐库：文件夹与曲目索引由后端持久化并监视变化，这里只做镜像。

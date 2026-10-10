@@ -161,6 +161,7 @@
     "local_library_title": "本地音乐库",
     "local_library_hint": "添加音乐文件夹后自动建立曲库，文件夹里新增、删除、修改的歌曲会自动同步",
     "local_library_empty": "还没有添加音乐文件夹",
+    "show_in_folder": "在文件夹中显示",
     "local_library_no_audio": "已添加的文件夹里没有找到音频文件",
     "local_add_folder": "添加文件夹",
     "local_remove_folder": "从曲库移除（不会删除文件）",
@@ -280,7 +281,10 @@
     "no": "否",
     "minimize": "最小化",
     "maximize": "最大化",
-    "restore": "还原"
+    "restore": "还原",
+    "open": "打开",
+    "copy_link": "复制链接",
+    "open_in_browser": "在浏览器中打开"
   },
   "download": {
     "download": "下载",
@@ -442,6 +446,8 @@
     "copy_failed": "复制失败",
     "copy_title": "复制歌曲名",
     "copy_artist": "复制歌手名",
+    "copy_track_info": "复制歌名与歌手",
+    "play_track": "播放",
     "save_cover": "保存封面",
     "cover_saved": "封面已保存",
     "cover_save_failed": "保存封面失败",
@@ -1109,6 +1115,7 @@
     "debug_logs_exported": "报告已导出",
     "debug_logs_open_dir": "打开日志目录",
     "debug_logs_empty": "暂无日志",
+    "debug_logs_no_match": "没有符合筛选条件的日志",
     "debug_level_all": "全部级别",
     "debug_crashes": "崩溃报告",
     "debug_crashes_desc": "panic 现场自动落盘，点击展开",

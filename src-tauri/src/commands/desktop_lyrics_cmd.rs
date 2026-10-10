@@ -404,8 +404,9 @@ pub async fn open_desktop_lyrics(
     .skip_taskbar(true)
     .focused(false)
     .visible(false);
-    // macOS 透明 WebView 需要额外私有 API feature，保留普通背景兼容默认构建
-    #[cfg(target_os = "windows")]
+    // macOS 透明 WebView 需要额外私有 API feature，保留普通背景兼容默认构建；
+    // Linux 的 WebKitGTK 在有合成器的桌面上支持透明窗口
+    #[cfg(not(target_os = "macos"))]
     let builder = builder.transparent(true);
     let lyrics_window = builder.main_browser_args(&app).build().map_err(|error| {
         snapshot().lock().retire(&instance);

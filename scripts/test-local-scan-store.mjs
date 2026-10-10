@@ -76,9 +76,22 @@ async function runtime(options = {}) {
       return operation()
     }, updateCurrentTrackInfo() {} }) },
     '@/utils/logger': { createLogger: () => ({ error() {}, warn() {} }) },
+    '@/modules/shortcuts/platform': { isMacPlatform: false },
   })
   pinia.setActivePinia(pinia.createPinia())
-  return { store: module.useLibraryStore(), calls, events, storage, backend }
+  return { store: module.useLibraryStore(), calls, events, storage, backend, module }
+}
+
+{
+  // 盘符根目录、末尾分隔符、混用分隔符都算在文件夹内；同名前缀的兄弟目录不算
+  const { module } = await runtime()
+  assert.equal(module.isInsideFolder('D:\\Song.flac', 'D:\\'), true)
+  assert.equal(module.isInsideFolder('d:/Albums/a.mp3', 'D:\\Albums\\'), true)
+  assert.equal(module.isInsideFolder('C:\\Music2\\a.mp3', 'C:\\Music'), false)
+  assert.equal(module.isInsideFolder('/home/me/Music/a.mp3', '/home/me/Music/'), true)
+  assert.equal(module.isInsideFolder('/home/me/music/a.mp3', '/home/me/Music'), false, 'Linux paths stay case-sensitive')
+  assert.equal(module.isInsideFolder('/Music\\/a.mp3', '/Music\\'), true, 'POSIX folder names may end in a backslash')
+  assert.equal(module.isInsideFolder('/Music\\archive/a.mp3', '/Music'), false, 'a backslash is not a POSIX separator')
 }
 
 {

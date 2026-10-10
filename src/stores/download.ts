@@ -2,7 +2,6 @@ import { defineStore } from 'pinia'
 import { ref, computed, watch } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
-import { openPath } from '@tauri-apps/plugin-opener'
 import { usePlayerStore, type TrackInfo } from './player'
 import { useSettingsStore } from './settings'
 import { useToastStore } from './toast'
@@ -333,7 +332,8 @@ export const useDownloadStore = defineStore('download', () => {
             handler: async () => {
               try {
                 if (downloaded?.filePath) await invoke('reveal_file', { path: downloaded.filePath })
-                else await openPath(configuredDir || await invoke<string>('get_default_download_dir'))
+                // 走后端：前端 opener 的 open-path 没在 capability 里授权，会被 ACL 拒绝
+                else await invoke('reveal_in_file_manager', { path: configuredDir || await invoke<string>('get_default_download_dir') })
               } catch (error) {
                 log.error('Open completed download folder failed:', error)
                 toast.error(t('download.reveal_failed'))
@@ -346,6 +346,19 @@ export const useDownloadStore = defineStore('download', () => {
       completionCheck = null
       scheduleBatchCompletion()
     })
+  }
+
+  let initialDownloadsLoad: Promise<void> | null = null
+  let downloadsLoaded = false
+
+  /** 首次用到下载清单时校验一次；之后由下载事件与下载页刷新，避免每个菜单挂载都扫一遍磁盘 */
+  function ensureDownloadsLoaded(): Promise<void> {
+    if (!initialDownloadsLoad) {
+      initialDownloadsLoad = loadDownloads({ silent: true }).finally(() => {
+        if (!downloadsLoaded) initialDownloadsLoad = null
+      })
+    }
+    return initialDownloadsLoad
   }
 
   function loadDownloads(options: { silent?: boolean } = {}): Promise<void> {
@@ -373,6 +386,7 @@ export const useDownloadStore = defineStore('download', () => {
         fileSize: t.file_size,
         downloadedAt: t.downloaded_at,
       }))
+      downloadsLoaded = true
       const removedCount = result.removed_count ?? result.removedCount ?? 0
       const silent = options.silent || startedDuringDownload || batch !== null || !queue.isIdle || launching.size > 0
       if (removedCount > 0 && !silent) {
@@ -757,6 +771,7 @@ export const useDownloadStore = defineStore('download', () => {
     retryDownload,
     clearFinishedTasks,
     loadDownloads,
+    ensureDownloadsLoaded,
     downloadTrack,
     resumePendingDownloads,
     redownloadTrack,

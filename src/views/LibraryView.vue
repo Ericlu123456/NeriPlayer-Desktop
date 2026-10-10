@@ -17,7 +17,9 @@ import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import M3Dialog from '@/components/ui/M3Dialog.vue'
 import M3Input from '@/components/ui/M3Input.vue'
 import ContextMenu from '@/components/ui/ContextMenu.vue'
+import CollectionContextMenu from '@/components/CollectionContextMenu.vue'
 import BilibiliCoverImage from '@/components/BilibiliCoverImage.vue'
+import { collectionWebUrl } from '@/utils/collectionLinks'
 import {
   createContextMenuItem,
   type ContextMenuActionItem,
@@ -320,6 +322,7 @@ async function confirmCreate() {
 }
 
 // 上下文菜单
+const collectionMenuRef = ref<InstanceType<typeof CollectionContextMenu> | null>(null)
 const contextMenu = ref<{ show: boolean; x: number; y: number; playlist: PlaylistInfo | null }>({
   show: false, x: 0, y: 0, playlist: null,
 })
@@ -624,24 +627,24 @@ let favoritesLoadVersion = 0
 /// 对齐 Android LibraryScreen: 按 source 跳平台详情页懒加载曲目,
 /// 无法定位平台页时才退回同步曲目快照的本地详情
 function openFavorite(fpl: FavoritePlaylist) {
+  const target = favoriteRoute(fpl)
+  if (target) void router.push(target)
+  else toast.show(t('player.load_failed'), 'error')
+}
+
+function favoriteRoute(fpl: FavoritePlaylist) {
   if (isArtistFavoriteSource(fpl.source)) {
-    const target = favoriteArtistRoute(fpl)
-    if (target) router.push(target)
-    else toast.show(t('player.load_failed'), 'error')
-    return
+    return favoriteArtistRoute(fpl)
   }
   switch (fpl.source) {
     case 'netease':
-      router.push({ name: 'netease-playlist', params: { id: fpl.id } })
-      return
+      return { name: 'netease-playlist', params: { id: fpl.id } }
     case 'neteaseAlbum':
-      router.push({ name: 'netease-album', params: { id: fpl.id } })
-      return
+      return { name: 'netease-album', params: { id: fpl.id } }
     case 'youtubeMusic': {
       const browseId = fpl.browseId || (fpl.playlistId ? `VL${fpl.playlistId}` : '')
       if (browseId) {
-        router.push({ name: 'youtube-playlist', params: { browseId } })
-        return
+        return { name: 'youtube-playlist', params: { browseId } }
       }
       break
     }
@@ -653,13 +656,35 @@ function openFavorite(fpl: FavoritePlaylist) {
         name: fpl.name, coverUrl: fpl.coverUrl, trackCount: fpl.trackCount, uploader: fpl.subtitle,
       })
       if (target) {
-        router.push(target)
-        return
+        return target
       }
       break
     }
   }
-  router.push({ name: 'favorite-playlist', params: { id: fpl.id } })
+  return { name: 'favorite-playlist', params: { id: fpl.id } }
+}
+
+function openFavoriteMenu(event: MouseEvent, fpl: FavoritePlaylist) {
+  const target = favoriteRoute(fpl)
+  if (!target) return
+  let webUrl: string | undefined
+  if (fpl.source === 'netease' || fpl.source === 'neteaseAlbum' || fpl.source === 'neteaseArtist') {
+    webUrl = collectionWebUrl('netease', fpl.source === 'neteaseAlbum' ? 'album' : fpl.source === 'neteaseArtist' ? 'artist' : 'playlist', fpl.id)
+  } else if (fpl.source === 'biliArtist') {
+    webUrl = collectionWebUrl('bilibili', 'artist', fpl.id)
+  } else if (fpl.source === 'youtubeMusicArtist') {
+    webUrl = collectionWebUrl('youtube', 'artist', fpl.browseId)
+  } else if (fpl.source === 'youtubeMusic') {
+    webUrl = collectionWebUrl('youtube', 'playlist', fpl.playlistId || fpl.browseId)
+  } else if (fpl.source === 'bili') {
+    const reference = parseBiliPlaylistReference(fpl.browseId)
+    if (reference && ['COLLECTION', 'SERIES'].includes(reference.kind)) {
+      if (/^[1-9]\d*$/.test(reference.mid) && /^[1-9]\d*$/.test(fpl.id)) {
+        webUrl = `https://space.bilibili.com/${reference.mid}/lists/${fpl.id}?type=${reference.kind === 'SERIES' ? 'series' : 'season'}`
+      }
+    } else webUrl = collectionWebUrl('bilibili', 'playlist', fpl.id)
+  }
+  collectionMenuRef.value?.open(event, { route: target, webUrl })
 }
 
 async function loadFavorites() {
@@ -926,6 +951,7 @@ onUnmounted(() => {
             role="button"
             tabindex="0"
             @click="openLocalArtist(artist)"
+            @contextmenu="collectionMenuRef?.open($event, { route: { name: 'local-artist', params: { name: artist.name } } })"
             @keydown.enter="openLocalArtist(artist)"
             @keydown.space.prevent="openLocalArtist(artist)"
           >
@@ -1130,6 +1156,7 @@ onUnmounted(() => {
           role="button"
           tabindex="0"
           @click="openFavorite(fpl)"
+          @contextmenu="openFavoriteMenu($event, fpl)"
           @keydown.enter="openFavorite(fpl)"
           @keydown.space.prevent="openFavorite(fpl)"
         >
@@ -1204,6 +1231,7 @@ onUnmounted(() => {
             :key="album.id"
             class="playlist-item"
             @click="router.push({ name: 'netease-album', params: { id: album.id } })"
+            @contextmenu="collectionMenuRef?.open($event, { route: { name: 'netease-album', params: { id: album.id } }, webUrl: collectionWebUrl('netease', 'album', album.id) })"
           >
             <div class="pl-icon" :class="{ 'has-cover': album.coverUrl && !isLibraryCoverFailed('netease-album', album.id, album.coverUrl) }">
               <img
@@ -1255,6 +1283,7 @@ onUnmounted(() => {
           :key="'ne-' + npl.id"
           class="playlist-item"
           @click="router.push({ name: 'netease-playlist', params: { id: npl.id } })"
+          @contextmenu="collectionMenuRef?.open($event, { route: { name: 'netease-playlist', params: { id: npl.id } }, webUrl: collectionWebUrl('netease', 'playlist', npl.id) })"
         >
           <div class="pl-icon netease">
             <img
@@ -1320,6 +1349,7 @@ onUnmounted(() => {
           :key="'bili-' + bpl.id"
           class="playlist-item"
           @click="router.push({ name: 'bili-playlist', params: { mediaId: bpl.id } })"
+          @contextmenu="collectionMenuRef?.open($event, { route: { name: 'bili-playlist', params: { mediaId: bpl.id } }, webUrl: collectionWebUrl('bilibili', 'playlist', bpl.id) })"
         >
           <div class="pl-icon bilibili" :class="{ 'has-cover': bpl.coverUrl }">
             <BilibiliCoverImage v-if="bpl.coverUrl" :src="bpl.coverUrl" class="pl-cover-img">
@@ -1380,6 +1410,7 @@ onUnmounted(() => {
           :key="'yt-' + ypl.id"
           class="playlist-item"
           @click="router.push({ name: 'youtube-playlist', params: { browseId: ypl.id } })"
+          @contextmenu="collectionMenuRef?.open($event, { route: { name: 'youtube-playlist', params: { browseId: ypl.id } }, webUrl: collectionWebUrl('youtube', 'playlist', ypl.id) })"
         >
           <div class="pl-icon youtube" :class="{ 'has-cover': ypl.coverUrl && !isLibraryCoverFailed('youtube', ypl.id, ypl.coverUrl) }">
             <img
@@ -1449,6 +1480,7 @@ onUnmounted(() => {
       @update:open="contextMenu.show = $event"
       @click="handlePlaylistMenuClick"
     />
+    <CollectionContextMenu ref="collectionMenuRef" />
 
     <!-- 删除确认对话框 -->
     <M3Dialog
