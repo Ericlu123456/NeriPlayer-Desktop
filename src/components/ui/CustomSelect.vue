@@ -310,11 +310,11 @@ watch(() => props.options.map(option => option.value), (values, previous) => {
 </style>
 
 <style lang="scss">
-/* 全局样式（Teleport 到 body 的菜单） */
+/* 全局样式（Teleport 到 body 的菜单）；要压过「更多」面板（9000）、设置对话框（10000）等遮罩 */
 .custom-select-menu {
   box-sizing: border-box;
   position: fixed;
-  z-index: 500;
+  z-index: 10050;
   background: var(--md-surface-container-high);
   border: 1px solid var(--md-outline-variant);
   border-radius: var(--radius-md);
