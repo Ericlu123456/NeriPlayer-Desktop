@@ -868,8 +868,8 @@ fn load_local_sidecar_lyrics(audio_path: &str) -> Option<Vec<LyricLine>> {
 fn load_embedded_lyrics(audio_path: &Path) -> Option<Vec<LyricLine>> {
     use lofty::file::TaggedFileExt;
     use lofty::tag::{ItemKey, TagType};
-    // 按内容认格式，扩展名写错的文件（FLAC 存成 .mp3）也能读到内嵌歌词
-    let tagged = lofty::probe::Probe::open(audio_path).ok()?.guess_file_type().ok()?.read().ok()?;
+    // 按内容认格式，扩展名写错的文件（FLAC 存成 .mp3）、带残缺 APE 标签的 MP3 也能读到内嵌歌词
+    let tagged = crate::library::scanner::read_tagged_file(audio_path).ok()?;
     let tag = tagged.primary_tag().or_else(|| tagged.first_tag())?;
     let custom = |name: &str| {
         let key = if tag.tag_type() == TagType::Mp4Ilst { format!("----:com.apple.iTunes:{name}") } else { name.to_string() };

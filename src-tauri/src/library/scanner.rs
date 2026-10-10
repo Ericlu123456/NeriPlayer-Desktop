@@ -255,25 +255,70 @@ pub fn is_image_path(path: &Path) -> bool {
         .is_some_and(|ext| IMAGE_EXTENSIONS.contains(&ext.to_ascii_lowercase().as_str()))
 }
 
+/// 只在读标签失败、需要整文件读进内存绕开 APE 标签时用；更大的文件直接报原错误
+const APE_FALLBACK_MAX_BYTES: u64 = 512 * 1024 * 1024;
+const APE_PREAMBLE: &[u8; 8] = b"APETAGEX";
+
+fn is_ape_tag_error(error: &lofty::error::LoftyError) -> bool {
+    matches!(
+        error.kind(),
+        lofty::error::ErrorKind::FileDecoding(decoding)
+            if decoding.format() == Some(lofty::file::FileType::Ape)
+    )
+}
+
+/// 抹掉内存副本里的 APE 标识再解析：lofty 遇到键不合规的 APE 项（常见于旧工具写的 GBK 中文键）
+/// 会让整个文件读失败，而 MP3 的歌名、封面本来就在 ID3v2 里
+fn read_ignoring_ape_tags(path: &Path) -> lofty::error::Result<lofty::file::TaggedFile> {
+    use lofty::probe::Probe;
+
+    let file_type = Probe::open(path)?.guess_file_type()?.file_type();
+    if std::fs::metadata(path)?.len() > APE_FALLBACK_MAX_BYTES {
+        return Err(std::io::Error::other("file too large for the APE tag fallback").into());
+    }
+    let mut bytes = std::fs::read(path)?;
+    let mut index = 0;
+    while let Some(offset) = bytes[index..].windows(APE_PREAMBLE.len()).position(|window| window == APE_PREAMBLE) {
+        bytes[index + offset] = 0;
+        index += offset + APE_PREAMBLE.len();
+    }
+    let mut probe = Probe::new(std::io::Cursor::new(bytes)).guess_file_type()?;
+    if probe.file_type().is_none() {
+        if let Some(file_type) = file_type {
+            probe = probe.set_file_type(file_type);
+        }
+    }
+    probe.read()
+}
+
+/// 按文件内容认格式读标签与时长：旧版下载把 FLAC 存成了 .mp3，按扩展名当 MP3 解析会跳过或算出几小时的时长
+pub(crate) fn read_tagged_file(path: &Path) -> AppResult<lofty::file::TaggedFile> {
+    use lofty::probe::Probe;
+
+    let read = || Probe::open(path)?.guess_file_type()?.read();
+    match read() {
+        Ok(tagged) => Ok(tagged),
+        Err(error) if is_ape_tag_error(&error) => read_ignoring_ape_tags(path).map_err(|fallback| {
+            log::warn!(target: "scanner", "APE tag fallback failed for {}: {fallback}", path.display());
+            crate::error::AppError::Metadata(error.to_string())
+        }),
+        Err(error) => Err(crate::error::AppError::Metadata(error.to_string())),
+    }
+}
+
 fn read_track_info(
     path: &Path,
     name_template: Option<&str>,
     cover_cache: &mut CoverLookupCache,
 ) -> AppResult<TrackInfo> {
     use lofty::prelude::*;
-    use lofty::probe::Probe;
 
     let managed = crate::commands::download_cmd::metadata::read_metadata(path);
     if managed.as_ref().is_some_and(|metadata| metadata.download_finalized == Some(false)) {
         return Err(crate::error::AppError::Metadata("下载尚未完成".into()));
     }
 
-    // 按文件内容认格式：旧版下载把 FLAC 存成了 .mp3，按扩展名当 MP3 解析会跳过或算出几小时的时长
-    let tagged = Probe::open(path)
-        .map_err(|e| crate::error::AppError::Metadata(e.to_string()))?
-        .guess_file_type()?
-        .read()
-        .map_err(|e| crate::error::AppError::Metadata(e.to_string()))?;
+    let tagged = read_tagged_file(path)?;
     let properties = tagged.properties();
     let duration_ms = properties.duration().as_millis() as u64;
 
@@ -716,6 +761,57 @@ mod tests {
         assert!(result.skipped.is_empty(), "{:?}", result.skipped.iter().map(|s| &s.reason).collect::<Vec<_>>());
         assert_eq!(result.tracks.len(), 1);
         assert!((450..=550).contains(&result.tracks[0].duration_ms), "{}", result.tracks[0].duration_ms);
+    }
+
+    /// APEv1 尾标签，项的键可以是任意字节（lofty 只接受 0x20..=0x7E）
+    fn ape_footer_tag(items: &[(&[u8], &[u8])]) -> Vec<u8> {
+        let mut body = Vec::new();
+        for (key, value) in items {
+            body.extend_from_slice(&(value.len() as u32).to_le_bytes());
+            body.extend_from_slice(&0u32.to_le_bytes());
+            body.extend_from_slice(key);
+            body.push(0);
+            body.extend_from_slice(value);
+        }
+        let mut tag = body.clone();
+        tag.extend_from_slice(b"APETAGEX");
+        tag.extend_from_slice(&1000u32.to_le_bytes());
+        tag.extend_from_slice(&((body.len() + 32) as u32).to_le_bytes());
+        tag.extend_from_slice(&(items.len() as u32).to_le_bytes());
+        tag.extend_from_slice(&0u32.to_le_bytes());
+        tag.extend_from_slice(&[0; 8]);
+        tag
+    }
+
+    /// 回归：MP3 尾部带中文键（UTF-8 或 GBK）的 APE 标签时整首被跳过，报 "APE tag item key contains invalid characters"
+    #[test]
+    fn mp3_with_a_broken_ape_tag_keeps_its_id3v2_tags() {
+        use lofty::config::WriteOptions;
+        use lofty::prelude::*;
+        use lofty::tag::{Tag, TagType};
+
+        let root = tempfile::tempdir().unwrap();
+        for (name, key) in [("utf8 key - 歌.mp3", "歌手".as_bytes()), ("gbk_key-歌.mp3", &[0xB8, 0xE8, 0xCA, 0xD6][..])] {
+            let audio = root.path().join(name);
+            std::fs::write(&audio, include_bytes!("../audio/fixtures/ffmpeg/mp3-stereo-1s.mp3")).unwrap();
+            let mut tag = Tag::new(TagType::Id3v2);
+            tag.set_title("带 APE 的歌".into());
+            tag.set_artist("本兮".into());
+            tag.save_to_path(&audio, WriteOptions::default()).unwrap();
+            let mut bytes = std::fs::read(&audio).unwrap();
+            bytes.extend(ape_footer_tag(&[(key, b"x"), (b"Title", b"APE")]));
+            std::fs::write(&audio, bytes).unwrap();
+            assert!(lofty::probe::Probe::open(&audio).unwrap().guess_file_type().unwrap().read().is_err());
+        }
+
+        let result = scan_directory(root.path().to_str().unwrap(), None).unwrap();
+        assert!(result.skipped.is_empty(), "{:?}", result.skipped.iter().map(|s| &s.reason).collect::<Vec<_>>());
+        assert_eq!(result.tracks.len(), 2);
+        for track in &result.tracks {
+            assert_eq!(track.title, "带 APE 的歌");
+            assert_eq!(track.artist, "本兮");
+            assert!((900..=1200).contains(&track.duration_ms), "{}", track.duration_ms);
+        }
     }
 
     #[test]
