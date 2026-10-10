@@ -1,31 +1,11 @@
 import { ref, watch, type Ref, type WatchStopHandle } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
-import { usePlayerStore, type LyricLine, type TrackInfo } from '@/stores/player'
+import { usePlayerStore } from '@/stores/player'
 import { useSettingsStore } from '@/stores/settings'
 import { useLyricOffsetStore } from '@/stores/lyricOffset'
-import { readSyncedLyricSource } from '@/modules/lyrics/lyricOffset'
-import {
-  fetchAutomaticLyrics,
-  fetchNeteaseRomanization,
-  fetchPreferredSourceLyrics,
-  fetchWordTimedLyrics,
-  preferredLyricMatchSource,
-} from '@/modules/lyrics/lyricsFetch'
-import { rememberLyricSource } from '@/modules/lyrics/lyricSource'
-import { getCachedLyrics, saveCachedLyrics } from '@/modules/lyrics/lyricsCache'
-import { loadLyricsSingleFlight, hasWordTimedLyrics } from '@/modules/lyrics/lyricsRequest'
-import {
-  mapBackendLyrics,
-  materializeStoredLyrics,
-  mergeParsedLyricsWithRomanization,
-  mergeWordTimedLyricsWithBaseline,
-  resolveKnownNeteaseLyricSongId,
-  resolveStoredLyricStateFromPayload,
-  shouldBackfillNeteaseRomanization,
-} from '@/modules/lyrics/lyricsFormat'
+import { useCurrentLyricsStore } from '@/stores/currentLyrics'
 import { buildDesktopLyricsFrame, desktopLyricsLineIndex, type DesktopLyricsFrame } from './frame'
-import { createDesktopLyricsLoader } from './loader'
 import {
   nextDesktopLyricsLayout,
   normalizeDesktopLyricsStyle,
@@ -47,23 +27,6 @@ export const desktopLyricsOpen: Ref<boolean> = ref(false)
 const DRIFT_TOLERANCE_MS = 80
 /** 没有变化时也定期刷新锚点，抵消两边插值的累计误差 */
 const ANCHOR_REFRESH_MS = 3_000
-
-async function materialize(track: TrackInfo): Promise<LyricLine[] | null> {
-  const lines = await materializeStoredLyrics(
-    track.syncPayload,
-    async (content, part) => mapBackendLyrics(await invoke<any[]>('parse_lrc_content', part === 'original'
-      ? { content, title: track.title, artist: track.artist }
-      : { content })),
-    error => log.warn('stored translation or romanization not parsed:', summarizeLogError(error)),
-  )
-  if (lines?.length) rememberLyricSource(track, readSyncedLyricSource(track.syncPayload))
-  return lines
-}
-
-function source(track: TrackInfo | null): string {
-  const prefix = track?.id.split(':', 1)[0]
-  return prefix === 'netease' || prefix === 'qq' || prefix === 'bilibili' || prefix === 'youtube' ? prefix : 'local'
-}
 
 /** 应用主题色（开了动态取色时就是封面色），「跟随主题色」用 */
 function readAccent(): string | null {
@@ -90,13 +53,14 @@ export function installDesktopLyricsBridge(options: DesktopLyricsBridgeOptions =
   const player = usePlayerStore()
   const settings = useSettingsStore()
   const offsets = useLyricOffsetStore()
-  const lines = ref<LyricLine[]>([])
+  // 与正在播放页同一份歌词：来源、时间轴、默认偏移都一致
+  const lyrics = useCurrentLyricsStore()
   let active = false
   let disposed = false
   let timer: ReturnType<typeof setInterval> | null = null
-  let stopTrack: WatchStopHandle | null = null
+  let stopLines: WatchStopHandle | null = null
   let stopLock: WatchStopHandle | null = null
-  let loader: ReturnType<typeof createDesktopLyricsLoader> | null = null
+  let releaseLyrics: (() => void) | null = null
   let pending: { sessionId: string; frame: DesktopLyricsFrame } | null = null
   let sessionId = ''
   let windowReady = false
@@ -145,22 +109,6 @@ export function installDesktopLyricsBridge(options: DesktopLyricsBridgeOptions =
     }
   }
 
-  // 同步载荷里的歌词没带音译时，和播放页一样去网易云补上（音译模式下桌面歌词才有第二行）
-  async function backfillRomanization(track: TrackInfo, synced: LyricLine[]) {
-    if (!shouldBackfillNeteaseRomanization(track.syncPayload, synced)) return
-    try {
-      const text = await fetchNeteaseRomanization(track, resolveKnownNeteaseLyricSongId(track))
-      if (!text) return
-      const roman = mapBackendLyrics(await invoke<any[]>('parse_lrc_content', { content: text }))
-      const current = lines.value
-      if (!active || player.currentTrack?.id !== track.id || current.length !== synced.length || current.some(line => line.roman)) return
-      lines.value = mergeParsedLyricsWithRomanization(current, roman)
-      publish(true)
-    } catch (error) {
-      log.warn('romanization backfill unavailable:', summarizeLogError(error))
-    }
-  }
-
   /**
    * 歌词窗口按锚点自己插值，这里只在需要时发帧：换行、换歌、暂停/播放、倍速、偏移、外观变化，
    * 估算位置与实际相差超过 80 ms（seek、缓冲），或距上次超过 3 秒
@@ -176,7 +124,7 @@ export function installDesktopLyricsBridge(options: DesktopLyricsBridgeOptions =
     const currentStyle = style()
     const styleKey = JSON.stringify(currentStyle)
     const accent = currentStyle.theme === 'accent' ? readAccent() : null
-    const index = desktopLyricsLineIndex(lines.value, positionMs, offset)
+    const index = desktopLyricsLineIndex(lyrics.lines, positionMs, offset)
     const trackId = track?.id ?? ''
     const anchor: PlaybackAnchor = { positionMs, anchorAt: now, rate, isPlaying: player.isPlaying }
     const previous = published
@@ -195,7 +143,7 @@ export function installDesktopLyricsBridge(options: DesktopLyricsBridgeOptions =
     published = { trackId, index, offset, styleKey, accent, anchor }
     pending = { sessionId, frame: buildDesktopLyricsFrame({
       track,
-      lines: lines.value,
+      lines: lyrics.lines,
       positionMs,
       lyricOffsetMs: offset,
       isPlaying: anchor.isPlaying,
@@ -254,15 +202,14 @@ export function installDesktopLyricsBridge(options: DesktopLyricsBridgeOptions =
     desktopLyricsOpen.value = false
     pending = null
     published = null
-    stopTrack?.()
-    stopTrack = null
+    stopLines?.()
+    stopLines = null
     stopLock?.()
     stopLock = null
     if (timer) clearInterval(timer)
     timer = null
-    loader?.dispose()
-    loader = null
-    lines.value = []
+    releaseLyrics?.()
+    releaseLyrics = null
     lastSent = ''
   }
 
@@ -290,48 +237,8 @@ export function installDesktopLyricsBridge(options: DesktopLyricsBridgeOptions =
     active = true
     sessionId = crypto.randomUUID()
     loggedFailure = false
-    loader = createDesktopLyricsLoader({
-      materialize: async track => {
-        const synced = await materialize(track)
-        if (synced?.length) void backfillRomanization(track, synced)
-        return synced
-      },
-      mergeUpgrade: mergeWordTimedLyricsWithBaseline,
-      cached: getCachedLyrics,
-      cache: saveCachedLyrics,
-      onChange: value => { lines.value = value; publish(true) },
-      fetch: async track => {
-        const preferredSource = preferredLyricMatchSource(source(track) === 'local' ? null : source(track), settings.defaultLyricSource)
-        if (preferredSource) {
-          const preferred = await fetchPreferredSourceLyrics(track, preferredSource, settings.preferWordTimedLyrics)
-            .catch(error => { log.warn('preferred lyric source unavailable:', summarizeLogError(error)); return null })
-          if (preferred) {
-            rememberLyricSource(track, preferred.source)
-            return preferred.lines
-          }
-        }
-        const fetched = await loadLyricsSingleFlight(track, () => fetchAutomaticLyrics(
-          track, source(track), settings.preferWordTimedLyrics,
-        ))
-        if (fetched.lines.length) rememberLyricSource(track, fetched.source)
-        return fetched.lines
-      },
-      canUpgrade: (track, baseline) => settings.preferWordTimedLyrics && settings.defaultLyricSource === 'automatic'
-        && source(track) !== 'local'
-        && !hasWordTimedLyrics(baseline) && resolveStoredLyricStateFromPayload(track.syncPayload).kind === 'absent',
-      upgrade: async track => {
-        const fetched = await loadLyricsSingleFlight(track, () => fetchWordTimedLyrics({
-          title: track.title, artist: track.artist, durationMs: track.durationMs || 0,
-        }), 'word-timed')
-        return hasWordTimedLyrics(fetched.lines) ? fetched : { source: null, lines: [] }
-      },
-      adoptSource: rememberLyricSource,
-    })
-    stopTrack = watch(
-      [() => player.currentTrack, () => player.lyrics, () => settings.preferWordTimedLyrics, () => settings.defaultLyricSource],
-      () => { void loader?.load(player.currentTrack, player.lyrics) },
-      { deep: true, immediate: true },
-    )
+    releaseLyrics = lyrics.acquire()
+    stopLines = watch(() => lyrics.lines, () => publish(true))
     stopLock = watch(() => style().locked, () => applyLock())
     timer = setInterval(() => publish(), 150)
     publish()

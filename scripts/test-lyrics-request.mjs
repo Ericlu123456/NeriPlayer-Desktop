@@ -73,18 +73,19 @@ await assert.rejects(
 )
 await loadLyricsSingleFlight({ ...track, id: 'netease:failed' }, async () => [])
 
-const nowPlayingSource = await readFile(
-  new URL('../src/components/NowPlaying.vue', import.meta.url),
+// 正在播放页与桌面歌词共用的当前歌词
+const currentLyricsSource = await readFile(
+  new URL('../src/stores/currentLyrics.ts', import.meta.url),
   'utf8',
 )
 assert.match(
-  nowPlayingSource,
+  currentLyricsSource,
   /await loadLyricsSingleFlight\(track/,
-  'NowPlaying must share an in-flight lyric request across component remounts',
+  'current lyrics must share an in-flight lyric request with prefetch and remounts',
 )
 assert.match(
-  nowPlayingSource,
-  /const restored = await readCachedLyrics\(track\)\s+if \(requestId === lyricFetchRequestId\) \{\s+fetchedLyrics\.value = restored \|\| cachedLyrics \|\| \[\]/,
+  currentLyricsSource,
+  /const restored = await getCachedLyrics\(track\)\s+if \(id === request\) lines\.value = restored \|\| cached \|\| \[\]/,
   'a failed refresh must restore the latest cached lyrics',
 )
 

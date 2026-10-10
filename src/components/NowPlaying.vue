@@ -22,8 +22,7 @@ import {
   peekCoverImage,
   resolveCoverImage,
 } from '@/utils/bilibiliCover'
-import { clearCachedLyrics, getCachedLyrics, saveCachedLyrics } from '@/modules/lyrics/lyricsCache'
-import { hasLyricsRequestInFlight, hasWordTimedLyrics, loadLyricsSingleFlight } from '@/modules/lyrics/lyricsRequest'
+import { clearCachedLyrics, saveCachedLyrics } from '@/modules/lyrics/lyricsCache'
 import {
   toEditableLyricsText,
   toEditableTranslationText,
@@ -31,14 +30,11 @@ import {
   resolveStoredLyricStateFromPayload,
   resolveStoredTranslatedLyricStateFromPayload,
   resolveStoredRomanizedLyricStateFromPayload,
-  materializeStoredLyrics,
   withUpdatedLyricsPayload,
   mapBackendLyrics as mapBackendLyricsShared,
   mergeParsedLyricsWithTranslations,
   mergeParsedLyricsWithRomanization,
-  mergeWordTimedLyricsWithBaseline,
   resolveKnownNeteaseLyricSongId,
-  shouldBackfillNeteaseRomanization,
 } from '@/modules/lyrics/lyricsFormat'
 import { lyricMatchSourceTag, type LyricMatchResult } from '@/modules/lyrics/lyricMatch'
 import {
@@ -46,17 +42,12 @@ import {
   MAX_LYRIC_DEFAULT_OFFSET_MS,
   MIN_LYRIC_DEFAULT_OFFSET_MS,
   LYRIC_OFFSET_STEP_MS,
-  normalizeLyricSource,
-  readSyncedLyricSource,
 } from '@/modules/lyrics/lyricOffset'
 import {
-  fetchAutomaticLyrics,
   fetchLyrics,
   fetchNeteaseRomanization,
-  fetchPreferredSourceLyrics,
-  fetchWordTimedLyrics,
-  preferredLyricMatchSource,
 } from '@/modules/lyrics/lyricsFetch'
+import { useCurrentLyricsStore } from '@/stores/currentLyrics'
 import { lyricSourceOf, rememberLyricSource } from '@/modules/lyrics/lyricSource'
 import { isEditableTarget, isMacPlatform } from '@/modules/shortcuts/platform'
 import {
@@ -202,31 +193,6 @@ function mapBackendLyrics(lyrics: any[]): LyricLine[] {
   return mapBackendLyricsShared(lyrics)
 }
 
-function readCachedLyrics(track: TrackInfo) {
-  return getCachedLyrics(track)
-}
-
-// 同步歌词落地: 将云同步下来的 matched/original 歌词解析为本地歌词行
-// 仅读取 syncPayload, 不在读取路径回写云端
-// 返回 null 表示无本地覆盖 (可在线拉取); [] 表示有意清空或解析失败
-async function materializeSyncedLyrics(track: TrackInfo): Promise<LyricLine[] | null> {
-  const payload = track.syncPayload
-  try {
-    const lines = await materializeStoredLyrics(
-      payload,
-      async (content, part) => mapBackendLyrics(await invoke<any[]>('parse_lrc_content', part === 'original'
-        ? { content, title: track.title, artist: track.artist }
-        : { content })),
-      error => log.warn('Parse synced translation or romanization failed:', error),
-    )
-    if (lines?.length) rememberLyricSource(track, readSyncedLyricSource(payload))
-    return lines
-  } catch (e) {
-    log.warn('Materialize synced lyrics failed:', e)
-    return []
-  }
-}
-
 function cacheLyricsForTrack(track: TrackInfo | null | undefined, lines: LyricLine[]) {
   if (!track || lines.length === 0) return
   void saveCachedLyrics(track, lines)
@@ -345,7 +311,7 @@ async function applyLyricsFromEditor() {
   const romanizationText = lyricsRomanizationEditorText.value.trim()
   if (!text) {
     // 清除歌词: 本地 cache + syncPayload matched* 置空 (CURRENT 版本会同步清空)
-    fetchedLyrics.value = []
+    currentLyrics.replace([])
     removeCachedLyricsForCurrentTrack()
     await commitLyricsToTrack(null, null, 'LOCAL_EDIT', null)
     toast.success(t('player.lyrics_cleared'))
@@ -363,8 +329,8 @@ async function applyLyricsFromEditor() {
       await parseOptionalLyricTrack(romanizationText, 'romanization'),
     )
     const source = lyricsEditorSource.value ?? 'LOCAL_EDIT'
-    fetchedLyrics.value = nextLyrics
     rememberLyricSource(player.currentTrack, source)
+    currentLyrics.replace(nextLyrics)
     cacheLyricsForTrack(player.currentTrack, nextLyrics)
     // 原文保留编辑器文本(YRC/LRC), 与 Android toEditableLyricsText 往返一致
     const romanizedForCommit = romanizationText
@@ -410,8 +376,8 @@ async function onLyricMatchPicked(result: LyricMatchResult) {
     return
   }
   try {
-    fetchedLyrics.value = result.lines
     rememberLyricSource(player.currentTrack, source)
+    currentLyrics.replace(result.lines)
     cacheLyricsForTrack(player.currentTrack, result.lines)
     // 换了一份歌词：候选没有音译时清掉旧音译，免得挂到新歌词上
     await commitLyricsToTrack(lyricText, translationText || null, source, romanizationText || null)
@@ -468,8 +434,11 @@ async function parseLyricsFromSearchResult(result: any): Promise<{
   return null
 }
 
-const fetchedLyrics = ref<LyricLine[]>([])
-const isFetchingLyrics = ref(false)
+// 与桌面歌词共用同一份当前歌词
+const currentLyrics = useCurrentLyricsStore()
+const releaseCurrentLyrics = currentLyrics.acquire()
+onUnmounted(releaseCurrentLyrics)
+const isFetchingLyrics = computed(() => currentLyrics.loading)
 
 // 歌词拖动预览状态
 const previewPositionMs = ref<number | null>(null)
@@ -897,205 +866,6 @@ watch(nowPlayingTrackKey, () => {
   }, 560)
 })
 
-let lyricFetchRequestId = 0
-onUnmounted(() => { lyricFetchRequestId++ })
-/** 只补了音译的歌词 → 补之前那份；逐字升级据此认出「歌词没被换过」 */
-const romanizationBackfilledFrom = new WeakMap<object, LyricLine[]>()
-
-function upgradeWordTimedLyrics(track: TrackInfo, requestId: number) {
-  const baseline = fetchedLyrics.value
-  if (!settings.preferWordTimedLyrics || !getPlaybackSourceKind(track) || hasWordTimedLyrics(baseline)) return
-  if (resolveStoredLyricStateFromPayload(track.syncPayload).kind !== 'absent') return
-  const identity = JSON.stringify([track.id, track.title, track.artist, track.durationMs])
-  void loadLyricsSingleFlight(track, () => fetchWordTimedLyrics({
-    title: track.title, artist: track.artist, durationMs: track.durationMs || 0,
-  }), 'word-timed').then(({ lines, source }) => {
-    const current = player.currentTrack
-    if (!current || requestId !== lyricFetchRequestId || !settings.preferWordTimedLyrics) return
-    if (identity !== JSON.stringify([current.id, current.title, current.artist, current.durationMs])) return
-    const shown = fetchedLyrics.value
-    const unchanged = shown === baseline || romanizationBackfilledFrom.get(shown) === baseline
-    if (!unchanged || !hasWordTimedLyrics(lines)) return
-    if (resolveStoredLyricStateFromPayload(current.syncPayload).kind !== 'absent') return
-    const merged = mergeWordTimedLyricsWithBaseline(shown, lines)
-    fetchedLyrics.value = merged
-    // 逐字时间轴来自 AMLL TTML / 酷狗，偏移按它们的默认算
-    rememberLyricSource(current, source)
-    cacheLyricsForTrack(current, merged)
-  }).catch(error => log.warn('word timed lyric upgrade unavailable:', summarizeLogError(error)))
-}
-
-// 歌词没带音译时（同步载荷、旧缓存、非网易云来源），后台从网易云补上（显示与编辑器音译页都靠它）
-function backfillNeteaseRomanization(track: TrackInfo, requestId: number) {
-  if (!shouldBackfillNeteaseRomanization(track.syncPayload, fetchedLyrics.value)) return
-  // 等待期间逐字升级可能已换上新时间轴，音译并到届时显示的那份上
-  const stillWanted = () => requestId === lyricFetchRequestId && player.currentTrack?.id === track.id
-    && shouldBackfillNeteaseRomanization(player.currentTrack?.syncPayload, fetchedLyrics.value)
-  const songId = resolveKnownNeteaseLyricSongId(track)
-  void fetchNeteaseRomanization(track, songId).then(async (text) => {
-    if (!text) {
-      log.info('romanization backfill: none found', { trackId: track.id, songId })
-      return
-    }
-    if (!stillWanted()) return
-    const roman = mapBackendLyrics(await invoke<any[]>('parse_lrc_content', { content: text }))
-    if (!stillWanted()) return
-    const shown = fetchedLyrics.value
-    const merged = mergeParsedLyricsWithRomanization(shown, roman)
-    if (!merged.some(line => line.roman)) {
-      log.info('romanization backfill: no line matched', { trackId: track.id, romanLines: roman.length })
-      return
-    }
-    fetchedLyrics.value = merged
-    romanizationBackfilledFrom.set(fetchedLyrics.value, romanizationBackfilledFrom.get(shown) ?? shown)
-    cacheLyricsForTrack(track, merged)
-  }).catch(error => log.warn('netease romanization backfill unavailable:', summarizeLogError(error)))
-}
-
-// 当曲目切换时自动获取歌词
-watch(nowPlayingTrackKey, async (trackKey) => {
-  const requestId = ++lyricFetchRequestId
-  const track = player.currentTrack
-  if (trackKey === 'empty' || !track) {
-    fetchedLyrics.value = []
-    isFetchingLyrics.value = false
-    log.info('lyrics cleared: no playback track')
-    return
-  }
-
-  // 换曲瞬间立即撤下旧词：此刻播放位置已归零而旧词还挂着，
-  // LyricsView 会判定大幅回跳、在旧词上硬跳回第一行——开播歌词
-  // 「有概率抽一下」就是这个窗口。缓存命中只需一次本地数据库读取，
-  // 随后赋回新词；在线获取则显示空态而不是旧词。
-  fetchedLyrics.value = []
-
-  const started = performance.now()
-  const cachedLyrics = await readCachedLyrics(track)
-  if (requestId !== lyricFetchRequestId) return
-  const reusedRequest = hasLyricsRequestInFlight(track)
-  fetchedLyrics.value = cachedLyrics || []
-  isFetchingLyrics.value = true
-  log.info('lyrics load begin:', {
-    requestId,
-    trackId: track.id,
-    cachedLines: cachedLyrics?.length || 0,
-    reusedRequest,
-  })
-  try {
-    // 同步歌词最优先(不触网, 不回写云端): Android 匹配的歌词经云同步落在 syncPayload,
-    // 必须压过本地旧缓存, 否则历史在线歌词会永久屏蔽同步歌词
-    // present -> 使用; cleared -> 空词并阻止在线回填; absent -> 缓存/在线
-    const syncedLyrics = await materializeSyncedLyrics(track)
-    if (requestId !== lyricFetchRequestId) return
-    if (syncedLyrics !== null) {
-      fetchedLyrics.value = syncedLyrics
-      if (syncedLyrics.length > 0) {
-        cacheLyricsForTrack(track, syncedLyrics)
-        backfillNeteaseRomanization(track, requestId)
-      }
-      log.info('lyrics from sync payload:', {
-        requestId,
-        trackId: track.id,
-        lines: syncedLyrics.length,
-        cleared: syncedLyrics.length === 0,
-      })
-      return
-    }
-
-    // 设了默认歌词源时先按它匹配（Android tryGetPreferredLyricSourceResult），缓存已是该来源就直接用
-    const preferredSource = preferredLyricMatchSource(getPlaybackSourceKind(track), settings.defaultLyricSource)
-    if (preferredSource && !(cachedLyrics?.length && normalizeLyricSource(lyricSourceOf(track)) === preferredSource)) {
-      const preferred = await fetchPreferredSourceLyrics(track, preferredSource, settings.preferWordTimedLyrics)
-        .catch(error => { log.warn('preferred lyric source unavailable:', summarizeLogError(error)); return null })
-      if (requestId !== lyricFetchRequestId) return
-      if (preferred) {
-        fetchedLyrics.value = preferred.lines
-        rememberLyricSource(track, preferred.source)
-        cacheLyricsForTrack(track, preferred.lines)
-        log.info('lyrics from preferred source:', { requestId, trackId: track.id, source: preferred.source })
-        backfillNeteaseRomanization(track, requestId)
-        return
-      }
-    }
-
-    // 先显示缓存，缺少逐字时间时再后台升级
-    if (cachedLyrics?.length) {
-      log.info('lyrics from local cache:', {
-        requestId,
-        trackId: track.id,
-        lines: cachedLyrics.length,
-      })
-      if (!preferredSource) upgradeWordTimedLyrics(track, requestId)
-      backfillNeteaseRomanization(track, requestId)
-      return
-    }
-
-    const { lines: nextLyrics } = await loadLyricsSingleFlight(track, async () => {
-      const invokeStarted = performance.now()
-      log.info('lyrics backend invoke:', { requestId, trackId: track.id })
-      const fetched = await fetchAutomaticLyrics(track, getPlaybackSourceKind(track), settings.preferWordTimedLyrics)
-      if (fetched.lines.length > 0) {
-        rememberLyricSource(track, fetched.source)
-        cacheLyricsForTrack(track, fetched.lines)
-      }
-      // 后端目前把明确无词与任一歌词源临时失败都归为 []，不能据此写负缓存。
-      // 否则一次网络/API 波动会让后续 24 小时都跳过在线歌词查询
-      log.info('lyrics backend returned:', {
-        requestId,
-        trackId: track.id,
-        source: fetched.source,
-        lines: fetched.lines.length,
-        elapsedMs: Math.round(performance.now() - invokeStarted),
-      })
-      return fetched
-    })
-
-    if (requestId !== lyricFetchRequestId) {
-      log.info('lyrics result ignored: stale request', {
-        requestId,
-        activeRequestId: lyricFetchRequestId,
-        trackId: track.id,
-        lines: nextLyrics.length,
-      })
-      return
-    }
-    fetchedLyrics.value = nextLyrics.length > 0 ? nextLyrics : []
-    upgradeWordTimedLyrics(track, requestId)
-    backfillNeteaseRomanization(track, requestId)
-    log.info('lyrics load committed:', {
-      requestId,
-      trackId: track.id,
-      lines: fetchedLyrics.value.length,
-      elapsedMs: Math.round(performance.now() - started),
-    })
-  } catch (e) {
-    log.error('Fetch lyrics failed:', {
-      requestId,
-      trackId: track.id,
-      elapsedMs: Math.round(performance.now() - started),
-      error: summarizeLogError(e),
-    })
-    const restored = await readCachedLyrics(track)
-    if (requestId === lyricFetchRequestId) {
-      fetchedLyrics.value = restored || cachedLyrics || []
-      log.info('lyrics cache restored after failure:', {
-        requestId,
-        trackId: track.id,
-        lines: fetchedLyrics.value.length,
-      })
-    }
-  } finally {
-    if (requestId === lyricFetchRequestId) {
-      isFetchingLyrics.value = false
-      log.info('lyrics load finished:', {
-        requestId,
-        trackId: track.id,
-        elapsedMs: Math.round(performance.now() - started),
-      })
-    }
-  }
-}, { immediate: true })
-
 // 唱片旋转（JS 驱动，停止时保持角度 + 缓动）
 const discRef = ref<HTMLDivElement>()
 let discAngle = 0            // 当前累计角度（度）
@@ -1333,11 +1103,7 @@ async function saveCoverArt() {
   }
 }
 
-const displayLyrics = computed(() => {
-  if (player.lyrics.length) return player.lyrics
-  if (fetchedLyrics.value.length) return fetchedLyrics.value
-  return []
-})
+const displayLyrics = computed(() => currentLyrics.lines)
 
 // 更多选项面板子视图
 const moreSheetView = ref<
@@ -1469,8 +1235,8 @@ async function confirmApplySearchResult() {
       const source = lyricSourceForPlatform(result.source || result.platform)
       const direct = await parseLyricsFromSearchResult(result)
       if (direct && direct.lines.length > 0) {
-        fetchedLyrics.value = direct.lines
         rememberLyricSource(player.currentTrack, source)
+        currentLyrics.replace(direct.lines)
         cacheLyricsForTrack(player.currentTrack, direct.lines)
         await commitLyricsToTrack(direct.rawLyric, direct.rawTranslated, source)
       } else {
@@ -1488,9 +1254,9 @@ async function confirmApplySearchResult() {
         })
         if (fetched.lines.length) {
           const nextLyrics = fetched.lines
-          fetchedLyrics.value = nextLyrics
           const actualSource = fetched.source ? lyricSourceForPlatform(fetched.source) : source
           rememberLyricSource(player.currentTrack, actualSource)
+          currentLyrics.replace(nextLyrics)
           cacheLyricsForTrack(player.currentTrack, nextLyrics)
           // 兜底在线歌词同样写回 syncPayload, 否则不同步且重启即丢
           await commitLyricsToTrack(
@@ -1621,9 +1387,9 @@ const currentLyricDefaultOffsetMs = computed(() =>
 // 逐曲 delta：只用来判断这首歌是否单独调过
 const currentLyricUserOffsetMs = computed(() => lyricOffsetStore.getUserOffsetMs(player.currentTrack))
 
-// 有效偏移（绝对值）：歌词渲染用它，偏移面板显示和编辑的也是它
+// 有效偏移（绝对值）：歌词渲染用它，偏移面板显示和编辑的也是它；与桌面歌词同一个算法
 const currentLyricTotalOffsetMs = computed<number>({
-  get: () => currentLyricDefaultOffsetMs.value + currentLyricUserOffsetMs.value,
+  get: () => lyricOffsetStore.effectiveOffsetMs(player.currentTrack),
   set: value => lyricOffsetStore.setEffectiveOffsetMs(player.currentTrack, value),
 })
 

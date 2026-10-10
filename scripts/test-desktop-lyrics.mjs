@@ -27,8 +27,6 @@ const styleModule = await loadModule('../src/modules/desktopLyrics/style.ts')
 const timelineModule = await loadModule('../src/modules/desktopLyrics/timeline.ts')
 const frameModule = await loadModule('../src/modules/desktopLyrics/frame.ts', { './style': styleModule, './timeline': timelineModule })
 const { buildDesktopLyricsFrame } = frameModule
-const { createDesktopLyricsLoader } = await loadModule('../src/modules/desktopLyrics/loader.ts')
-const { mergeWordTimedLyricsWithBaseline } = await loadModule('../src/modules/lyrics/lyricsFormat.ts')
 const track = { id: 'netease:123', title: '互通', artist: '歌手', durationMs: 5000 }
 const lines = [
   { startMs: 1000, durationMs: 1000, text: '第一行', translation: 'first', words: [] },
@@ -83,128 +81,9 @@ const worst = buildDesktopLyricsFrame({
 })
 assert.ok(Buffer.byteLength(JSON.stringify(worst)) < 128 * 1024, 'escaped text must still fit the backend frame budget')
 
-let changes = []
-let fetchCalls = 0
-let upgradeCalls = 0
-let stored = null
-let cache = null
-let resolveFetch
-let resolveUpgrade
-const loader = createDesktopLyricsLoader({
-  materialize: async () => stored,
-  cached: () => cache,
-  fetch: () => { fetchCalls++; return new Promise(resolve => { resolveFetch = resolve }) },
-  cache: () => {},
-  mergeUpgrade: (_, upgrade) => upgrade,
-  canUpgrade: () => true,
-  upgrade: () => { upgradeCalls++; return new Promise(resolve => { resolveUpgrade = resolve }) },
-  onChange: value => changes.push(value),
-})
-stored = []
-await loader.load(track)
-assert.equal(fetchCalls, 0, 'intentional sync clear must never refill online')
-assert.equal(upgradeCalls, 0)
-stored = [lines[0]]
-await loader.load(track)
-assert.equal(changes.at(-1)[0].text, '第一行')
-assert.equal(upgradeCalls, 0, 'synced lyrics must not be replaced by external word matching')
-stored = null
-cache = [lines[0]]
-await loader.load(track)
-assert.equal(changes.at(-1)[0].text, '第一行', 'cached baseline must display before an upgrade resolves')
-assert.equal(upgradeCalls, 1)
-loader.dispose()
-const beforeDispose = changes.length
-resolveUpgrade({ source: 'amll_ttml', lines: [lines[1]] })
-await Promise.resolve()
-await Promise.resolve()
-assert.equal(changes.length, beforeDispose, 'closing the window must ignore late upgrades')
-
-changes = []
-cache = null
-let currentResolve
-const guarded = createDesktopLyricsLoader({
-  materialize: async () => null,
-  cached: () => null,
-  fetch: t => new Promise(resolve => {
-    if (t.id === track.id) resolveFetch = resolve
-    else currentResolve = resolve
-  }),
-  cache: () => {}, canUpgrade: () => false, upgrade: async () => ({ source: null, lines: [] }),
-  mergeUpgrade: (_, upgrade) => upgrade,
-  onChange: value => changes.push(value),
-})
-const old = guarded.load(track)
-// 让旧曲目的请求先真正发出，再切到新曲目
-await flushMicrotasks()
-const fresh = guarded.load({ ...track, id: 'youtube:new' })
-await flushMicrotasks()
-resolveFetch([lines[0]])
-await old
-assert.equal(changes.at(-1).length, 0, 'old request cannot display on a new song')
-currentResolve([lines[2]])
-await fresh
-assert.equal(changes.at(-1)[0].text, '第三行')
-guarded.dispose()
-
-const rejected = createDesktopLyricsLoader({
-  materialize: async () => null, cached: () => [lines[0]],
-  fetch: async () => { throw new Error('offline') }, cache: () => {},
-  canUpgrade: () => true, upgrade: async () => { throw new Error('offline upgrade') },
-  mergeUpgrade: (_, upgrade) => upgrade,
-  onChange: value => changes.push(value),
-})
-await rejected.load(track)
-await Promise.resolve()
-assert.equal(changes.at(-1)[0].text, '第一行')
-rejected.dispose()
-
-// 升级返回时用户已改了歌词（canUpgrade 变 false）：结果作废，来源也不能被换成 TTML
-const adoptedSources = []
-let allowUpgrade = true
-let resolveRejectedUpgrade
-const discarded = createDesktopLyricsLoader({
-  materialize: async () => null, cached: () => [lines[0]],
-  fetch: async () => [], cache: () => {},
-  canUpgrade: () => allowUpgrade,
-  upgrade: () => new Promise(resolve => { resolveRejectedUpgrade = resolve }),
-  mergeUpgrade: (_, upgrade) => upgrade,
-  adoptSource: (_, source) => adoptedSources.push(['adopt', source]),
-  onChange: () => {},
-})
-await discarded.load(track)
-allowUpgrade = false
-resolveRejectedUpgrade({ source: 'amll_ttml', lines: [lines[1]] })
-await flushMicrotasks()
-assert.deepEqual(adoptedSources, [], 'a discarded upgrade must not change the lyric source')
-discarded.dispose()
-
-let mergedDisplay
-let mergedCache
-const preserveText = createDesktopLyricsLoader({
-  materialize: async () => null,
-  cached: () => [{ ...lines[0], roman: 'dai ichi' }],
-  fetch: async () => [],
-  cache: (_, value) => { mergedCache = value },
-  canUpgrade: () => true,
-  upgrade: async () => ({ source: 'amll_ttml', lines: [{ ...lines[0], startMs: 1200, translation: undefined, words: [{ startMs: 1200, durationMs: 500, text: '第一行' }] }] }),
-  mergeUpgrade: mergeWordTimedLyricsWithBaseline,
-  adoptSource: (_, source) => adoptedSources.push(['adopt', source]),
-  onChange: value => { mergedDisplay = value; adoptedSources.push(['display']) },
-})
-await preserveText.load(track)
-await Promise.resolve()
-assert.deepEqual(adoptedSources.slice(-2), [['adopt', 'amll_ttml'], ['display']],
-  'an applied upgrade records its source before display and cache pick defaults from it')
-assert.equal(mergedDisplay[0].startMs, 1200)
-assert.equal(mergedDisplay[0].translation, 'first', 'external word timing must preserve matching baseline translation')
-assert.equal(mergedDisplay[0].roman, 'dai ichi')
-assert.deepEqual(mergedCache, mergedDisplay, 'the cache must retain the same translation and roman as the display')
-preserveText.dispose()
-
 const playerCalls = []
 const player = {
-  currentTrack: track, lyrics: [lines[0]], livePositionMs: () => 1000, isPlaying: true,
+  currentTrack: track, livePositionMs: () => 1000, isPlaying: true,
   effectivePlaybackSpeed: () => 1,
   pause: async () => { playerCalls.push('pause') },
   resume: async () => { playerCalls.push('resume') },
@@ -225,8 +104,16 @@ const openRequests = []
 let nativeSession = ''
 let childExists = false
 async function flushMicrotasks() { for (let i = 0; i < 6; i++) await Promise.resolve() }
-let fetchRelease
-let cachedAfterClose = 0
+// 桌面歌词不再自己取词：读正在播放页共用的那份，打开时登记为使用者，关闭时归还
+const currentLyrics = {
+  lines: [lines[0]],
+  consumers: 0,
+  acquire() {
+    this.consumers++
+    let released = false
+    return () => { if (!released) { released = true; this.consumers-- } }
+  },
+}
 const originalInterval = globalThis.setInterval
 const originalClearInterval = globalThis.clearInterval
 globalThis.setInterval = callback => { const id = intervals.size + 1; intervals.set(id, callback); return id }
@@ -251,7 +138,6 @@ try {
         if (deferredOpens) return new Promise(resolve => openRequests.push({ sessionId: args.sessionId, resolve }))
       }
       if (command === 'close_desktop_lyrics' && args.sessionId === nativeSession) childExists = false
-      if (command === 'fetch_lyrics') return new Promise(resolve => { fetchRelease = resolve })
     } },
     '@tauri-apps/api/event': { listen: async (name, handler) => {
       listeners[name] = handler
@@ -260,24 +146,8 @@ try {
     '@/stores/player': { usePlayerStore: () => player },
     '@/stores/settings': { useSettingsStore: () => settings },
     '@/stores/lyricOffset': { useLyricOffsetStore: () => ({ effectiveOffsetMs: () => 0 }) },
-    '@/modules/lyrics/lyricOffset': { readSyncedLyricSource: () => null },
-    '@/modules/lyrics/lyricsFetch': {
-      fetchAutomaticLyrics: () => new Promise(resolve => { fetchRelease = fetched => resolve({ source: 'netease', lines: fetched }) }),
-      fetchWordTimedLyrics: async () => ({ source: null, lines: [] }),
-      preferredLyricMatchSource: () => null,
-      fetchPreferredSourceLyrics: async () => null,
-    },
-    '@/modules/lyrics/lyricSource': { rememberLyricSource() {} },
-    '@/modules/lyrics/lyricsCache': { getCachedLyrics: () => null, saveCachedLyrics: () => { cachedAfterClose++ } },
-    '@/modules/lyrics/lyricsRequest': { loadLyricsSingleFlight: (_, fetch) => fetch(), hasWordTimedLyrics: () => false },
-    '@/modules/lyrics/lyricsFormat': {
-      resolveStoredLyricStateFromPayload: () => ({ kind: 'absent' }),
-      materializeStoredLyrics: async () => null,
-      mapBackendLyrics: value => value,
-      mergeWordTimedLyricsWithBaseline: (_, value) => value,
-    },
+    '@/stores/currentLyrics': { useCurrentLyricsStore: () => currentLyrics },
     './frame': frameModule,
-    './loader': { createDesktopLyricsLoader },
     './style': styleModule,
     './timeline': timelineModule,
     '@/utils/logger': { createLogger: () => ({ warn() {} }) },
@@ -286,10 +156,14 @@ try {
   const dispose = installDesktopLyricsBridge({ openSettings: () => { openedSettings++ } })
   assert.equal(intervals.size, 0, 'inactive bridge must not start a timer')
   assert.equal(watchers.length, 0, 'inactive bridge must not fetch lyrics')
+  assert.equal(currentLyrics.consumers, 0, 'inactive bridge must not ask for lyrics')
   await openDesktopLyricsWindow()
   await Promise.resolve()
   assert.equal(intervals.size, 1)
   assert.equal(watchers.length, 2, '歌词和锁定状态各一个')
+  assert.equal(currentLyrics.consumers, 1, '打开后与正在播放页共用当前歌词')
+  const firstFrame = invocations.filter(([command]) => command === 'publish_desktop_lyrics').at(-1)[1].frame
+  assert.equal(firstFrame.lines[0].text, '第一行', '发出去的是共用的那份歌词')
   const opened = invocations.find(([command]) => command === 'open_desktop_lyrics')[1]
   assert.equal(opened.bounds, null, '第一次打开没有保存的位置，由后端放到屏幕底部居中')
   assert.deepEqual(invocations.find(([command]) => command === 'set_desktop_lyrics_lock')[1].locked, false, '打开后同步锁定状态')
@@ -323,19 +197,21 @@ try {
   assert.deepEqual(settings.desktopLyrics.bounds, { x: 100, y: 900, width: 360, height: 200 }, '坏数据不覆盖已记住的位置')
   settings.desktopLyrics = undefined
 
-  player.currentTrack = { ...track, id: 'youtube:late' }
-  player.lyrics = []
+  // 正在播放页换了歌词（逐字升级、编辑）：桌面歌词马上发新帧
+  const beforeUpgrade = invocations.filter(([command]) => command === 'publish_desktop_lyrics').length
+  currentLyrics.lines = [lines[1]]
   watchers[0].callback()
-  // 缓存读取是异步的，等在线请求真正发出后再关窗
   await flushMicrotasks()
+  const upgraded = invocations.filter(([command]) => command === 'publish_desktop_lyrics')
+  assert.equal(upgraded.length, beforeUpgrade + 1)
+  assert.equal(upgraded.at(-1)[1].frame.lines[0].words[0].text, '逐字')
+  currentLyrics.lines = [lines[0]]
+
   const firstSession = invocations.find(([command]) => command === 'open_desktop_lyrics')[1].sessionId
   listener({ payload: { sessionId: firstSession } })
   assert.equal(intervals.size, 0)
   assert.equal(watchers[0].stopped, true)
-  fetchRelease([lines[2]])
-  await Promise.resolve()
-  await Promise.resolve()
-  assert.equal(cachedAfterClose, 0, 'late responses after close cannot mutate the lyrics cache')
+  assert.equal(currentLyrics.consumers, 0, '关闭后归还当前歌词，没有界面时换歌不再取词')
 
   rejectOpen = true
   await assert.rejects(openDesktopLyricsWindow(), /window creation failed/)
@@ -348,7 +224,6 @@ try {
 
   rejectOpen = false
   deferredOpens = true
-  player.lyrics = [lines[0]]
   const disposeSingle = installDesktopLyricsBridge()
   const firstOpen = openDesktopLyricsWindow()
   const secondOpen = openDesktopLyricsWindow()
@@ -387,9 +262,10 @@ try {
   disposeNew()
   assert.equal(intervals.size, 0)
   assert.equal(childExists, false)
+  assert.equal(currentLyrics.consumers, 0, '每次打开登记的使用者都要归还')
 } finally {
   globalThis.setInterval = originalInterval
   globalThis.clearInterval = originalClearInterval
 }
 
-console.log('desktop lyrics frame, loader and bridge lifecycle tests passed')
+console.log('desktop lyrics frame and bridge lifecycle tests passed')
