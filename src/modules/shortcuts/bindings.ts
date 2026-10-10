@@ -193,6 +193,8 @@ export function comboFromEvent(event: KeyboardEvent): string | null {
   let key = event.key
   if (/^Key[A-Z]$/.test(event.code)) key = event.code.slice(3)
   else if (/^Digit\d$/.test(event.code)) key = event.code.slice(5)
+  // Windows 输入法可能将 Ctrl+Space 的 key 改为 Process，空格键改从物理键位取
+  else if (event.code === 'Space') key = 'Space'
   const name = normalizeKeyName(key)
   if (!name || RESERVED_KEYS.has(name)) return null
   const primary = isMacPlatform ? event.metaKey : event.ctrlKey
