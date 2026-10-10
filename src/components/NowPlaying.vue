@@ -1148,31 +1148,53 @@ const applyInfoFields = ref({
   lyrics: true,
 })
 
+/** 搜过之后才显示「无搜索结果」 */
+const infoSearched = ref(false)
+let infoSearchRequest = 0
+
+// 打开即按当前歌名搜一次（对齐 Android），不用再手动点搜索
 function openInfoSearch() {
   searchQuery.value = player.currentTrack?.title || ''
   searchResults.value = []
   infoApplyCandidate.value = null
+  infoSearched.value = false
   applyInfoFields.value = { title: true, artist: true, cover: true, lyrics: true }
   goToSubView('search')
+  void doSearch()
+}
+
+function selectInfoSearchPlatform(platform: typeof infoSearchPlatform.value) {
+  if (infoSearchPlatform.value === platform) return
+  infoSearchPlatform.value = platform
+  void doSearch()
 }
 
 async function doSearch() {
   const q = searchQuery.value.trim()
-  if (!q) return
-  isSearching.value = true
+  const request = ++infoSearchRequest
   searchResults.value = []
   infoApplyCandidate.value = null
+  if (!q) {
+    isSearching.value = false
+    infoSearched.value = false
+    return
+  }
+  isSearching.value = true
+  const platform = infoSearchPlatform.value
   try {
     const results = await invoke<any[]>('search', {
       query: q,
-      platform: infoSearchPlatform.value,
-      includeLyrics: infoSearchPlatform.value === 'qq',
+      platform,
+      includeLyrics: platform === 'qq',
     })
-    searchResults.value = results
+    if (request === infoSearchRequest) searchResults.value = results
   } catch (e) {
     log.error('Search failed:', e)
   } finally {
-    isSearching.value = false
+    if (request === infoSearchRequest) {
+      isSearching.value = false
+      infoSearched.value = true
+    }
   }
 }
 
@@ -2671,31 +2693,31 @@ const sliderActiveColor = computed(() => {
             <div class="np-more-segmented platform">
               <button
                 :class="{ active: infoSearchPlatform === 'netease' }"
-                @click="infoSearchPlatform = 'netease'; searchResults = []; infoApplyCandidate = null"
+                @click="selectInfoSearchPlatform('netease')"
               >
                 {{ t('player.source_netease') }}
               </button>
               <button
                 :class="{ active: infoSearchPlatform === 'qq' }"
-                @click="infoSearchPlatform = 'qq'; searchResults = []; infoApplyCandidate = null"
+                @click="selectInfoSearchPlatform('qq')"
               >
                 {{ t('player.source_qq') }}
               </button>
               <button
                 :class="{ active: infoSearchPlatform === 'bilibili' }"
-                @click="infoSearchPlatform = 'bilibili'; searchResults = []; infoApplyCandidate = null"
+                @click="selectInfoSearchPlatform('bilibili')"
               >
                 Bilibili
               </button>
               <button
                 :class="{ active: infoSearchPlatform === 'youtube' }"
-                @click="infoSearchPlatform = 'youtube'; searchResults = []; infoApplyCandidate = null"
+                @click="selectInfoSearchPlatform('youtube')"
               >
                 YouTube
               </button>
             </div>
             <div v-if="isSearching" class="np-more-status">{{ t('player.searching') }}</div>
-            <div v-else-if="searchResults.length === 0 && searchQuery" class="np-more-status">{{ t('player.no_results') }}</div>
+            <div v-else-if="infoSearched && searchResults.length === 0" class="np-more-status">{{ t('player.no_results') }}</div>
             <div class="np-more-search-results" :class="{ compact: !!infoApplyCandidate }">
               <button
                 v-for="(r, ri) in searchResults"
