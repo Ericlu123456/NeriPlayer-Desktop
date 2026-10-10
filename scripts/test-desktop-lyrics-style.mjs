@@ -21,6 +21,10 @@ assert.equal(defaults.layout, 'single')
 assert.equal(defaults.locked, false)
 assert.equal(defaults.bounds, null, '第一次打开由后端摆到屏幕底部居中')
 assert.notEqual(defaults.playedColors, style.DEFAULT_DESKTOP_LYRICS_STYLE.playedColors, '不共享默认值的数组，改了也不污染默认')
+const restored = style.normalizeDesktopLyricsStyle({ strokeWidth: Number.NaN, shadowBlur: 'invalid' })
+assert.deepEqual([restored.strokeWidth, restored.shadowBlur], [0.5, 1], '缺失或无效的描边、阴影回到轻量默认值')
+const customEffects = style.normalizeDesktopLyricsStyle({ strokeWidth: 2.5, shadowBlur: 12 })
+assert.deepEqual([customEffects.strokeWidth, customEffects.shadowBlur], [2.5, 12], '已保存的自定义描边、阴影保持不变')
 
 const messy = style.normalizeDesktopLyricsStyle({
   theme: 'rainbow', layout: 'quad', align: 'justify', secondary: 'both', karaoke: 'yes', background: 'blur',
@@ -78,7 +82,8 @@ assert.equal(vars['--dl-secondary-size'], '20px')
 assert.equal(vars['--dl-stroke'], '0 transparent')
 assert.equal(vars['--dl-shadow'], 'none')
 assert.match(vars['--dl-played'], /^linear-gradient\(180deg, #/)
-assert.match(style.desktopLyricsCssVars(defaults, null)['--dl-stroke'], /^2px #/, '描边画在填充下面，只露出外半边，所以宽度翻倍')
+assert.match(style.desktopLyricsCssVars(defaults, null)['--dl-stroke'], /^1px #/, '默认描边只露出外半边，实际可见宽度为 0.5px')
+assert.equal(style.desktopLyricsCssVars(defaults, null)['--dl-shadow'], 'drop-shadow(0 1px 1px #000000d9)', '默认阴影偏移和模糊范围均为 1px')
 assert.equal(style.desktopLyricsCssVars({ ...defaults, fontFamily: '' }, null)['--dl-font-family'].startsWith('var('), true)
 
 assert.equal(style.nextDesktopLyricsLayout('single'), 'double')

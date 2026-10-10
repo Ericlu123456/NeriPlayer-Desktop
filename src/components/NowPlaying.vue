@@ -1993,15 +1993,15 @@ const dynamicColorVars = computed(() => {
     ]
   }
 
-  // 主色：提升饱和度和亮度确保在暗背景上的可见性（对齐 Android M3 primary）
-  const primaryS = Math.min(1, s * 1.2 + 0.15) // 保底饱和度
-  const primaryL = Math.max(0.55, Math.min(0.75, l * 0.8 + 0.35)) // 亮度 55~75% 确保对比
+  // 深色播放页使用柔和的亮强调色，避免蓝色封面生成过艳、偏暗的控件
+  const primaryS = Math.min(0.65, s)
+  const primaryL = 0.80
   const [pr, pg, pb] = hsl2rgb(h, primaryS, primaryL)
   const primary = `rgb(${pr}, ${pg}, ${pb})`
 
-  // 主色容器：更亮、低饱和度（对齐 Android primaryContainer）
-  const pcS = Math.min(1, s * 0.8 + 0.1)
-  const pcL = Math.max(0.70, Math.min(0.85, primaryL + 0.15))
+  // 播放按钮用更浅的同色容器，中性取色保持中性
+  const pcS = Math.min(0.50, s * 0.8)
+  const pcL = 0.88
   const [pcr, pcg, pcb] = hsl2rgb(h, pcS, pcL)
   const primaryContainer = `rgb(${pcr}, ${pcg}, ${pcb})`
 
@@ -2019,13 +2019,8 @@ const dynamicColorVars = computed(() => {
   }
 })
 
-// 进度条活跃色（与 --np-primary 同步）
-// 主色直出在深色播放页上过亮刺眼：混入黑色压一档亮度，保持色相不变
-const sliderActiveColor = computed(() => {
-  const vars = dynamicColorVars.value
-  const primary = (vars as any)['--np-primary'] || '#fff'
-  return `color-mix(in srgb, ${primary} 72%, black)`
-})
+// 进度条与按钮共用强调色，避免再次压暗后在深色背景上看不清
+const sliderActiveColor = computed(() => dynamicColorVars.value['--np-primary'] || '#fff')
 </script>
 
 <template>
