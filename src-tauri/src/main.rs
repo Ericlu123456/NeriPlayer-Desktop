@@ -26,8 +26,15 @@ fn classify_playback_finish(
     was_playing: bool,
     position_ms: u64,
     duration_ms: u64,
+    queried_generation: Option<u64>,
+    loaded_generation: Option<u64>,
 ) -> PlaybackFinishState {
-    if !finished_flag || !was_playing || position_ms <= 500 {
+    if queried_generation.is_none()
+        || queried_generation != loaded_generation
+        || !finished_flag
+        || !was_playing
+        || position_ms <= 500
+    {
         return PlaybackFinishState::None;
     }
 
@@ -376,13 +383,14 @@ fn main() {
                     // 每 tick 持锁满 100ms，阻塞 pause/get_player_state 等命令
                     // 中段解码饿死/虚拟 body 落点失败不能当「播完」——只在接近曲尾才 emit track-ended
                     {
-                        let (finished_rx, position_ms, duration_ms, was_playing) = {
+                        let (finished_rx, position_ms, duration_ms, was_playing, queried_generation) = {
                             let player = state.player.lock();
                             (
                                 player.begin_finished_query(),
                                 player.position_ms(),
                                 player.duration_ms,
                                 player.is_playing,
+                                player.loaded_generation(),
                             )
                         }; // <- 锁在此释放，下面的等待不再挡住其他 player 命令
                         let finished_flag = finished_rx
@@ -390,27 +398,33 @@ fn main() {
                                 rx.recv_timeout(Duration::from_millis(100)).unwrap_or(false)
                             })
                             .unwrap_or(false);
-                        let finish_state = classify_playback_finish(
-                            finished_flag,
-                            was_playing,
-                            position_ms,
-                            duration_ms,
-                        );
+                        let finish_state = {
+                            let mut player = state.player.lock();
+                            let finish_state = classify_playback_finish(
+                                finished_flag,
+                                was_playing,
+                                position_ms,
+                                duration_ms,
+                                queried_generation,
+                                player.loaded_generation(),
+                            );
+                            // 等待期间可能已经加载新歌，校验与结束标记必须共用这次锁
+                            if finish_state == PlaybackFinishState::Ended && !last_ended {
+                                player.mark_ended();
+                            }
+                            finish_state
+                        };
                         let finished = finish_state == PlaybackFinishState::Ended;
                         // 曲中断流/解码饿死/DeviceLost 重建失败不能当播完静默卡死，
                         // 发独立 stalled 事件让前端从当前位置重试
                         let stalled = finish_state == PlaybackFinishState::Stalled;
                         if stalled && !last_stalled {
                             last_stalled = true;
-                            let stalled_generation = {
-                                let player = state.player.lock();
-                                player.loaded_generation().unwrap_or(0)
-                            };
                             let _ = handle_ticker.emit(
                                 "player:playback-stalled",
                                 serde_json::json!({
                                     "positionMs": position_ms,
-                                    "requestGeneration": stalled_generation,
+                                    "requestGeneration": queried_generation.unwrap_or(0),
                                 }),
                             );
                         } else if !stalled {
@@ -418,16 +432,10 @@ fn main() {
                         }
                         if finished && !last_ended {
                             last_ended = true;
-                            let ended_generation = {
-                                let mut player = state.player.lock();
-                                let generation = player.loaded_generation().unwrap_or(0);
-                                player.mark_ended();
-                                generation
-                            };
                             let _ = handle_ticker.emit(
                                 "player:track-ended",
                                 serde_json::json!({
-                                    "requestGeneration": ended_generation,
+                                    "requestGeneration": queried_generation.unwrap_or(0),
                                 }),
                             );
                         } else if !finished {
@@ -824,7 +832,7 @@ mod tests {
     #[test]
     fn unknown_duration_eof_ends_track() {
         assert_eq!(
-            classify_playback_finish(true, true, 10_000, 0),
+            classify_playback_finish(true, true, 10_000, 0, Some(8), Some(8)),
             PlaybackFinishState::Ended,
         );
     }
@@ -832,7 +840,7 @@ mod tests {
     #[test]
     fn known_duration_near_end_eof_ends_track() {
         assert_eq!(
-            classify_playback_finish(true, true, 97_000, 100_000),
+            classify_playback_finish(true, true, 97_000, 100_000, Some(8), Some(8)),
             PlaybackFinishState::Ended,
         );
     }
@@ -840,8 +848,42 @@ mod tests {
     #[test]
     fn known_duration_middle_eof_is_stalled() {
         assert_eq!(
-            classify_playback_finish(true, true, 30_000, 100_000),
+            classify_playback_finish(true, true, 30_000, 100_000, Some(8), Some(8)),
             PlaybackFinishState::Stalled,
         );
+    }
+
+    #[test]
+    fn previous_track_eof_does_not_end_a_new_loaded_track() {
+        assert_eq!(
+            classify_playback_finish(true, true, 97_000, 100_000, Some(8), Some(9)),
+            PlaybackFinishState::None,
+        );
+    }
+
+    #[test]
+    fn previous_track_middle_eof_does_not_stall_a_new_loaded_track() {
+        assert_eq!(
+            classify_playback_finish(true, true, 30_000, 100_000, Some(8), Some(9)),
+            PlaybackFinishState::None,
+        );
+    }
+
+    #[test]
+    fn unloaded_track_does_not_accept_a_delayed_eof() {
+        assert_eq!(
+            classify_playback_finish(true, true, 97_000, 100_000, Some(8), None),
+            PlaybackFinishState::None,
+        );
+    }
+
+    #[test]
+    fn finish_query_without_a_loaded_generation_cannot_end_playback() {
+        for loaded_generation in [None, Some(8)] {
+            assert_eq!(
+                classify_playback_finish(true, true, 97_000, 100_000, None, loaded_generation),
+                PlaybackFinishState::None,
+            );
+        }
     }
 }

@@ -1,6 +1,6 @@
 // 主窗口侧的托盘桥：把曲目、文案、主题色发布给托盘（原生菜单 / Windows 自绘面板），
 // 并执行托盘发回的动作。播放/暂停状态由后端 ticker 直接同步给托盘，这里不发
-import { watch } from 'vue'
+import { ref, watch } from 'vue'
 import { invoke, isTauri } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import i18n from '@/i18n'
@@ -11,7 +11,7 @@ import {
   openDesktopLyricsWindow,
 } from '@/modules/desktopLyrics/bridge'
 import { getTrackCoverUrl } from '@/utils/trackCover'
-import { normalizeCoverUrlForDisplay, peekCoverImage } from '@/utils/bilibiliCover'
+import { normalizeCoverUrlForDisplay, normalizeProxiedCoverUrl, peekCoverImage, resolveCoverImage } from '@/utils/bilibiliCover'
 import { createLogger } from '@/utils/logger'
 import { summarizeLogError } from '@/utils/logSanitizer'
 
@@ -35,6 +35,8 @@ export const TRAY_THEME_VARS = [
 
 const MENU_TEXT_KEYS = ['previous', 'play', 'pause', 'next', 'show_main', 'desktop_lyrics', 'quit', 'idle'] as const
 const PUBLISH_DEBOUNCE_MS = 120
+// data URL 是 ASCII 字符串，长度上限与托盘后端的 MAX_COVER_URL_BYTES 一致
+const MAX_TRAY_COVER_URL_CHARS = 1_000_000
 
 export interface TrayBridgeOptions {
   openNowPlaying: () => void
@@ -57,9 +59,9 @@ function currentLocale(): string {
   return (i18n.global.locale as unknown as { value: string }).value
 }
 
-function displayCover(raw: string): string {
+function displayCover(raw: string, resolved = peekCoverImage(raw)): string {
   if (!raw) return ''
-  return peekCoverImage(raw) || normalizeCoverUrlForDisplay(raw)
+  return resolved && resolved.length <= MAX_TRAY_COVER_URL_CHARS ? resolved : normalizeCoverUrlForDisplay(raw)
 }
 
 /** 退出：先落盘再让后端结束进程（托盘「退出」与关闭即退出共用） */
@@ -79,6 +81,7 @@ export function installTrayBridge(options: TrayBridgeOptions): () => void {
   let timer: ReturnType<typeof setTimeout> | null = null
   let lastSent = ''
   let releases: UnlistenFn[] = []
+  const coverUrl = ref('')
 
   function snapshot() {
     const texts: Record<string, string> = {}
@@ -88,7 +91,7 @@ export function installTrayBridge(options: TrayBridgeOptions): () => void {
       locale: currentLocale(),
       texts,
       track: track
-        ? { title: track.title || '', artist: track.artist || '', coverUrl: displayCover(getTrackCoverUrl(track)) }
+        ? { title: track.title || '', artist: track.artist || '', coverUrl: coverUrl.value }
         : null,
       theme: readTheme(),
       desktopLyricsOpen: desktopLyricsOpen.value,
@@ -113,6 +116,24 @@ export function installTrayBridge(options: TrayBridgeOptions): () => void {
     timer = setTimeout(publishNow, PUBLISH_DEBOUNCE_MS)
   }
 
+  // 缓存解析结果不会改变曲目的原始 URL，需要单独发布给托盘窗口
+  const stopCoverWatch = watch(
+    () => player.hasPlaybackSession ? getTrackCoverUrl(player.currentTrack) : '',
+    (raw, _, onCleanup) => {
+      let active = true
+      onCleanup(() => { active = false })
+      coverUrl.value = displayCover(raw)
+      const proxiedUrl = normalizeProxiedCoverUrl(raw)
+      if (!proxiedUrl || peekCoverImage(raw)) return
+      void resolveCoverImage(proxiedUrl).then(resolved => {
+        if (active && !disposed) coverUrl.value = displayCover(raw, resolved)
+      }).catch(error => {
+        if (active && !disposed) log.warn('tray cover not resolved:', summarizeLogError(error))
+      })
+    },
+    { immediate: true },
+  )
+
   const stopWatch = watch(
     () => [
       player.hasPlaybackSession,
@@ -120,6 +141,7 @@ export function installTrayBridge(options: TrayBridgeOptions): () => void {
       player.currentTrack?.title,
       player.currentTrack?.artist,
       getTrackCoverUrl(player.currentTrack),
+      coverUrl.value,
       currentLocale(),
       desktopLyricsOpen.value,
     ],
@@ -154,6 +176,7 @@ export function installTrayBridge(options: TrayBridgeOptions): () => void {
     if (timer) clearTimeout(timer)
     timer = null
     stopWatch()
+    stopCoverWatch()
     observer.disconnect()
     releases.forEach(release => release())
     releases = []

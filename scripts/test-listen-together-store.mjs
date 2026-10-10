@@ -5,6 +5,20 @@ import ts from 'typescript'
 
 const sourceRoot = new URL('../src/stores/listenTogether/', import.meta.url)
 const indexSource = await readFile(new URL('index.ts', sourceRoot), 'utf8')
+const playerSource = await readFile(new URL('../src/stores/player.ts', import.meta.url), 'utf8')
+const playerParsed = ts.createSourceFile('player.ts', playerSource, ts.ScriptTarget.ES2022, true)
+const playerCommandFunctions = new Map()
+function findPlayerCommandFunction(node) {
+  if (ts.isFunctionDeclaration(node) && ['markCommandSource', 'isRemoteSyncGuardActive', 'markOptimisticSeek'].includes(node.name?.text)) {
+    playerCommandFunctions.set(node.name.text, node.getText(playerParsed))
+  }
+  ts.forEachChild(node, findPlayerCommandFunction)
+}
+findPlayerCommandFunction(playerParsed)
+assert.equal(playerCommandFunctions.size, 3)
+const commandSourceCode = ts.transpileModule([...playerCommandFunctions.values()].join('\n'), {
+  compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
+}).outputText
 let moduleSequence = 0
 
 async function loadSource(source, dependencies, globals = '') {
@@ -72,6 +86,7 @@ for (const specifier of runtimeImports(indexSource).filter(specifier => specifie
 }
 const protocol = helperDependencies['./protocol']
 const mapper = helperDependencies['./mapper']
+const { resolvePlaybackQueueStartIndex } = await loadHelper(new URL('../../modules/playback/playbackQueue.ts', sourceRoot))
 
 async function flush() {
   for (let i = 0; i < 12; i++) {
@@ -157,22 +172,31 @@ async function harness(options = {}) {
   const playGates = []
   const pauseGates = []
   const seekGates = []
-  let remoteGuardUntil = 0
-  const markSource = source => {
-    if (source === 'remote_sync') remoteGuardUntil = timers.Date.now() + 3000
-  }
+  const lastCommandSource = vue.ref('local')
+  const lastCommandSequence = vue.ref(0)
+  const lastSeekCommand = vue.ref({ seq: 0, source: 'local', positionMs: 0 })
+  const commandSource = new Function('lastCommandSource', 'lastCommandSequence', 'lastSeekCommand', 'setRenderedPosition', 'Date', `
+    let _remoteSyncGuardUntil = 0
+    let playbackRequestToken = 1, lastSeekedMs = null
+    const clearPauseGuard = () => {}, armPendingSeek = () => {}
+    ${commandSourceCode}
+    return { markCommandSource, isRemoteSyncGuardActive, markOptimisticSeek }
+  `)(lastCommandSource, lastCommandSequence, lastSeekCommand,
+    value => { player.positionMs = value; return value }, timers.Date)
+  const markSource = source => commandSource.markCommandSource(source ?? 'local')
   const clone = value => value === undefined ? undefined : JSON.parse(JSON.stringify(value))
   const player = vue.reactive({
     queue: [], queueIndex: -1, currentTrack: null, isPlaying: false, isLoadingAudio: false,
     positionMs: 0, repeatMode: 'off', shuffleEnabled: false,
-    lastSeekCommand: { seq: 0, source: 'local', positionMs: 0 },
+    lastCommandSource, lastCommandSequence,
+    lastSeekCommand,
     getCurrentStreamUrl() { return player.currentTrack?.audioUrl || '' },
     getCurrentStreamUrls() { return [] },
     async resolveShareableStreamUrls(track) {
       playback.push({ type: 'resolve-shareable', trackId: track.id })
       return options.shareableUrls?.(track) ?? []
     },
-    isRemoteSyncGuardActive() { return timers.Date.now() < remoteGuardUntil },
+    isRemoteSyncGuardActive: commandSource.isRemoteSyncGuardActive,
     setListenTogetherSyncPlaybackRate(rate) { playback.push({ type: 'rate', rate }) },
     applyListenTogetherPlaybackMode(mode) {
       playback.push({ type: 'mode', mode: clone(mode) })
@@ -183,7 +207,10 @@ async function harness(options = {}) {
       markSource(source)
       playback.push({ type: 'play', track: clone(track), source, positionMs })
       player.currentTrack = track
-      if (positionMs !== undefined) player.positionMs = positionMs
+      player.queueIndex = resolvePlaybackQueueStartIndex(player.queue, track.id, track.playlistKey)
+      if (positionMs > 1000) {
+        commandSource.markOptimisticSeek(positionMs, source ?? 'local', { fromPlaybackStart: true, durationMs: track.durationMs })
+      } else if (positionMs !== undefined) player.positionMs = positionMs
       player.isLoadingAudio = true
       const gate = playGates.shift()
       if (gate) await gate.promise
@@ -201,10 +228,9 @@ async function harness(options = {}) {
     async seekTo(positionMs, source) {
       markSource(source)
       playback.push({ type: 'seek', positionMs, source })
+      commandSource.markOptimisticSeek(positionMs, source ?? 'local')
       const gate = seekGates.shift()
       if (gate) await gate.promise
-      player.positionMs = positionMs
-      player.lastSeekCommand = { seq: player.lastSeekCommand.seq + 1, source, positionMs }
     },
   })
   const settings = vue.reactive({
@@ -343,6 +369,182 @@ await test('slow remote loading applies the latest pause after loading instead o
   assert.equal(h.player.isPlaying, false)
   assert.equal(h.commands.filter(entry => entry.command === 'lt_send_event').length, 0)
 })
+
+await test('a local track selection inside the remote watch release window is reported immediately', async h => {
+  await h.join()
+  await h.message({ type: 'welcome', state: room([wireTrack(1), wireTrack(2)]) })
+  const baseline = h.commands.length
+  await h.player.play(h.player.queue[1], 'local', 0)
+  await flush()
+  const request = h.commands.slice(baseline).find(entry => entry.command === 'lt_send_event'
+    && entry.args.event.type === 'REQUEST_SET_TRACK')?.args.event
+  assert.equal(request?.track.stableKey, 'netease:2')
+})
+
+await test('a local replay of the same song inside the remote watch release window is reported', async h => {
+  await h.join()
+  await h.message({ type: 'welcome', state: room() })
+  const baseline = h.commands.length
+  await h.player.play(h.player.currentTrack, 'local', 0)
+  await flush()
+  assert.ok(h.commands.slice(baseline).some(entry => entry.command === 'lt_send_event'
+    && entry.args.event.type === 'REQUEST_PLAY'))
+})
+
+await test('a local pause inside the remote watch release window is reported', async h => {
+  await h.join()
+  await h.message({ type: 'welcome', state: room([wireTrack(1)], {
+    playback: { ...room().playback, state: 'playing' },
+  }) })
+  const baseline = h.commands.length
+  await h.player.pause('local')
+  await flush()
+  assert.ok(h.commands.slice(baseline).some(entry => entry.command === 'lt_send_event'
+    && entry.args.event.type === 'REQUEST_PAUSE'))
+})
+
+await test('a local track selection supersedes corrections from a pending remote load', async h => {
+  await h.join()
+  const remoteLoad = deferred()
+  h.playGates.push(remoteLoad)
+  await h.message({ type: 'welcome', state: room([wireTrack(1), wireTrack(2)]) })
+  const baseline = h.commands.length
+  await h.player.play(h.player.queue[1], 'local', 0)
+  await flush()
+  assert.ok(h.commands.slice(baseline).some(entry => entry.command === 'lt_send_event'
+    && entry.args.event.type === 'REQUEST_SET_TRACK'))
+  const corrections = h.playback.length
+  remoteLoad.resolve()
+  await flush()
+  assert.equal(h.player.currentTrack.id, 'netease:2')
+  assert.ok(!h.playback.slice(corrections).some(entry => ['seek', 'pause', 'resume'].includes(entry.type)),
+    'the old remote load cannot seek or pause the new local selection')
+})
+
+await test('a local same-song replay with a start position supersedes a pending paused remote load', async h => {
+  await h.join()
+  const remoteLoad = deferred()
+  h.playGates.push(remoteLoad)
+  await h.message({ type: 'welcome', state: room() })
+  await h.player.play(h.player.currentTrack, 'local', 12_000)
+  await flush()
+  const corrections = h.playback.length
+  remoteLoad.resolve()
+  await flush()
+  assert.ok(!h.playback.slice(corrections).some(entry => ['seek', 'pause', 'resume'].includes(entry.type)),
+    'a playback start position is not an explicit seek in the older remote session')
+  assert.equal(h.player.isPlaying, true)
+  assert.equal(h.player.positionMs, 12_000)
+})
+
+await test('a local same-song replay with a start position reports the new position to a playing room', async h => {
+  await h.join()
+  await h.message({ type: 'welcome', state: room([wireTrack(1)], {
+    playback: { ...room().playback, state: 'playing' },
+  }) })
+  const baseline = h.commands.length
+  await h.player.play(h.player.currentTrack, 'local', 12_000)
+  await flush()
+  await h.timers.advance(450)
+  const request = h.commands.slice(baseline).find(entry => entry.command === 'lt_send_event'
+    && entry.args.event.type === 'REQUEST_SEEK')?.args.event
+  assert.equal(request?.positionMs, 12_000,
+    'the same track and playing state still need to publish a changed start position')
+})
+
+await test('a local seek inside the remote watch release window is reported after debounce', async h => {
+  await h.join()
+  await h.message({ type: 'welcome', state: room() })
+  const baseline = h.commands.length
+  await h.player.seekTo(12_000, 'local')
+  await flush()
+  await h.timers.advance(450)
+  const request = h.commands.slice(baseline).find(entry => entry.command === 'lt_send_event'
+    && entry.args.event.type === 'REQUEST_SEEK')?.args.event
+  assert.equal(request?.positionMs, 12_000)
+})
+
+await test('a local seek supersedes position corrections from a pending remote load', async h => {
+  await h.join()
+  const remoteLoad = deferred()
+  h.playGates.push(remoteLoad)
+  await h.message({ type: 'welcome', state: room() })
+  const baseline = h.commands.length
+  await h.player.seekTo(12_000, 'local')
+  await flush()
+  await h.timers.advance(450)
+  assert.ok(h.commands.slice(baseline).some(entry => entry.command === 'lt_send_event'
+    && entry.args.event.type === 'REQUEST_SEEK'))
+  const corrections = h.playback.length
+  remoteLoad.resolve()
+  await flush()
+  assert.ok(!h.playback.slice(corrections).some(entry => ['seek', 'resume'].includes(entry.type)),
+    'the old remote load cannot replace the newer local seek')
+  assert.equal(h.player.positionMs, 12_000)
+  assert.equal(h.player.isPlaying, false, 'seeking during loading still preserves the room pause intent')
+})
+
+await test('remote mode updates after a local command do not echo back as member requests', async h => {
+  await h.join()
+  await h.message({ type: 'welcome', state: room() })
+  await h.timers.advance(4_000)
+  await h.player.play(h.player.currentTrack, 'local', 5000)
+  await flush()
+  const baseline = h.commands.length
+  await h.message({ type: 'room_state_updated', state: room([wireTrack(1)], {
+    version: 2, playback: { ...room().playback, state: 'playing', repeatMode: 2, shuffleEnabled: true },
+  }), expectedPositionMs: 5000, causedBy: { type: 'PLAYBACK_MODE' } })
+  assert.equal(h.player.repeatMode, 'all')
+  assert.equal(h.player.shuffleEnabled, true)
+  assert.ok(!h.commands.slice(baseline).some(entry => entry.command === 'lt_send_event'),
+    'synchronous room queue and mode writes must not be reported as local controls')
+})
+
+for (const requestType of ['REQUEST_SET_TRACK', 'REQUEST_SET_QUEUE']) {
+  const supersededMemberLoad = async h => {
+    await h.create()
+    await h.message({ type: 'welcome', role: 'controller', state: room([wireTrack(1), wireTrack(3)]) })
+    await h.timers.advance(4_000)
+    const remoteLoad = deferred()
+    h.playGates.push(remoteLoad)
+    await h.message({ type: 'member_control_requested',
+      causedBy: { userUuid: 'listener', type: requestType, eventId: 'paused-member-selection' },
+      queue: [wireTrack(2), wireTrack(3)], currentIndex: 0, track: wireTrack(2), shouldPlay: false, positionMs: 0,
+    })
+    assert.equal(h.player.isLoadingAudio, true)
+    await h.player.play(h.player.queue[1], 'local', 0)
+    await flush()
+    const corrections = h.playback.length
+    remoteLoad.resolve()
+    await flush()
+    assert.equal(h.player.currentTrack.id, 'netease:3')
+    assert.ok(!h.playback.slice(corrections).some(entry => ['seek', 'pause', 'resume'].includes(entry.type)),
+      'the old member request cannot pause or seek the controller newer local selection')
+    assert.equal(h.player.isPlaying, true)
+  }
+  supersededMemberLoad.options = { role: 'controller' }
+  await test(`a controller local selection supersedes a pending paused ${requestType}`, supersededMemberLoad)
+
+  const pausedMemberLoad = async h => {
+    await h.create()
+    await h.message({ type: 'welcome', role: 'controller', state: room() })
+    await h.timers.advance(4_000)
+    const remoteLoad = deferred()
+    h.playGates.push(remoteLoad)
+    await h.message({ type: 'member_control_requested',
+      causedBy: { userUuid: 'listener', type: requestType, eventId: 'paused-member-selection' },
+      queue: [wireTrack(2)], currentIndex: 0, track: wireTrack(2), shouldPlay: false, positionMs: 0,
+    })
+    remoteLoad.resolve()
+    await flush()
+    assert.equal(h.player.currentTrack.id, 'netease:2')
+    assert.equal(h.player.isPlaying, false, 'an unchanged member pause intent is still applied after loading')
+    assert.ok(h.commands.some(entry => entry.command === 'lt_send_event'
+      && entry.args.event.type === requestType.replace('REQUEST_', '')))
+  }
+  pausedMemberLoad.options = { role: 'controller' }
+  await test(`a pending ${requestType} still honors a member pause without a newer local command`, pausedMemberLoad)
+}
 
 await test('duplicate occurrences preserve the room current index and select another occurrence', async h => {
   await h.join()
@@ -990,6 +1192,17 @@ await test('TRACK_FINISHED reports where the finished track ended', async h => {
   assert.equal(finished?.args.event.positionMs, 60_000, 'the finish position is at least the track duration')
 })
 
+await test('a late track finish does not mark the newly selected room track as finished', async h => {
+  await h.join()
+  await h.message({ type: 'welcome', state: room([wireTrack(1), wireTrack(2)], { currentIndex: 1 }), role: 'listener' })
+  const baseline = h.commands.length
+  h.store.reportTrackFinished('netease:1')
+  h.store.reportTrackFinished(null)
+  await flush()
+  assert.ok(!h.commands.slice(baseline).some(entry => entry.command === 'lt_send_event'
+    && entry.args.event.type === 'TRACK_FINISHED'), 'only the current finished track can advance the room')
+})
+
 const sharingRoom = () => room([wireTrack(1)], { settings: { ...room().settings, shareAudioLinks: true } })
 
 const unavailableLink = async h => {
@@ -1133,6 +1346,58 @@ await test('leaving pauses local playback before telling the server', async h =>
 // 房间从 100_000 起以位置 5000 播放；harness 的播放器不会自己走进度，要按预期位置手动设好
 const playingRoom = (extra = {}) => room([wireTrack(1)], { playback: { ...room().playback, state: 'playing' }, ...extra })
 const expectedAt = h => 5000 + (h.timers.Date.now() - 100_000)
+
+async function requestListenerTrack(h) {
+  await h.join()
+  const initial = playingRoom({ queue: [wireTrack(1), wireTrack(2)] })
+  await h.message({ type: 'welcome', state: initial, role: 'listener' })
+  await h.timers.advance(4_000)
+  h.player.queueIndex = 1
+  h.player.currentTrack = h.player.queue[1]
+  h.player.positionMs = 0
+  await flush()
+  const request = h.commands.find(entry => entry.command === 'lt_send_event'
+    && entry.args.event.type === 'REQUEST_SET_TRACK')?.args.event
+  assert.ok(request, 'the local selection is waiting for the host to confirm it')
+  return { initial, request }
+}
+
+await test('the listener watchdog preserves a track selection while its queue request is awaiting acknowledgement', async h => {
+  await requestListenerTrack(h)
+  const plays = h.playback.filter(entry => entry.type === 'play').length
+  await h.timers.advance(4_000)
+  assert.equal(h.player.currentTrack.id, 'netease:2')
+  assert.equal(h.playback.filter(entry => entry.type === 'play').length, plays,
+    'a watchdog tick cannot roll an unanswered track request back to the old room track')
+})
+
+await test('an unanswered listener queue request eventually allows the watchdog to restore authoritative playback', async h => {
+  await requestListenerTrack(h)
+  await h.timers.advance(20_000)
+  assert.equal(h.player.currentTrack.id, 'netease:1',
+    'a missing acknowledgement cannot suppress room recovery indefinitely')
+})
+
+await test('a heartbeat preserves a pending listener selection until its authoritative acknowledgement', async h => {
+  const { initial, request } = await requestListenerTrack(h)
+  const plays = h.playback.filter(entry => entry.type === 'play').length
+  await h.message({ type: 'room_state_updated', state: { ...initial, version: 2 }, causedBy: { type: 'HEARTBEAT' } })
+  assert.equal(h.store.roomState.value.version, 2, 'room metadata is still kept current')
+  assert.equal(h.player.currentTrack.id, 'netease:2')
+  assert.equal(h.playback.filter(entry => entry.type === 'play').length, plays)
+  await h.message({ type: 'room_state_updated', state: room(initial.queue, {
+    version: 3, currentIndex: 1, playback: { ...initial.playback, basePositionMs: 0 },
+  }), causedBy: { type: 'REQUEST_SET_TRACK', eventId: request.eventId } })
+  assert.equal(h.player.currentTrack.id, 'netease:2')
+  assert.equal(h.store.roomState.value.currentIndex, 1)
+})
+
+await test('an authoritative track change is applied while a listener queue request is pending', async h => {
+  await requestListenerTrack(h)
+  await h.message({ type: 'room_state_updated', state: room([wireTrack(3)], { version: 2 }),
+    causedBy: { type: 'SET_TRACK', eventId: 'host-selection' } })
+  assert.equal(h.player.currentTrack.id, 'netease:3')
+})
 
 await test('the listener watchdog leaves a synced player alone and corrects a drifted one', async h => {
   await h.join()

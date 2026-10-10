@@ -187,6 +187,7 @@ export interface SeekCommandSnapshot {
   positionMs: number
   source: PlaybackCommandSource
   requestGeneration: number
+  fromPlaybackStart?: boolean
 }
 
 // 当前音频质量信息
@@ -350,6 +351,7 @@ const URL_EXPIRY_MS = 10 * 60 * 1000
 // Track End 去重
 let lastTrackEndedId: string | null = null
 let lastTrackEndedTime = 0
+let lastTrackEndedRequestToken = -1
 
 // 播放抽象层：解析缓存、预热仲裁、启动看门狗
 const playbackStartupWatchdog = new PlaybackStartupWatchdog()
@@ -519,6 +521,7 @@ export const usePlayerStore = defineStore('player', () => {
   let pauseGuardUntil = 0
   let pauseFrozenMs: number | null = null
   const lastCommandSource = ref<PlaybackCommandSource>('local')
+  const lastCommandSequence = ref(0)
   const lastSeekCommand = ref<SeekCommandSnapshot>({
     seq: 0,
     positionMs: 0,
@@ -531,8 +534,11 @@ export const usePlayerStore = defineStore('player', () => {
 
   function markCommandSource(source: PlaybackCommandSource) {
     lastCommandSource.value = source
+    lastCommandSequence.value++
     if (source === 'remote_sync') {
       _remoteSyncGuardUntil = Date.now() + 3000
+    } else if (source === 'local') {
+      _remoteSyncGuardUntil = 0
     }
   }
 
@@ -1047,7 +1053,7 @@ export const usePlayerStore = defineStore('player', () => {
   function markOptimisticSeek(
     targetMs: number,
     commandSource: PlaybackCommandSource,
-    options: { bumpSeq?: boolean; durationMs?: number } = {},
+    options: { bumpSeq?: boolean; durationMs?: number; fromPlaybackStart?: boolean } = {},
   ): number {
     const safeTargetMs = setRenderedPosition(targetMs, options.durationMs)
     lastSeekCommand.value = {
@@ -1055,6 +1061,7 @@ export const usePlayerStore = defineStore('player', () => {
       positionMs: safeTargetMs,
       source: commandSource,
       requestGeneration: playbackRequestToken,
+      fromPlaybackStart: options.fromPlaybackStart === true,
     }
     lastSeekedMs = safeTargetMs
     clearPauseGuard()
@@ -1428,7 +1435,7 @@ export const usePlayerStore = defineStore('player', () => {
     let appliedLoadPositionMs = 0
 
     if (requestedStartMs > 0) {
-      markOptimisticSeek(requestedStartMs, commandSource, { durationMs: track.durationMs })
+      markOptimisticSeek(requestedStartMs, commandSource, { durationMs: track.durationMs, fromPlaybackStart: true })
       deferredPlaybackSeek = {
         requestGeneration: token,
         positionMs: requestedStartMs,
@@ -2289,13 +2296,16 @@ export const usePlayerStore = defineStore('player', () => {
    * - off: 还有下一首则推进，否则停止播放但保留队列
    */
   async function handleTrackEnded() {
+    const finishedRequestToken = playbackRequestToken
     // Track End 去重：200ms ticker 可能重复触发
     const trackId = currentTrack.value?.id ?? null
-    if (trackId && trackId === lastTrackEndedId && Date.now() - lastTrackEndedTime < 2000) {
+    if (trackId && trackId === lastTrackEndedId && finishedRequestToken === lastTrackEndedRequestToken
+      && Date.now() - lastTrackEndedTime < 2000) {
       return
     }
     lastTrackEndedId = trackId
     lastTrackEndedTime = Date.now()
+    lastTrackEndedRequestToken = finishedRequestToken
     // 播完即清掉记住的位置
     const finishedTrack = currentTrack.value
     if (finishedTrack) persistLongFormProgress(finishedTrack, Math.max(finishedTrack.durationMs || 0, durationMs.value))
@@ -2305,7 +2315,10 @@ export const usePlayerStore = defineStore('player', () => {
     // 重连途中也一样：上报会走 HTTP 或在重连后补发（对齐 Android）
     const lt = useListenTogetherStore()
     if (lt.roomId && !lt.isController) {
+      const finishedRoomId = lt.roomId
       await pause('remote_sync')
+      // 暂停确认可能晚于切歌或换房，旧会话的结束通知不能推进新会话
+      if (finishedRequestToken !== playbackRequestToken || lt.roomId !== finishedRoomId || lt.isController) return
       lt.reportTrackFinished(trackId)
       return
     }
@@ -3142,7 +3155,7 @@ export const usePlayerStore = defineStore('player', () => {
     repeatMode, shuffleEnabled, volume, lyrics, playError, isLoadingAudio, isLoadingAudioSlow,
     hasPlaybackSession,
     audioLevel, beatImpulse, audioInfo, isPlayingFromDownload, isPlayingFromCache,
-    lastCommandSource, lastSeekCommand, isRemoteSyncGuardActive,
+    lastCommandSource, lastCommandSequence, lastSeekCommand, isRemoteSyncGuardActive,
     playbackSpeed, currentStreamUrl, sleepTimerMode, sleepRemainingSeconds,
     loudnessGainMb, equalizerEnabled, equalizerPresetId, equalizerBands, hasActiveEffects,
     progress, interpolatedPositionMs, interpolatedProgress, livePositionMs, effectivePlaybackSpeed,

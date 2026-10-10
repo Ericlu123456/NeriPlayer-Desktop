@@ -255,6 +255,7 @@ the sidebar.
   plus Bilibili and YouTube discovery shelves; Now Playing metadata and
   lyric completion use NetEase + QQ Music with LRCLIB as an external
   source.
+  Clicking or choosing Play on a search song replaces the queue with that selected version only.
 - 🗂️ **Library browsing by category**:
   Local / Favorites (playlists + followed artists) / Downloads / NetEase
   (playlists + albums) / Bilibili favorite folders / YouTube Music

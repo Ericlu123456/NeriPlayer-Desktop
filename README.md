@@ -229,6 +229,7 @@ pnpm tauri build    # 生产打包，产物在 src-tauri/target/release/bundle/
   `探索` 页按平台独立搜索（网易云 / Bilibili / YouTube Music），
   并提供 Bilibili 与 YouTube 发现货架；
   播放页元数据与歌词补全使用网易云 + QQ 音乐，并接入 LRCLIB。
+  点击或右键播放搜索歌曲时，播放队列替换为选中的单曲版本。
 - 🗂️ **媒体库分类浏览**：
   本地 / 收藏（歌单 + 已关注艺术家）/ 下载 / 网易云（歌单 + 专辑）/
   Bilibili 收藏夹 / YouTube Music 歌单，每个分类独立搜索，

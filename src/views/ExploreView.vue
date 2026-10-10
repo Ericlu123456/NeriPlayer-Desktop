@@ -259,12 +259,11 @@ function songToTrack(song: ExploreSong): TrackInfo {
   } as TrackInfo
 }
 
-/// 对齐 Android onSongClick(searchResults, index)：整份歌曲结果入队，从点中的那首开始
+// 搜索只播放选中的版本，避免其余翻唱结果自动进入队列
 function openResult(item: ExploreItem) {
   if (item.kind === 'song') {
     rememberSearch()
-    const queue = songResults.value.map(songToTrack)
-    player.playAll(queue, item.id)
+    player.playAll([songToTrack(item)], item.id)
     return
   }
   if (item.kind === 'notice') return
@@ -377,7 +376,7 @@ function openResultMenu(event: MouseEvent, item: ExploreItem) {
   }
 }
 
-/** 菜单里的「播放」与点击一致：搜索结果整份入队，发现页卡片单曲播放 */
+// 菜单播放沿用对应入口的队列和搜索历史行为
 function playFromMenu(track: TrackInfo) {
   const song = songResults.value.find(item => item.id === track.id)
   if (song) openResult(song)

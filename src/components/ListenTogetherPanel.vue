@@ -3,6 +3,7 @@ import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { useListenTogetherStore } from '@/stores/listenTogether'
 import {
   LT_NICKNAME_MAX_LENGTH,
+  isValidLtNickname,
   parseLtInvite,
   type ListenTogetherRoomSettings,
 } from '@/stores/listenTogether/protocol'
@@ -13,6 +14,10 @@ const emit = defineEmits<{ 'update:open': [value: boolean] }>()
 
 const lt = useListenTogetherStore()
 const { t } = useI18n()
+// 编辑草稿不读取默认名回退，避免删空时被重新填入
+const nicknameDraft = ref(lt.nickname)
+const nicknameInvalid = computed(() => !isValidLtNickname(nicknameDraft.value))
+watch(nicknameDraft, value => { lt.nickname = value.trim() })
 
 function close() {
   emit('update:open', false)
@@ -138,12 +143,15 @@ const connectedBanner = computed(() => {
 })
 
 function handleCreate() {
+  if (nicknameInvalid.value) return
+  lt.nickname = nicknameDraft.value.trim()
   lt.createRoom()
 }
 
 function handleJoin() {
   const target = invite.value
-  if (!target) return
+  if (!target || nicknameInvalid.value) return
+  lt.nickname = nicknameDraft.value.trim()
   // 邀请里的服务器只用于这次加入，不改写设置里的服务器地址
   lt.joinRoom(target.roomId, target.joinSecret, target.baseUrl)
 }
@@ -176,7 +184,10 @@ function formatRelativeTime(timestamp?: number | null) {
 
 // 组件常驻挂载, 剪贴板检测跟随弹窗打开时机
 watch(() => props.open, (open) => {
-  if (open) checkClipboard()
+  if (open) {
+    nicknameDraft.value = lt.nickname
+    checkClipboard()
+  }
 })
 
 function checkClipboardWhenOpen() {
@@ -235,12 +246,17 @@ onUnmounted(() => {
         <label for="lt-nickname">{{ t('listen_together.nickname') }}</label>
         <input
           id="lt-nickname"
-          v-model.trim="lt.nickname"
+          v-model="nicknameDraft"
           type="text"
           class="lt-input"
           :maxlength="LT_NICKNAME_MAX_LENGTH"
           :placeholder="t('listen_together.nickname_placeholder')"
+          :aria-invalid="nicknameInvalid"
+          :aria-describedby="nicknameInvalid ? 'lt-nickname-hint' : undefined"
         />
+        <small v-if="nicknameInvalid" id="lt-nickname-hint" class="lt-field-hint error">
+          {{ t('listen_together.invalid_nickname') }}
+        </small>
       </div>
 
       <div class="lt-field">
@@ -267,11 +283,11 @@ onUnmounted(() => {
       </div>
 
       <div class="lt-actions">
-        <button class="lt-btn primary" @click="handleCreate">
+        <button class="lt-btn primary" :disabled="nicknameInvalid" @click="handleCreate">
           <span class="material-symbols-rounded">add</span>
           {{ t('listen_together.create_room') }}
         </button>
-        <button class="lt-btn" :disabled="!invite" @click="handleJoin">
+        <button class="lt-btn" :disabled="!invite || nicknameInvalid" @click="handleJoin">
           <span class="material-symbols-rounded">login</span>
           {{ t('listen_together.join_room') }}
         </button>

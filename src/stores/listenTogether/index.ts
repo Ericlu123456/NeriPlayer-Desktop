@@ -49,6 +49,7 @@ import {
   StallDetector,
   TRACKED_MEMBER_REQUESTS,
   WATCHDOG_INTERVAL_MS,
+  MEMBER_REQUEST_TTL_MS,
   type PendingMemberRequest,
 } from './watchdog'
 import { createLogger } from '@/utils/logger'
@@ -74,6 +75,9 @@ const SOCKET_RESPONSE_TIMEOUT_MS = 35_000
 // 已处理转发请求 eventId 上限（对齐 Android ForwardedRequestDeduper 语义）
 const HANDLED_FORWARDED_EVENT_LIMIT = 256
 const HANDLED_FORWARDED_REQUESTER_LIMIT = 64
+const PASSIVE_ROOM_UPDATE_TYPES = new Set([
+  'HEARTBEAT', 'LINK_READY', 'LINK_UNAVAILABLE', 'MEMBER_JOINED', 'MEMBER_LEFT', 'WATCHDOG_REFRESH',
+])
 
 export const useListenTogetherStore = defineStore('listenTogether', () => {
   const settings = useSettingsStore()
@@ -171,6 +175,7 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
   let _queueEventInFlight: ListenTogetherEvent | null = null
   let _queueEventSnapshot: ListenTogetherEvent | null = null
   let _queuedQueueEvent: ListenTogetherEvent | null = null
+  let _queueEventPendingSince = 0
   let _queueAckTimer: ReturnType<typeof setTimeout> | null = null
   let _lastReportedIsPlaying: boolean | null = null
   let _lastReportedRepeatMode: number | null = null
@@ -438,6 +443,7 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
     _queueEventInFlight = null
     _queueEventSnapshot = null
     _queuedQueueEvent = null
+    _queueEventPendingSince = 0
     if (_queueAckTimer) clearTimeout(_queueAckTimer)
     _queueAckTimer = null
     _lastReportedIsPlaying = null
@@ -718,7 +724,15 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
     }
     if (accepted.settings) liveRoomSettings.value = { ...accepted.settings }
     markSync(causeType, accepted.updatedAt || Date.now())
-    if (apply) applyRoomStateToPlayer(accepted, causeType, expectedPositionMs)
+    // 请求确认前的心跳仍描述旧队列，不能撤回听众刚选中的歌曲
+    if (apply && !(hasPendingListenerQueueEvent() && PASSIVE_ROOM_UPDATE_TYPES.has(causeType))) {
+      applyRoomStateToPlayer(accepted, causeType, expectedPositionMs)
+    }
+  }
+
+  function hasPendingListenerQueueEvent(): boolean {
+    return !isController.value && !!(_queueEventInFlight || _queuedQueueEvent)
+      && Date.now() - _queueEventPendingSince <= MEMBER_REQUEST_TTL_MS
   }
 
   function handleRoomStateUpdated(envelope: ListenTogetherSocketEnvelope) {
@@ -895,23 +909,30 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
       return
     }
 
+    const applySequence = _playbackApplySequence
+    const seekSequence = player.lastSeekCommand.seq
+    const requestStillCurrent = () => generation === _sessionGeneration
+      && applySequence === _playbackApplySequence
+      && !(player.lastSeekCommand.source === 'local' && !player.lastSeekCommand.fromPlaybackStart
+        && player.lastSeekCommand.seq > seekSequence)
+
     _suppressPlayerWatch = true
     try {
       switch (causeType) {
         case 'REQUEST_PLAY':
           if (!player.isPlaying) await player.resume('remote_sync')
-          if (generation !== _sessionGeneration) return
+          if (!requestStillCurrent()) return
           reportPlayEvent()
           break
         case 'REQUEST_PAUSE':
           if (player.isPlaying) await player.pause('remote_sync')
-          if (generation !== _sessionGeneration) return
+          if (!requestStillCurrent()) return
           reportPauseEvent()
           break
         case 'REQUEST_SEEK':
           if (envelope.positionMs != null) {
             await player.seekTo(envelope.positionMs, 'remote_sync')
-            if (generation !== _sessionGeneration) return
+            if (!requestStillCurrent()) return
             reportSeekEvent(envelope.positionMs)
           }
           break
@@ -927,9 +948,9 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
             }
             replacePlayerQueue(queue.queue, index)
             await player.play(player.queue[index], 'remote_sync', envelope.positionMs ?? 0)
-            if (generation !== _sessionGeneration) return
+            if (!requestStillCurrent()) return
             if (envelope.shouldPlay === false) await player.pause('remote_sync')
-            if (generation !== _sessionGeneration) return
+            if (!requestStillCurrent()) return
             reportSetTrackEvent(envelope.track, index)
           }
           break
@@ -943,14 +964,14 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
             ? true : envelope.stateName === 'paused' || envelope.shouldPlay === false ? false : player.isPlaying
           if (track && (!player.currentTrack || trackInfoToLtTrack(player.currentTrack).stableKey !== queue.queue[queue.currentIndex].stableKey)) {
             await player.play(track, 'remote_sync', requestedPosition)
-            if (generation !== _sessionGeneration) return
+            if (!requestStillCurrent()) return
           }
           if (!track || !shouldPlay) await player.pause('remote_sync')
           else if (!player.isPlaying) await player.resume('remote_sync')
-          if (generation !== _sessionGeneration) return
+          if (!requestStillCurrent()) return
           if (track && envelope.positionMs != null && Math.abs(player.positionMs - requestedPosition) > 800) {
             await player.seekTo(requestedPosition, 'remote_sync')
-            if (generation !== _sessionGeneration) return
+            if (!requestStillCurrent()) return
           }
           reportQueueEvent()
           break
@@ -1130,6 +1151,7 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
         setSyncRate(null)
         const generation = _sessionGeneration
         const applySequence = ++_playbackApplySequence
+        const seekSequence = player.lastSeekCommand.seq
         _pendingRemotePlaybackLoads.add(applySequence)
         // 播放完成后读取最新房态，避免固定延时在慢速解析中暂停错误的会话
         void player.play(player.queue[targetIndex], 'remote_sync', expectedPos).then(async () => {
@@ -1138,7 +1160,10 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
           const latestKey = latest?.track?.stableKey ?? latest?.queue[latest.currentIndex]?.stableKey
           if (!latest || latestKey !== effectiveLtTrack.stableKey) return
           const latestPosition = resolveExpectedPosition(latest, Date.now() + _serverClockOffsetMs)
-          if (Math.abs(latestPosition - player.positionMs) > 500) {
+          const newerLocalSeek = player.lastSeekCommand.source === 'local'
+            && !player.lastSeekCommand.fromPlaybackStart
+            && player.lastSeekCommand.seq > seekSequence
+          if (!newerLocalSeek && Math.abs(latestPosition - player.positionMs) > 500) {
             await player.seekTo(latestPosition, 'remote_sync')
             if (generation !== _sessionGeneration || applySequence !== _playbackApplySequence) return
           }
@@ -1187,6 +1212,8 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
     _lastReportedIsPlaying = player.isPlaying
     _lastReportedRepeatMode = desktopRepeatToWire(player.repeatMode)
     _lastReportedShuffle = !!player.shuffleEnabled
+    let observedCommandSequence = player.lastCommandSequence
+    let observedSeekSequence = player.lastSeekCommand.seq
 
     _playerWatchStop = watch(
       () => ({
@@ -1196,10 +1223,28 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
         isLoadingAudio: player.isLoadingAudio,
         repeatMode: player.repeatMode,
         shuffleEnabled: player.shuffleEnabled,
+        commandSource: player.lastCommandSource,
+        commandSequence: player.lastCommandSequence,
+        seekSequence: player.lastSeekCommand.seq,
       }),
       (newVal) => {
+        const newLocalCommand = newVal.commandSource === 'local'
+          && newVal.commandSequence !== observedCommandSequence
+        const newLocalSeek = player.lastSeekCommand.source === 'local'
+          && !player.lastSeekCommand.fromPlaybackStart
+          && newVal.seekSequence !== observedSeekSequence
+        observedCommandSequence = newVal.commandSequence
+        observedSeekSequence = newVal.seekSequence
         // 断线时也照常上报：发不出去会走 HTTP，再不行进待补发队列，不能让本地操作被重连时的房态撤回
-        if (_suppressPlayerWatch || _pendingRemotePlaybackLoads.size > 0 || player.isRemoteSyncGuardActive()) return
+        if (!newLocalCommand && (_suppressPlayerWatch || _pendingRemotePlaybackLoads.size > 0 || player.isRemoteSyncGuardActive())) return
+        if (newLocalCommand && (!newLocalSeek || newVal.trackId !== _lastReportedTrackId)) {
+          // 后来的本地播放意图取代旧加载，旧 Promise 完成后不能再调整新歌曲
+          _playbackApplySequence++
+          _pendingRemotePlaybackLoads.clear()
+          _suppressPlayerWatch = false
+          if (_watchReleaseTimer) clearTimeout(_watchReleaseTimer)
+          _watchReleaseTimer = null
+        }
 
         // 曲目变化
         let trackReported = false
@@ -1275,10 +1320,8 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
     _seekWatchStop = watch(
       () => player.lastSeekCommand.seq,
       () => {
-        if (_suppressPlayerWatch || _pendingRemotePlaybackLoads.size > 0) return
         const seek = player.lastSeekCommand
         if (seek.source !== 'local') return
-        if (player.isRemoteSyncGuardActive()) return
 
         scheduleLocalSeekReport(seek.positionMs)
       },
@@ -1580,6 +1623,7 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
   }
 
   function sendQueueEvent(snapshot: ListenTogetherEvent, forceSnapshot = false) {
+    _queueEventPendingSince = Date.now()
     if (_queueEventInFlight) {
       _queuedQueueEvent = snapshot
       return
@@ -1616,6 +1660,7 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
     if (_queueAckTimer) clearTimeout(_queueAckTimer)
     _queueAckTimer = null
     _queueEventInFlight = null
+    _queueEventPendingSince = 0
     const previousSnapshot = _queueEventSnapshot
     _queueEventSnapshot = null
     if (accepted && roomState.value) refreshLocalQueueReferences(previousSnapshot, roomState.value)
@@ -1715,14 +1760,13 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
   /// listener 的 TRACK_FINISHED 不带 currentIndex/track/queue）
   function reportTrackFinished(finishedTrackId: string | null) {
     const player = usePlayerStore()
+    // 暂停期间可能已收到下一首的房态，迟到的结束通知只属于原曲目
+    if (!finishedTrackId || player.currentTrack?.id !== finishedTrackId) return
     const finishedLtTrack = player.currentTrack ? trackInfoToLtTrack(player.currentTrack) : null
     if (!finishedLtTrack || finishedLtTrack.channelId === 'local' || finishedLtTrack.channelId === 'qqMusic') return
-    const finishedKey = finishedTrackId
-      ? finishedLtTrack.stableKey
-      : undefined
     sendEvent({
       type: 'TRACK_FINISHED',
-      finishedTrackStableKey: finishedKey,
+      finishedTrackStableKey: finishedLtTrack.stableKey,
       // 服务端以它作为完成位置；不带时退回服务端推算的位置，可能还差几秒（对齐 Android EventFactory）
       positionMs: Math.max(finishedLtTrack.durationMs ?? 0, player.positionMs),
     })
@@ -1809,7 +1853,9 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
       }
     }
     // 自己的请求还在等房主处理时不按房态回放，否则会把用户刚做的操作撤回去
-    if (state && !requestPending && state.roomStatus === 'active') syncListenerToRoom(state, now, serverNow)
+    if (state && !requestPending && !hasPendingListenerQueueEvent() && state.roomStatus === 'active') {
+      syncListenerToRoom(state, now, serverNow)
+    }
 
     if (!shouldRefreshListenerState(now, _lastSocketMessageAt, _lastWatchdogRefreshAt, _stateRepairPending)) return
     _lastWatchdogRefreshAt = now

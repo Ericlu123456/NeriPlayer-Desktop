@@ -33,6 +33,7 @@ const state = ref<TrayPopupState>({
   desktopLyricsOpen: false,
 })
 const coverFailed = ref(false)
+const coverAttempt = ref(0)
 const cardRef = ref<HTMLElement | null>(null)
 let releases: UnlistenFn[] = []
 let disposed = false
@@ -41,7 +42,19 @@ let receivedState = false
 const track = computed(() => state.value.track)
 const coverSrc = computed(() => (coverFailed.value ? '' : track.value?.coverUrl || ''))
 
-watch(() => track.value?.coverUrl, () => { coverFailed.value = false })
+watch(track, (next, previous) => {
+  if (next?.coverUrl !== previous?.coverUrl || next?.title !== previous?.title || next?.artist !== previous?.artist) {
+    coverAttempt.value++
+    coverFailed.value = false
+  }
+})
+
+function handleCoverError(event: Event) {
+  const image = event.currentTarget as HTMLImageElement
+  if (image.getAttribute('src') !== track.value?.coverUrl
+    || image.getAttribute('data-cover-attempt') !== String(coverAttempt.value)) return
+  coverFailed.value = true
+}
 
 function applyState(next: TrayPopupState) {
   state.value = next
@@ -62,6 +75,14 @@ function playEnter() {
   if (!card || window.matchMedia('(prefers-reduced-motion: reduce)').matches) return
   card.getAnimations().forEach(animation => animation.cancel())
   card.animate(ENTER_KEYFRAMES, ENTER_OPTIONS)
+}
+
+function handleShown() {
+  if (coverFailed.value) {
+    coverAttempt.value++
+    coverFailed.value = false
+  }
+  playEnter()
 }
 
 function onKeydown(event: KeyboardEvent) {
@@ -93,7 +114,7 @@ onMounted(async () => {
       receivedState = true
       applyState(event.payload)
     }),
-    listen('tray-popup:shown', playEnter),
+    listen('tray-popup:shown', handleShown),
   ])
   if (disposed) {
     unlisten.forEach(release => release())
@@ -136,7 +157,7 @@ onUnmounted(() => {
           <img :src="coverSrc" alt="" referrerpolicy="no-referrer" />
         </div>
         <div class="tp-cover">
-          <img v-if="coverSrc" :src="coverSrc" alt="" referrerpolicy="no-referrer" @error="coverFailed = true" />
+          <img v-if="coverSrc" :key="`${coverAttempt}:${coverSrc}`" :src="coverSrc" :data-cover-attempt="coverAttempt" alt="" referrerpolicy="no-referrer" @error="handleCoverError" />
           <span v-else class="material-symbols-rounded">music_note</span>
           <span v-if="track && state.isPlaying" class="tp-eq" aria-hidden="true"><i /><i /><i /></span>
         </div>
