@@ -28,9 +28,13 @@ pub const POPUP_LABEL: &str = "tray-popup";
 const TRAY_ID: &str = "main-tray";
 /// 自绘面板只在 Windows 上用；其余平台走原生菜单
 const USE_POPUP: bool = cfg!(target_os = "windows");
-/// 面板窗口的逻辑尺寸，四周含 10px 透明边留给阴影，与 TrayPopupView 的布局对应
+/// 面板窗口的 CSS 尺寸，四周含 10px 透明边留给阴影，与 TrayPopupView 的布局对应；
+/// 高度以页面实测的内容高度为准，这里只是页面就绪前的初始值
 const POPUP_WIDTH: f64 = 300.0;
 const POPUP_HEIGHT: f64 = 316.0;
+/// WebView2 会再乘上 Windows「文本大小」，页面实测的缩放只在这个范围内采信
+const POPUP_TEXT_SCALE_RANGE: (f64, f64) = (1.0, 3.0);
+const POPUP_CONTENT_HEIGHT_RANGE: (f64, f64) = (120.0, 640.0);
 /// 面板开着时再点托盘图标：失焦隐藏先于点击事件到达，这段时间内的点击不再重新打开
 const REOPEN_GUARD: Duration = Duration::from_millis(300);
 /// 主窗口没在这段时间内落盘完成就直接退出，避免页面卡死时退不掉
@@ -120,6 +124,55 @@ struct MenuLabels {
     quit: String,
 }
 
+/// 面板页面就绪时实测的排版：视口 CSS 宽度与内容（含阴影边）的 CSS 高度
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrayPopupLayout {
+    css_width: f64,
+    content_height: f64,
+}
+
+/// 面板窗口该用的 CSS 尺寸与文本缩放（WebView2 的 CSS 像素 = 显示器缩放 × 文本缩放 个物理像素）
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct PopupMetrics {
+    text_scale: f64,
+    content_height: f64,
+}
+
+impl Default for PopupMetrics {
+    fn default() -> Self {
+        Self { text_scale: 1.0, content_height: POPUP_HEIGHT }
+    }
+}
+
+impl PopupMetrics {
+    /// physical_width、monitor_scale 取测量时面板窗口自身的值
+    fn measured(layout: TrayPopupLayout, physical_width: f64, monitor_scale: f64) -> Self {
+        let fallback = Self::default();
+        let text_scale = if layout.css_width.is_finite() && layout.css_width > 0.0 && monitor_scale > 0.0 {
+            physical_width / layout.css_width / monitor_scale
+        } else {
+            fallback.text_scale
+        };
+        let text_scale = if text_scale.is_finite() {
+            text_scale.clamp(POPUP_TEXT_SCALE_RANGE.0, POPUP_TEXT_SCALE_RANGE.1)
+        } else {
+            fallback.text_scale
+        };
+        let content_height = if layout.content_height.is_finite() {
+            layout.content_height.clamp(POPUP_CONTENT_HEIGHT_RANGE.0, POPUP_CONTENT_HEIGHT_RANGE.1)
+        } else {
+            fallback.content_height
+        };
+        Self { text_scale, content_height }
+    }
+
+    fn physical_size(self, monitor_scale: f64) -> (i32, i32) {
+        let zoom = monitor_scale.max(0.1) * self.text_scale;
+        ((POPUP_WIDTH * zoom).round() as i32, (self.content_height * zoom).round() as i32)
+    }
+}
+
 #[derive(Default)]
 struct TrayRuntime {
     snapshot: TraySnapshot,
@@ -127,6 +180,7 @@ struct TrayRuntime {
     menu: Option<NativeMenu>,
     /// 面板首次创建、页面还没就绪时记下的锚点，就绪后在这里弹出
     popup_anchor: Option<PhysicalPosition<f64>>,
+    popup_metrics: PopupMetrics,
     popup_hidden_at: Option<Instant>,
     sent_state: Option<TrayPopupState>,
     sent_labels: Option<MenuLabels>,
@@ -450,12 +504,13 @@ fn show_popup(app: &AppHandle, window: &WebviewWindow, anchor: PhysicalPosition<
         .flatten()
         .or_else(|| app.primary_monitor().ok().flatten());
     if let Some(monitor) = monitor {
-        let scale = monitor.scale_factor().max(0.1);
+        let metrics = TRAY
+            .lock()
+            .as_ref()
+            .map(|runtime| runtime.popup_metrics)
+            .unwrap_or_default();
         let area = monitor.work_area();
-        let size = (
-            (POPUP_WIDTH * scale).round() as i32,
-            (POPUP_HEIGHT * scale).round() as i32,
-        );
+        let size = metrics.physical_size(monitor.scale_factor());
         let (x, y) = popup_origin(
             (anchor.x.round() as i32, anchor.y.round() as i32),
             size,
@@ -637,14 +692,25 @@ pub fn get_tray_popup_state(window: WebviewWindow) -> AppResult<TrayPopupState> 
         .unwrap_or_default())
 }
 
-/// 面板页面首次加载完成：在记下的锚点处弹出
+/// 面板页面首次加载完成：按实测排版定尺寸，在记下的锚点处弹出
 #[tauri::command]
-pub fn tray_popup_ready(app: AppHandle, window: WebviewWindow) -> AppResult<()> {
+pub fn tray_popup_ready(
+    app: AppHandle,
+    window: WebviewWindow,
+    layout: Option<TrayPopupLayout>,
+) -> AppResult<()> {
     require_window(&window, POPUP_LABEL)?;
-    let anchor = TRAY
-        .lock()
-        .as_mut()
-        .and_then(|runtime| runtime.popup_anchor.take());
+    let metrics = layout.and_then(|layout| {
+        let physical_width = window.inner_size().ok()?.width as f64;
+        let monitor_scale = window.scale_factor().ok()?;
+        Some(PopupMetrics::measured(layout, physical_width, monitor_scale))
+    });
+    let anchor = TRAY.lock().as_mut().and_then(|runtime| {
+        if let Some(metrics) = metrics {
+            runtime.popup_metrics = metrics;
+        }
+        runtime.popup_anchor.take()
+    });
     if let Some(anchor) = anchor {
         show_popup(&app, &window, anchor);
     }
@@ -767,6 +833,27 @@ mod tests {
         assert_eq!(snapshot.theme.vars.len(), 1);
         assert!(snapshot.theme.vars.contains_key("--md-primary"));
         assert!(snapshot.track.unwrap().cover_url.is_empty());
+    }
+
+    #[test]
+    fn popup_grows_with_windows_text_size_so_quit_stays_visible() {
+        // 150% 显示器缩放 + 125% 文本大小：300 逻辑宽的窗口里页面只有 240 CSS 宽
+        let layout = TrayPopupLayout { css_width: 240.0, content_height: 316.0 };
+        let metrics = PopupMetrics::measured(layout, 450.0, 1.5);
+        assert!((metrics.text_scale - 1.25).abs() < 1e-9);
+        assert_eq!(metrics.physical_size(1.5), (563, 593));
+        // 换到 100% 的屏上，文本缩放照旧
+        assert_eq!(metrics.physical_size(1.0), (375, 395));
+    }
+
+    #[test]
+    fn popup_layout_ignores_broken_measurements() {
+        let broken = TrayPopupLayout { css_width: 0.0, content_height: f64::NAN };
+        assert_eq!(PopupMetrics::measured(broken, 300.0, 1.0), PopupMetrics::default());
+        let tiny = TrayPopupLayout { css_width: 600.0, content_height: 10_000.0 };
+        let metrics = PopupMetrics::measured(tiny, 300.0, 1.0);
+        assert_eq!(metrics.text_scale, POPUP_TEXT_SCALE_RANGE.0);
+        assert_eq!(metrics.content_height, POPUP_CONTENT_HEIGHT_RANGE.1);
     }
 
     #[test]

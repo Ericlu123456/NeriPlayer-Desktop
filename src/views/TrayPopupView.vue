@@ -27,6 +27,7 @@ const state = ref<TrayPopupState>({
   desktopLyricsOpen: false,
 })
 const coverFailed = ref(false)
+const cardRef = ref<HTMLElement | null>(null)
 let release: UnlistenFn | null = null
 let disposed = false
 
@@ -61,6 +62,14 @@ async function fontsReady() {
   ])
 }
 
+/** 后端据此换算窗口尺寸：Windows 调大「文本大小」后同样的窗口里 CSS 像素变少，固定尺寸会裁掉「退出」 */
+function measureLayout() {
+  const card = cardRef.value
+  if (!card) return null
+  const padding = card.parentElement ? Number.parseFloat(getComputedStyle(card.parentElement).paddingTop) * 2 : 0
+  return { cssWidth: window.innerWidth, contentHeight: Math.ceil(card.offsetHeight + padding) }
+}
+
 onMounted(async () => {
   document.documentElement.classList.add('tray-popup-page')
   window.addEventListener('keydown', onKeydown)
@@ -78,7 +87,7 @@ onMounted(async () => {
   }
   await nextTick()
   await fontsReady()
-  if (!disposed) void invoke('tray_popup_ready').catch(() => {})
+  if (!disposed) void invoke('tray_popup_ready', { layout: measureLayout() }).catch(() => {})
 })
 
 onUnmounted(() => {
@@ -92,7 +101,7 @@ onUnmounted(() => {
 
 <template>
   <main class="tray-popup" @contextmenu.prevent>
-    <section class="tp-card" role="menu" :aria-label="t('tray.menu_label')">
+    <section ref="cardRef" class="tp-card" role="menu" :aria-label="t('tray.menu_label')">
       <button
         class="tp-hero"
         :class="{ 'tp-hero--idle': !track }"
@@ -171,7 +180,7 @@ onUnmounted(() => {
   overflow: hidden;
 }
 
-/* 窗口四周 10px 透明边留给阴影，尺寸与后端 POPUP_WIDTH/POPUP_HEIGHT 对应 */
+/* 窗口四周 10px 透明边留给阴影；宽度与后端 POPUP_WIDTH 对应，高度由卡片实际内容决定 */
 .tray-popup {
   box-sizing: border-box;
   width: 100%;
@@ -186,7 +195,6 @@ onUnmounted(() => {
   box-sizing: border-box;
   display: flex;
   flex-direction: column;
-  height: 100%;
   padding: 6px;
   border-radius: 18px;
   background: var(--md-surface-container);
@@ -219,7 +227,7 @@ button:focus-visible {
   display: flex;
   align-items: center;
   gap: 12px;
-  flex: 1 0 76px;
+  flex: none;
   min-height: 76px;
   padding: 12px;
   border-radius: 13px;
