@@ -351,6 +351,10 @@ cargo clippy         # lint（交付要求零警告）
 5. 执行 `pnpm test:sync-protocol-upgrade` 与 Rust `sync` 模块测试；
    Android JVM 反向解码运行 `./scripts/test-sync-android-interop.ps1 -AndroidRoot <Android仓库> -ExportFixtures`。
    此检查不代替整仓 Gradle、provider 或设备互通验收。
+6. B站跳过区间按 `bvid + cid` 绑定分 P，使用 `biliVideoSkipRules` 扩展与 V4 类型 14。
+   编辑复用同步元数据事务和变更 epoch；清空保留删除记录，避免旧设备恢复规则。
+   策略、store、播放器与对话框回归分别为 `pnpm test:bili-video-skip`、
+   `pnpm test:bili-video-skip-store`、`pnpm test:bili-video-skip-runtime`、`pnpm test:bili-video-skip-dialog`。
 
 #### 6. 修改一起听
 

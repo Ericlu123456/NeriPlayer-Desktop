@@ -358,7 +358,6 @@ fn merge_extensions(local:&serde_json::Map<String,serde_json::Value>,remote:&ser
         ("playlistUsageStats",&["playlistKey"][..],"lastOpenedAt"),
         ("localPlaylistPlaybackStats",&["playlistId"][..],"lastPlayedAt"),
         ("localPlaylistPlaybackBuckets",&["playlistId","dayStartAt"][..],"lastPlayedAt"),
-        ("biliVideoSkipRules",&["bvid","cid"][..],"modifiedAt"),
     ] {
         let mut groups:BTreeMap<String,serde_json::Value>=BTreeMap::new();
         let Some(items)=result.get(section).and_then(serde_json::Value::as_array).cloned() else {continue;};
@@ -369,6 +368,11 @@ fn merge_extensions(local:&serde_json::Map<String,serde_json::Value>,remote:&ser
             groups.entry(key).and_modify(|previous|*previous=merge_metadata_record(section,previous,&item,timestamp)).or_insert_with(||merge_metadata_record(section,&item,&item,timestamp));
         }
         result.insert(section.into(),serde_json::Value::Array(groups.into_values().collect()));
+    }
+    if result.contains_key("biliVideoSkipRules") {
+        if let Ok(rules) = crate::library::bili_video_skip::rules_from_extensions(&result) {
+            result.insert("biliVideoSkipRules".into(), serde_json::json!(rules));
+        }
     }
     lift_local_playlist_stats(&mut result);
     result
@@ -417,16 +421,6 @@ fn merge_metadata_record(section:&str,left:&serde_json::Value,right:&serde_json:
     if section=="playlistUsageDeletions" {
         let tokens=normalize_sync_causal_tokens(&[usage_deletion_tokens(left),usage_deletion_tokens(right)].concat());
         result["deletionTokens"]=serde_json::json!(tokens); result["deletedAt"]=json_i64(left,"deletedAt").max(json_i64(right,"deletedAt")).max(0).into(); return result;
-    }
-    if section=="biliVideoSkipRules" {
-        if json_i64(left,timestamp)!=json_i64(right,timestamp) {return result;}
-        let left_deleted=left["isDeleted"].as_bool().unwrap_or(false); let right_deleted=right["isDeleted"].as_bool().unwrap_or(false);
-        if left_deleted && right_deleted {result["intervals"]=serde_json::json!([]); return result;}
-        if left_deleted {return right.clone();}
-        if right_deleted {return left.clone();}
-        let mut intervals:Vec<(i64,i64)>=left["intervals"].as_array().into_iter().flatten().chain(right["intervals"].as_array().into_iter().flatten()).map(|value|(json_i64(value,"startMs").max(0),json_i64(value,"endMs").max(0))).filter(|(start,end)|end>start).collect(); intervals.sort_unstable();
-        let mut merged:Vec<(i64,i64)>=Vec::new(); for (start,end) in intervals {if let Some(previous)=merged.last_mut().filter(|previous|start<=previous.1){previous.1=previous.1.max(end);}else{merged.push((start,end));}}
-        result["intervals"]=serde_json::json!(merged.into_iter().map(|(start,end)|serde_json::json!({"startMs":start,"endMs":end})).collect::<Vec<_>>()); return result;
     }
     let (count,base,first,last)=if section=="playlistUsageStats" {("openCount","counterBaseOpenCount","firstOpenedAt","lastOpenedAt")}else if section=="localPlaylistPlaybackStats" {("totalPlayCount","counterBasePlayCount","firstPlayedAt","lastPlayedAt")}else{("playCount","counterBasePlayCount","firstPlayedAt","lastPlayedAt")};
     let left_shards:Vec<SyncPlaybackCounterShard>=serde_json::from_value(left["counterShards"].clone()).unwrap_or_default();
@@ -2278,6 +2272,31 @@ mod tests {
         assert_eq!(merged.playlists[0].songs[0].matched_lyric.as_deref(),Some("new\n"));
         assert_eq!(merged.extensions["lyricOverrides"][0]["name"],"");
         assert_eq!(merged.extensions["lyricOverrides"][0]["addedAt"],0);
+    }
+
+    #[test]
+    fn bili_skip_merge_applies_android_interval_limit_before_merging() {
+        let intervals: Vec<_> = (0..102).map(|start| serde_json::json!({"startMs": start, "endMs": start + 1})).collect();
+        let local = serde_json::Map::from_iter([("biliVideoSkipRules".into(), serde_json::json!([{
+            "bvid": "BVtest", "cid": 9, "intervals": intervals, "modifiedAt": 10, "isDeleted": false
+        }]))]);
+        let merged = merge_extensions(&local, &serde_json::Map::new());
+        assert_eq!(merged["biliVideoSkipRules"][0]["intervals"], serde_json::json!([{"startMs": 0, "endMs": 100}]));
+    }
+
+    #[test]
+    fn bili_skip_rules_converge_in_both_directions_and_tombstones_survive() {
+        let active = serde_json::json!({"bvid":"BVtest","cid":9,"intervals":[{"startMs":10,"endMs":20}],"modifiedAt":10,"isDeleted":false});
+        let mut adjacent = active.clone();
+        adjacent["intervals"] = serde_json::json!([{"startMs":20,"endMs":30}]);
+        let deleted = serde_json::json!({"bvid":"BVtest","cid":10,"intervals":[],"modifiedAt":11,"isDeleted":true});
+        let local = serde_json::Map::from_iter([("biliVideoSkipRules".into(), serde_json::json!([active, deleted.clone()]))]);
+        let remote = serde_json::Map::from_iter([("biliVideoSkipRules".into(), serde_json::json!([adjacent, {"bvid":"BVtest","cid":10,"intervals":[{"startMs":0,"endMs":1}],"modifiedAt":10,"isDeleted":false}]))]);
+        let merged = merge_extensions(&local, &remote);
+        assert_eq!(merged, merge_extensions(&remote, &local));
+        assert_eq!(merged["biliVideoSkipRules"][0]["intervals"], serde_json::json!([{"startMs":10,"endMs":30}]));
+        assert_eq!(merged["biliVideoSkipRules"][1], deleted);
+        assert_eq!(merge_extensions(&merged, &merged), merged);
     }
 
     #[test]

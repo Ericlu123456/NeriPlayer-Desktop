@@ -1047,6 +1047,13 @@ mod tests {
                         is_deleted: false,
                         song_order_version: 0,
                     }],
+                    extensions: Map::from_iter([(
+                        "biliVideoSkipRules".into(),
+                        serde_json::json!([
+                            {"bvid":"BVinterop","cid":99,"intervals":[{"startMs":1000,"endMs":2000},{"startMs":5000,"endMs":7000}],"modifiedAt":10,"isDeleted":false},
+                            {"bvid":"BVinterop","cid":100,"intervals":[],"modifiedAt":11,"isDeleted":true}
+                        ]),
+                    )]),
                     ..Default::default()
                 },
             ),
@@ -1239,7 +1246,7 @@ mod tests {
             loaded.data.playlists[0].songs[0].original_lyric,
             Some(String::new())
         );
-        assert_eq!(loaded.data.extensions["biliVideoSkipRules"][0]["cid"], 9);
+        assert_eq!(loaded.data.extensions["biliVideoSkipRules"], data.extensions["biliVideoSkipRules"]);
         assert!(loaded.data.extensions[LEGACY_CANDIDATES]
             .as_array()
             .is_some_and(|items| !items.is_empty()));

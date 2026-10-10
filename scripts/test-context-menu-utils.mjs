@@ -20,6 +20,7 @@ function evaluate(source, dependencies = {}, context = {}) {
 const localTrack = evaluate(await readFile(new URL('utils/localTrack.ts', root), 'utf8'))
 const volume = evaluate(await readFile(new URL('utils/volume.ts', root), 'utf8'))
 const contextMenu = evaluate(await readFile(new URL('utils/contextMenu.ts', root), 'utf8'))
+const biliVideoSkip = evaluate(await readFile(new URL('modules/playback/biliVideoSkip.ts', root), 'utf8'))
 const clipboardSource = await readFile(new URL('utils/clipboard.ts', root), 'utf8').catch(error => {
   if (error.code === 'ENOENT') return null
   throw error
@@ -57,6 +58,7 @@ function menuRuntime(native, { nativeError = false, browserError = false } = {})
       downloadFromMenu: async () => {},
     }) },
     '@/utils/contextMenu': contextMenu,
+    '@/modules/playback/biliVideoSkip': biliVideoSkip,
     '@/utils/localTrack': localTrack,
     '@/utils/clipboard': clipboard,
     '@/utils/logger': { createLogger: () => ({ warn() {} }) },
@@ -66,7 +68,7 @@ function menuRuntime(native, { nativeError = false, browserError = false } = {})
     defineProps: () => ({}), withDefaults: (_props, defaults) => defaults,
     defineEmits: () => () => {}, defineExpose() {},
   }
-  const track = evaluate(`${trackSource}\nexport { menu, handleClick }`, dependencies, context)
+  const track = evaluate(`${trackSource}\nexport { menu, handleClick, items, videoSkipDialogOpen, videoSkipTarget }`, dependencies, context)
   const collection = evaluate(`${collectionSource}\nexport { menu, handleClick }`, dependencies, context)
   return { track, collection, nativeWrites, browserWrites, messages }
 }
@@ -110,6 +112,26 @@ await test('volume wheel changes five percent and clamps at both ends', () => {
   let current = 0
   for (let index = 0; index < 6; index++) current = volume.wheelAdjustedVolume(current, -1)
   assert.equal(current, 0.3, 'repeated steps retain a whole percent value')
+})
+
+await test('skip interval actions are limited to Bilibili tracks and known local origins', () => {
+  const r = menuRuntime(false)
+  for (const [track, expected] of [
+    [{ id: 'netease:1', title: 'song', artist: 'artist', source: 'netease' }, false],
+    [{ id: 'local:1', title: 'song', artist: 'artist', source: 'local' }, false],
+    [{ id: 'bilibili:BV1fixture', title: 'song', artist: 'artist', source: 'bilibili' }, true],
+    [{ id: 'local:1', title: 'song', artist: 'artist', source: 'local', syncPayload: { channelId: 'bilibili', audioId: 'BV1fixture', subAudioId: '11' } }, true],
+  ]) {
+    r.track.menu.value = { open: true, x: 0, y: 0, track }
+    assert.equal(r.track.items.value.some(item => item.id === 'bili-video-skip'), expected)
+    if (expected) {
+      r.track.handleClick({ id: 'bili-video-skip', label: '' })
+      assert.equal(r.track.videoSkipDialogOpen.value, true)
+      assert.equal(r.track.videoSkipTarget.value.id, track.id)
+      assert.notEqual(r.track.videoSkipTarget.value, track, 'the editor captures the menu target')
+      assert.equal(r.track.menu.value.open, false)
+    }
+  }
 })
 
 for (const native of [true, false]) {

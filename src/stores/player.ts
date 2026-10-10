@@ -11,6 +11,7 @@ import {
 } from './settings'
 import { useDownloadStore } from './download'
 import { useListenTogetherStore } from './listenTogether'
+import { useBiliVideoSkipStore } from './biliVideoSkip'
 import i18n from '@/i18n'
 import {
   canonicalizePlaybackTrack,
@@ -84,6 +85,16 @@ import {
 } from '@/modules/persistence/userData'
 import { loadLocalAudioInfo } from '@/modules/playback/localAudioInfo'
 import { loadPlaybackAudioInfo, type PlaybackAudioProperties } from '@/modules/playback/playbackAudioInfo'
+import {
+  BiliVideoSkipTracker,
+  intervalsForBiliVideoSkipPlayback,
+  isBiliVideoSkipTrack,
+  normalizeBiliVideoSkipTarget,
+  resolveBiliVideoSkipBvid,
+  resolveBiliVideoSkipCid,
+  resolveBiliVideoSkipTarget,
+  type BiliVideoSkipTarget,
+} from '@/modules/playback/biliVideoSkip'
 
 const log = createLogger('player')
 const uiLog = createLogger('playback-ui')
@@ -395,6 +406,9 @@ export const usePlayerStore = defineStore('player', () => {
   const settings = useSettingsStore()
   const isPlaying = ref(false)
   const currentTrack = ref<TrackInfo | null>(null)
+  const currentBiliVideoSkipTarget = ref<BiliVideoSkipTarget | null>(null)
+  const biliVideoSkipTracker = new BiliVideoSkipTracker()
+  let biliVideoSkipRequestToken = 0
   const positionMs = ref(0)
   const durationMs = ref(0)
   const queue = ref<TrackInfo[]>([])
@@ -1183,6 +1197,76 @@ export const usePlayerStore = defineStore('player', () => {
     requestAnimationFrame(tick)
   }
 
+  function prepareBiliVideoSkipTrack(track: TrackInfo, requestGeneration: number) {
+    biliVideoSkipRequestToken = requestGeneration
+    currentBiliVideoSkipTarget.value = resolveBiliVideoSkipTarget(track)
+    biliVideoSkipTracker.reset()
+    if (currentBiliVideoSkipTarget.value) return
+    const bvid = resolveBiliVideoSkipBvid(track)
+    if (!bvid) return
+    const cid = resolveBiliVideoSkipCid(track)
+    // 缓存和下载会绕过取流解析，也要补全实际分 P 身份
+    void invoke<BiliVideoSkipTarget[]>('get_bili_video_skip_targets', { bvid }).then(options => {
+      if (requestGeneration !== playbackRequestToken || requestGeneration !== biliVideoSkipRequestToken
+        || currentTrack.value?.id !== track.id || currentBiliVideoSkipTarget.value) return
+      const option = cid ? options.find(option => option.cid === cid) : options[0]
+      const target = normalizeBiliVideoSkipTarget(option)
+      if (!target || target.bvid !== bvid) return
+      applyResolvedBiliVideoSkipTarget(track, target, requestGeneration)
+      maybeAutoSkipBiliVideoInterval(positionMs.value, durationMs.value)
+    }).catch(error => {
+      if (requestGeneration === playbackRequestToken) log.warn('Bilibili skip target resolution failed:', error)
+    })
+  }
+
+  function applyResolvedBiliVideoSkipTarget(
+    track: TrackInfo,
+    target: BiliVideoSkipTarget,
+    requestGeneration: number,
+  ) {
+    if (requestGeneration !== playbackRequestToken || requestGeneration !== biliVideoSkipRequestToken || track.id !== currentTrack.value?.id) return
+    const normalized = normalizeBiliVideoSkipTarget(target)
+    if (!normalized) return
+    const previous = currentBiliVideoSkipTarget.value
+    if (previous?.bvid !== normalized.bvid || previous.cid !== normalized.cid) biliVideoSkipTracker.reset()
+    currentBiliVideoSkipTarget.value = normalized
+    if (!isBiliVideoSkipTrack(track)) return
+    // 保存真正播放的分 P，缓存或下载播放时仍能恢复同一条区间规则
+    track.album = `Bilibili|${normalized.cid}|${normalized.bvid}`
+    if (track.syncPayload) {
+      track.syncPayload = {
+        ...track.syncPayload,
+        channelId: 'bilibili',
+        audioId: normalized.bvid,
+        subAudioId: String(normalized.cid),
+        album: track.album,
+      }
+    }
+    savePlayerState()
+  }
+
+  function maybeAutoSkipBiliVideoInterval(currentPositionMs: number, currentDurationMs: number): boolean {
+    const track = currentTrack.value
+    if (!track || !isBiliVideoSkipTrack(track) || !isPlaying.value || isLoadingAudio.value || _needsReload || pendingSeek
+      || biliVideoSkipRequestToken !== playbackRequestToken || loadedPlaybackRequestToken !== playbackRequestToken
+      || useListenTogetherStore().roomId) return false
+    const intervals = intervalsForBiliVideoSkipPlayback(
+      useBiliVideoSkipStore().rules,
+      currentBiliVideoSkipTarget.value,
+      resolveBiliVideoSkipCid(track),
+      resolveBiliVideoSkipBvid(track),
+    )
+    const skipEndMs = biliVideoSkipTracker.nextSkipPosition(intervals, currentPositionMs, currentDurationMs)
+    if (skipEndMs === null) return false
+    if (currentDurationMs > 0 && skipEndMs >= currentDurationMs) {
+      // 解码器不一定接受精确 EOF 跳转，曲尾区间复用正常结束时的循环和睡眠逻辑
+      void handleTrackEnded().catch(error => log.warn('Bilibili interval advancement failed:', error))
+    } else {
+      void seekTo(skipEndMs, 'local_safety').catch(error => log.warn('Bilibili interval skip failed:', error))
+    }
+    return true
+  }
+
   function initEvents() {
     if (eventsInitialized) return
     eventsInitialized = true
@@ -1201,6 +1285,7 @@ export const usePlayerStore = defineStore('player', () => {
       const normalizedPositionMs = normalizePositionAfterPause(e.payload.positionMs)
       if (normalizedPositionMs === null) return
       commitBackendPosition(normalizedPositionMs, e.payload.durationMs)
+      if (maybeAutoSkipBiliVideoInterval(normalizedPositionMs, e.payload.durationMs)) return
 
       // 节流保存播放进度（每 15s）
       if (_interpIsPlaying) {
@@ -1347,6 +1432,7 @@ export const usePlayerStore = defineStore('player', () => {
     initEvents()
     markCommandSource(commandSource)
     const token = ++playbackRequestToken
+    prepareBiliVideoSkipTrack(track, token)
     const requestStarted = performance.now()
     tracePlaybackUi(
       'store_play_enter',
@@ -1529,6 +1615,10 @@ export const usePlayerStore = defineStore('player', () => {
             startPlan.positionMs,
           )
           if (token !== playbackRequestToken) return
+          if (isBiliVideoSkipTrack(track)) {
+            const downloadedTarget = resolveBiliVideoSkipTarget({ ...track, album: downloaded.album, syncPayload: undefined })
+            if (downloadedTarget) applyResolvedBiliVideoSkipTarget(track, downloadedTarget, token)
+          }
           markLoadStartApplied(startPlan)
           playedFromDownloadedFile = true
           _currentLoadedFromDownloadPath = downloaded.filePath
@@ -1715,6 +1805,7 @@ export const usePlayerStore = defineStore('player', () => {
                     currentResolvedStreamUrls = resolved.source === 'local' ? [] : candidates.slice(candidateIndex)
                     rememberStreamQualities(resolved)
                     result = selectPlaybackCandidate(resolved, candidateIndex)
+                    if (selected.biliVideoSkipTarget) applyResolvedBiliVideoSkipTarget(track, selected.biliVideoSkipTarget, token)
                   }
                   markLoadStartApplied(startPlan)
                   tracePlaybackUi(
@@ -1936,6 +2027,7 @@ export const usePlayerStore = defineStore('player', () => {
       savePlayerState()
       maybePrefetchNext()
       schedulePlaybackStartupWatchdog(token, track, startMs, commandSource)
+      maybeAutoSkipBiliVideoInterval(startMs, durationMs.value)
     } catch (e) {
       if (token !== playbackRequestToken) return // 竞态过期请求，静默忽略
 
@@ -3151,7 +3243,7 @@ export const usePlayerStore = defineStore('player', () => {
   void loadDecoderCapabilities()
 
   return {
-    isPlaying, currentTrack, positionMs, durationMs, queue, queueIndex,
+    isPlaying, currentTrack, currentBiliVideoSkipTarget, positionMs, durationMs, queue, queueIndex,
     repeatMode, shuffleEnabled, volume, lyrics, playError, isLoadingAudio, isLoadingAudioSlow,
     hasPlaybackSession,
     audioLevel, beatImpulse, audioInfo, isPlayingFromDownload, isPlayingFromCache,

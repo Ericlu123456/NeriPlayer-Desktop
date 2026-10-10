@@ -4,6 +4,8 @@ import { invoke } from '@tauri-apps/api/core'
 import { useToastStore } from './toast'
 import { useHistoryStore } from './history'
 import { useLyricOffsetStore } from './lyricOffset'
+import { useBiliVideoSkipStore } from './biliVideoSkip'
+import type { BiliVideoSkipRule } from '@/modules/playback/biliVideoSkip'
 import { useSettingsStore } from './settings'
 import { useAuthStore } from './auth'
 import i18n from '@/i18n'
@@ -707,8 +709,9 @@ export const useSyncStore = defineStore('sync', () => {
   let followUpTimer: ReturnType<typeof setTimeout> | null = null
 
   /** 合并结果校正过的逐曲歌词偏移已经写进数据库，内存里的映射跟上（不论账号配置是否已变化） */
-  function applySyncedLyricOffsets(result: { lyricOffsets?: Record<string, number> } | null | undefined) {
+  function applySyncedLyricOffsets(result: { lyricOffsets?: Record<string, number>; biliVideoSkipRules?: BiliVideoSkipRule[] } | null | undefined) {
     if (result?.lyricOffsets) useLyricOffsetStore().replaceFromSync(result.lyricOffsets)
+    if (result?.biliVideoSkipRules) useBiliVideoSkipStore().replaceFromSync(result.biliVideoSkipRules)
   }
 
   /** 记下需要补同步的提供商，不传时取所有已开启自动同步的提供商 */

@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core'
 import type { TrackInfo } from '@/stores/player'
+import type { BiliVideoSkipTarget } from './biliVideoSkip'
 import { trustedInboundStreamUrls } from '@/stores/listenTogether/mapper'
 import {
   BILI_VIDEO_INFO_UNAVAILABLE,
@@ -47,6 +48,7 @@ export interface ResolvedPlaybackSource {
   candidateDetails?: PlaybackCandidateDetails[]
   streamType?: 'direct' | 'hls'
   durationMs?: number
+  biliVideoSkipTarget?: BiliVideoSkipTarget
   mimeType?: string
   expectedContentLength?: number
   expectedContentMd5?: string
@@ -176,6 +178,7 @@ export interface PlaybackCandidateDetails {
   expectedContentLength?: number
   streamType?: 'direct' | 'hls'
   durationMs?: number
+  biliVideoSkipTarget?: BiliVideoSkipTarget
 }
 
 export function getPlaybackSourceKind(track: TrackInfo): PlaybackSourceKind | null {
@@ -610,6 +613,7 @@ function createSuccess(
     candidateDetails?: PlaybackCandidateDetails[]
     streamType?: 'direct' | 'hls'
     durationMs?: number
+    biliVideoSkipTarget?: BiliVideoSkipTarget
     mimeType?: string
     expectedContentLength?: number
     expectedContentMd5?: string
@@ -642,6 +646,7 @@ function createSuccess(
     candidateDetails: values.candidateDetails,
     streamType: values.streamType,
     durationMs: values.durationMs,
+    biliVideoSkipTarget: values.biliVideoSkipTarget,
     mimeType: values.mimeType,
     expectedContentLength: values.expectedContentLength,
     expectedContentMd5: values.expectedContentMd5,
@@ -842,6 +847,7 @@ async function resolveNeteaseFallback(
               audioInfo: selected.audioInfo ?? createAudioInfo('bilibili', selected.qualityKey),
               mimeType: selected.mimeType, bitrate: selected.bitrate, codec: selected.codec,
               expectedContentLength: selected.expectedContentLength,
+              biliVideoSkipTarget: selected.biliVideoSkipTarget,
             })
           }
         }
@@ -896,6 +902,8 @@ interface BiliAudioCandidate {
 
 interface BiliAudioResult extends BiliAudioCandidate {
   candidates?: BiliAudioCandidate[]
+  bvid?: string
+  cid?: number
 }
 
 /** 首选流解不了（FFmpeg 没加载上时的杜比 E-AC-3）就换成第一条能解的候选，不必等播放失败再回退 */
@@ -936,6 +944,10 @@ function resolveBilibili(
       .filter(candidate => isDirectStreamUrl(candidate.url))
       .map(candidate => candidate.url)
     const actualQuality = result.quality_key || quality
+    const biliVideoSkipTarget = result.bvid?.trim()
+      && typeof result.cid === 'number' && Number.isSafeInteger(result.cid) && result.cid > 0
+      ? { bvid: result.bvid.trim(), cid: result.cid }
+      : undefined
     const preferredKey = stablePlaybackCacheKey(track, 'bilibili', preferredCacheQuality('bilibili', quality))
     const mimeType = normalizeMimeType(result.mime_type) || mimeTypeForCodec(result.codecs)
     const codec = normalizeCodecName(result.codecs)
@@ -945,6 +957,7 @@ function resolveBilibili(
     const availableQualityKeys = BILI_QUALITY_OPTION_ORDER.filter(key => offered.has(key))
     return createSuccess(track, 'bilibili', settings, {
       url: result.url,
+      biliVideoSkipTarget,
       candidateUrls: candidates.filter(url => url !== result.url),
       candidateDetails: (result.candidates ?? []).filter(candidate => isDirectStreamUrl(candidate.url)).map(candidate => {
         const key = candidate.quality_key || inferBiliQualityKey(candidate.bandwidth, candidate.codecs)

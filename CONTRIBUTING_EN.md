@@ -361,6 +361,11 @@ Protect these paths before submitting:
 5. Run `pnpm test:sync-protocol-upgrade` and Rust `sync` tests. Run the Kotlin
    reverse decoder with `./scripts/test-sync-android-interop.ps1 -AndroidRoot <AndroidRepo> -ExportFixtures`.
    This does not replace full Gradle, provider, or device tests.
+6. Bilibili skip intervals bind to `bvid + cid` and use the `biliVideoSkipRules` extension
+   and V4 record kind 14. Edits use the sync metadata transaction and change epoch;
+   clearing retains a tombstone so older devices cannot restore the rule.
+   Run `pnpm test:bili-video-skip`, `pnpm test:bili-video-skip-store`,
+   `pnpm test:bili-video-skip-runtime`, and `pnpm test:bili-video-skip-dialog`.
 
 #### 6. Changing Listen Together
 

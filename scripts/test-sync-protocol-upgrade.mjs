@@ -53,6 +53,7 @@ const toast = {
 const historyApplications = []
 const historyCommits = []
 const lyricOffsetReplacements = []
+const biliSkipReplacements = []
 let historyOutcome = 'applied'
 const mocks = {
   pinia, vue,
@@ -72,6 +73,7 @@ const mocks = {
     },
   }) },
   './lyricOffset': { useLyricOffsetStore: () => ({ replaceFromSync: map => lyricOffsetReplacements.push(map) }) },
+  './biliVideoSkip': { useBiliVideoSkipStore: () => ({ replaceFromSync: rules => biliSkipReplacements.push(rules) }) },
   './settings': { useSettingsStore: () => ({ applySnapshot() {} }) },
   './auth': { useAuthStore: () => ({ async checkStatus() {} }) },
   '@/i18n': { __esModule: true, default: { global: { t: key => key } }, setLocale() {} },
@@ -764,6 +766,20 @@ await regression('lyric offsets corrected by the merge reach the offset store', 
   corrected.resolve({ success: true, message: 'Sync complete', lyricOffsets: { 'netease:1': -200 } })
   await second
   assert.deepEqual(lyricOffsetReplacements, [{ 'netease:1': -200 }])
+})
+
+await regression('both sync backends refresh Bili skip rules including empty snapshots', async current => {
+  biliSkipReplacements.length = 0
+  const rules = [{ bvid: 'BVtest', cid: 9, intervals: [{ startMs: 10, endMs: 20 }], modifiedAt: 1, isDeleted: false }]
+  const github = delayInvoke('sync_github')
+  const first = current.syncGitHub(true)
+  github.resolve({ success: true, message: 'Sync complete', biliVideoSkipRules: rules })
+  await first
+  const webdav = delayInvoke('sync_webdav')
+  const second = current.syncWebDav(true)
+  webdav.resolve({ success: true, message: 'Sync complete', biliVideoSkipRules: [] })
+  await second
+  assert.deepEqual(biliSkipReplacements, [rules, []])
 })
 
 console.log(`test-sync-protocol-upgrade: existing approval checks and ${cases - failures.length}/${cases} delayed-response regressions passed`)

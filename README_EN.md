@@ -263,6 +263,11 @@ the sidebar.
 - 🧠 **Playback core**:
   queue management, shuffle/repeat, generation-guarded playback requests,
   failure recovery, and optional progress/mode restore.
+- ⏭️ **Bilibili skip intervals**:
+  Manage multiple intervals per video part from Now Playing or a track's context menu,
+  with current-position shortcuts. Saved intervals skip automatically; automatic skipping
+  is suspended during Listen Together. Rules and clear records sync through GitHub / WebDAV
+  using the Android contract. Input drafts stay local.
 - 🌊 **Streaming**:
   progressive buffering, adaptive Range fetching, fast fragmented seeks,
   silent paused scrubbing, in-flight request dedup, and prefetch.
@@ -443,7 +448,7 @@ file an issue when the two apps disagree.
 
 - Synced objects: local playlists, favorite playlists, recent plays
   (with deletions), playback stats (with daily buckets and clear
-  markers), playlist-song deletions, and the sync log.
+  markers), Bilibili skip intervals (with clear records), playlist-song deletions, and the sync log.
 - `merge.rs` performs a three-way merge against a base snapshot (never
   last-write-wins); songs carry causal membership tokens so deletions
   and restores don't cancel each other across devices.
@@ -500,6 +505,7 @@ Synced objects:
 - Favorite playlists
 - Recent plays and their deletion records
 - Playback stats (including daily buckets)
+- Bilibili skip intervals per video part and clear records (input drafts stay local)
 
 Details:
 

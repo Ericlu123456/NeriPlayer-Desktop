@@ -50,6 +50,7 @@ const metadataText = await readFile(new URL('modules/playback/playbackAudioInfo.
 const localInfoText = await readFile(new URL('modules/playback/localAudioInfo.ts', root), 'utf8')
 const failure = await load(await readFile(new URL('modules/playback/playbackFailure.ts', root), 'utf8'))
 const longForm = await load(await readFile(new URL('modules/playback/longFormProgress.ts', root), 'utf8'))
+const biliVideoSkip = await load(await readFile(new URL('modules/playback/biliVideoSkip.ts', root), 'utf8'))
 const ltProtocol = await load(await readFile(new URL('stores/listenTogether/protocol.ts', root), 'utf8'))
 const streamQuality = await load(await readFile(new URL('stores/listenTogether/streamQuality.ts', root), 'utf8'), { './protocol': ltProtocol })
 const deferred = () => {
@@ -75,11 +76,13 @@ async function runtime(options = {}) {
       return options.metadata ? options.metadata(args) : properties
     }
     if (command === 'get_local_audio_info') return options.localInfo ? options.localInfo() : { format: 'FLAC', codec: 'FLAC', sampleRateHz: 44100, bitDepth: 16, channelCount: 2 }
+    if (command === 'get_bili_video_skip_targets') return options.biliTargets ? options.biliTargets(args) : []
     if (command === 'get_netease_song_url') return options.resolve ? options.resolve(args) : {
       url: `https://audio.example/${args.songId}.flac`, bitrate: 2964000, format: 'flac', level: 'hires', duration_ms: 180000,
     }
     if (command === 'find_netease_local_sources') return [{ id: 'local:fallback', title: 'Fallback', artist: 'Artist', album: '', duration_ms: 180000, url: 'C:/Music/fallback.flac' }]
     if (command === 'play_cached_audio_candidates') return options.cached ? { durationMs: 180000, source: 'netease', qualityKey: 'hires' } : null
+    if (command === 'has_cached_audio') return options.cached === true
     if (command === 'play_url_streaming' && options.streamingError) throw new Error('streaming unavailable')
     if (['play_url_streaming', 'play_url_fast', 'crossfade_url_streaming', 'play_file', 'crossfade_file'].includes(command)) return options.durationMs ?? 180000
     if (command === 'release_audio_file') return true
@@ -89,6 +92,7 @@ async function runtime(options = {}) {
   const playback = await load(sourceText, {
     '@tauri-apps/api/core': core,
     '@/stores/listenTogether/mapper': { trustedInboundStreamUrls: () => [] },
+    '@/modules/playback/biliVideoSkip': biliVideoSkip,
     './playbackFailure': failure,
   })
   const localInfo = await load(localInfoText, { '@tauri-apps/api/core': core })
@@ -107,10 +111,15 @@ async function runtime(options = {}) {
     './history': { useHistoryStore: () => options.history ?? { record: () => {}, rememberedPosition: () => 0, updateResumePosition() {} } },
     './toast': { useToastStore: () => ({ error: message => options.toasts?.push(message) }) },
     './settings': { useSettingsStore: () => settings, MIN_MEDIA_CACHE_SIZE_MB: 128, MAX_MEDIA_CACHE_SIZE_MB: 16384 },
-    './download': { useDownloadStore: () => ({ getDownloadedTrack: () => options.downloaded ? { filePath: 'C:/Music/download.flac', durationMs: 180000 } : null }) },
+    './download': { useDownloadStore: () => ({ getDownloadedTrack: () => options.downloaded ? {
+      filePath: 'C:/Music/download.flac', durationMs: 180000,
+      ...(typeof options.downloaded === 'object' ? options.downloaded : {}),
+    } : null }) },
     './listenTogether': { useListenTogetherStore: () => options.listenTogether ?? { isConnected: false } },
+    './biliVideoSkip': { useBiliVideoSkipStore: () => ({ rules: options.biliRules ?? [] }) },
     '@/i18n': { default: { global: { t: key => key } } },
     '@/modules/playback/playbackSource': playback,
+    '@/modules/playback/biliVideoSkip': biliVideoSkip,
     '@/modules/playback/playbackFailure': failure,
     '@/modules/playback/playedQualityMemory': { rememberPlayedQuality() {}, recallPlayedQuality: async () => null },
     '@/modules/playback/youtubeSeekRefreshPolicy': { shouldRefreshUrlBeforeSeek: () => false, shouldRefreshUrlBeforeResume: () => false },
@@ -423,6 +432,84 @@ await run('plays count toward the local playlist the queue was started from', as
   assert.equal(r.store.localPlaylistIdFor(member), null, 'another queue clears the source')
   r.store.shufflePlay([member], '43'); await flush()
   assert.equal(r.store.localPlaylistIdFor(member), '43')
+})
+
+for (const playbackPath of ['cached', 'downloaded']) {
+  await run(`${playbackPath} Bilibili playback resolves a missing CID and applies the matching page at the current position`, async () => {
+    const targets = deferred()
+    const item = { ...track('cached'), id: 'bilibili:BVcached', source: 'bilibili', album: '' }
+    const rules = [101, 102].map(cid => ({ bvid: 'BVcached', cid, intervals: [{ startMs: 1000, endMs: cid === 101 ? 5000 : 8000 }], modifiedAt: 10, isDeleted: false }))
+    const r = await runtime({ [playbackPath]: true, biliTargets: () => targets.promise, biliRules: rules })
+    await r.store.play(item); await flush()
+    assert.equal(r.store.currentBiliVideoSkipTarget, null)
+    assert.equal(r.calls.filter(call => call.command === 'get_bili_video_skip_targets').length, 1)
+    assert.ok(!r.calls.some(call => call.command === 'get_bili_audio_url'), 'cache and download playback do not need online stream resolution')
+    const start = r.calls.find(call => call.command === (playbackPath === 'cached' ? 'play_cached_audio_candidates' : 'play_file'))
+    const generation = start.args.request?.requestGeneration ?? start.args.requestGeneration
+    r.events.get('player:position')({ payload: { requestGeneration: generation, positionMs: 1000, durationMs: 180000 } })
+    assert.ok(!r.calls.some(call => call.command === 'seek'), 'multiple pages cannot use a BVID-only fallback')
+    targets.resolve([{ bvid: 'BVcached', cid: 101 }, { bvid: 'BVcached', cid: 102 }]); await flush()
+    assert.deepEqual(r.store.currentBiliVideoSkipTarget, { bvid: 'BVcached', cid: 101 })
+    assert.equal(r.calls.findLast(call => call.command === 'seek').args.positionMs, 5000)
+    assert.equal(r.store.currentTrack.album, 'Bilibili|101|BVcached')
+    assert.equal(r.store.currentTrack.syncPayload, undefined)
+  })
+}
+
+await run('late Bilibili page resolution cannot overwrite a newer playback session', async () => {
+  const targets = deferred()
+  const r = await runtime({ downloaded: true, biliTargets: () => targets.promise })
+  await r.store.play({ ...track('old'), id: 'bilibili:BVold', source: 'bilibili', album: '' })
+  await r.store.play({ ...track('new'), id: 'bilibili:BVnew', source: 'bilibili', album: 'Bilibili|202' })
+  assert.equal(r.calls.filter(call => call.command === 'get_bili_video_skip_targets').length, 1, 'explicit targets do not start another page lookup')
+  targets.resolve([{ bvid: 'BVold', cid: 101 }]); await flush()
+  assert.deepEqual(r.store.currentBiliVideoSkipTarget, { bvid: 'BVnew', cid: 202 })
+  assert.equal(r.store.currentTrack.id, 'bilibili:BVnew')
+  assert.notEqual(r.store.currentTrack.syncPayload?.subAudioId, '101')
+})
+
+for (const staleIdentity of [false, true]) {
+  await run(`offline downloaded page identity overrides ${staleIdentity ? 'a stale queue CID' : 'a queue without a CID'}`, async () => {
+    const item = {
+      ...track('offline'), id: 'bilibili:BVoffline', source: 'bilibili', album: '',
+      ...(staleIdentity ? { syncPayload: { channelId: 'bilibili', subAudioId: '101', album: 'Bilibili|101|BVoffline' } } : {}),
+    }
+    const rules = [101, 102].map(cid => ({ bvid: 'BVoffline', cid, intervals: [{ startMs: 1000, endMs: cid === 101 ? 5000 : 8000 }], modifiedAt: 10, isDeleted: false }))
+    const r = await runtime({
+      downloaded: { album: 'Bilibili|102|BVoffline', source: 'bilibili' }, biliRules: rules,
+      biliTargets: () => { throw new Error('offline') },
+    })
+    await r.store.play(item); await flush()
+    assert.deepEqual(r.store.currentBiliVideoSkipTarget, { bvid: 'BVoffline', cid: 102 })
+    const generation = r.calls.find(call => call.command === 'play_file').args.requestGeneration
+    r.events.get('player:position')({ payload: { requestGeneration: generation, positionMs: 1000, durationMs: 180000 } }); await flush()
+    assert.equal(r.calls.findLast(call => call.command === 'seek').args.positionMs, 8000)
+    assert.equal(r.store.currentTrack.album, 'Bilibili|102|BVoffline')
+    if (staleIdentity) {
+      assert.equal(r.store.currentTrack.syncPayload.subAudioId, '102')
+      assert.equal(r.store.currentTrack.syncPayload.audioId, 'BVoffline')
+    } else assert.equal(r.store.currentTrack.syncPayload, undefined)
+    assert.ok(!r.calls.some(call => call.command === 'get_bili_audio_url'))
+  })
+}
+
+await run('a non-Bilibili track keeps its origin when a downloaded fallback came from Bilibili', async () => {
+  const item = { ...track('netease-origin'), syncPayload: { channelId: 'netease', audioId: 'netease-origin' } }
+  const r = await runtime({ downloaded: { album: 'Bilibili|102|BVoffline', source: 'bilibili' } })
+  await r.store.play(item); await flush()
+  assert.equal(r.store.currentBiliVideoSkipTarget, null)
+  assert.deepEqual(r.store.currentTrack.syncPayload, item.syncPayload)
+})
+
+await run('resolving a Bilibili target preserves full track metadata without creating a partial sync payload', async () => {
+  const item = { ...track('full-metadata'), id: 'bilibili:BVmetadata', source: 'bilibili', album: '' }
+  const r = await runtime({ downloaded: true, biliTargets: async () => [{ bvid: 'BVmetadata', cid: 301 }] })
+  await r.store.play(item); await flush()
+  assert.deepEqual(r.store.currentBiliVideoSkipTarget, { bvid: 'BVmetadata', cid: 301 })
+  assert.equal(r.store.currentTrack.syncPayload, undefined)
+  assert.equal(r.store.currentTrack.album, 'Bilibili|301|BVmetadata')
+  assert.equal(r.store.currentTrack.title, item.title)
+  assert.equal(r.store.currentTrack.artist, item.artist)
 })
 
 if (failures) process.exitCode = 1

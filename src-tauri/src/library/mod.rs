@@ -4,6 +4,7 @@ pub mod favorites;
 pub mod play_history;
 pub mod playback_queue;
 pub mod lyric_offsets;
+pub mod bili_video_skip;
 pub mod playlist_usage;
 pub mod local_file_tags;
 pub mod local_index;

@@ -230,6 +230,8 @@ pub async fn get_qq_song_url(
 /// 获取B站音频流 URL
 #[derive(Serialize)]
 pub struct BiliAudioResult {
+    pub bvid: String,
+    pub cid: u64,
     pub url: String,
     pub bandwidth: u64,
     pub codecs: String,
@@ -284,6 +286,8 @@ pub async fn get_bili_audio_url(
     let candidates = build_bili_audio_candidates(&fallback_streams);
     let quality_key = bili_quality_key(&best).to_string();
     Ok(BiliAudioResult {
+        bvid: real_bvid,
+        cid: real_cid,
         url: best.url,
         bandwidth: best.bandwidth,
         codecs: best.codecs,

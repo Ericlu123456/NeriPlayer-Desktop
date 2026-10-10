@@ -65,6 +65,8 @@ import WaveformSlider from './WaveformSlider.vue'
 import LyricsView from './LyricsView.vue'
 import QueuePanel from './QueuePanel.vue'
 import AddToPlaylistDialog from './AddToPlaylistDialog.vue'
+import BiliVideoSkipDialog from './BiliVideoSkipDialog.vue'
+import { resolveBiliVideoSkipBvid } from '@/modules/playback/biliVideoSkip'
 import ListenTogetherPanel from './ListenTogetherPanel.vue'
 import EditableRangeValue from './ui/EditableRangeValue.vue'
 import AudioEffectsPanel from './AudioEffectsPanel.vue'
@@ -134,6 +136,9 @@ const coverUrl = ref('')
 const showVolumeSlider = ref(false)
 const showQueue = ref(false)
 const showAddToPlaylist = ref(false)
+const showBiliVideoSkip = ref(false)
+const biliVideoSkipTrack = ref<TrackInfo | null>(null)
+const canManageBiliVideoSkip = computed(() => !!player.currentTrack && !!resolveBiliVideoSkipBvid(player.currentTrack))
 const showAudioFxPanel = ref(false)
 const showComments = ref(false)
 const commentTarget = computed(() => resolveCommentTarget(player.currentTrack))
@@ -1152,6 +1157,14 @@ function openQualitySwitcher() {
   if (!canSwitchCurrentAudioQuality.value || player.isLoadingAudio) return
   showMoreSheet.value = true
   goToSubView('quality')
+}
+function openBiliVideoSkip() {
+  const track = player.currentTrack
+  if (!track || !resolveBiliVideoSkipBvid(track)) return
+  biliVideoSkipTrack.value = { ...track, syncPayload: track.syncPayload ? { ...track.syncPayload } : undefined }
+  closeToolbarPopovers()
+  showMoreSheet.value = false
+  showBiliVideoSkip.value = true
 }
 function goBackToMain() {
   goBackTo('main')
@@ -2460,6 +2473,7 @@ const sliderActiveColor = computed(() => dynamicColorVars.value['--np-primary'] 
       </Transition>
     </Teleport>
     <AddToPlaylistDialog v-if="player.hasPlaybackSession" v-model:open="showAddToPlaylist" :track="player.currentTrack" />
+    <BiliVideoSkipDialog v-model:open="showBiliVideoSkip" :track="biliVideoSkipTrack" />
     <CommentsPanel v-model:open="showComments" :track="player.currentTrack" />
     <ListenTogetherPanel v-if="player.hasPlaybackSession" v-model:open="showLtPanel" />
 
@@ -2609,6 +2623,13 @@ const sliderActiveColor = computed(() => dynamicColorVars.value['--np-primary'] 
 
             <!-- 浏览与分享 -->
             <div class="np-more-group">
+              <button v-if="canManageBiliVideoSkip" class="np-more-list-item" @click="openBiliVideoSkip">
+                <span class="material-symbols-rounded">skip_next</span>
+                <div class="np-more-list-info">
+                  <span class="np-more-list-headline">{{ t('player.bili_skip_manage') }}</span>
+                </div>
+                <span class="material-symbols-rounded np-more-chevron">chevron_right</span>
+              </button>
               <button v-if="canViewNeteaseAlbum" class="np-more-list-item" @click="openCurrentAlbum">
                 <span class="material-symbols-rounded">library_music</span>
                 <div class="np-more-list-info">

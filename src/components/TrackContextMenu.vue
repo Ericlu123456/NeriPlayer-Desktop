@@ -6,6 +6,8 @@ import { useI18n } from 'vue-i18n'
 import { invoke } from '@tauri-apps/api/core'
 import ContextMenu from '@/components/ui/ContextMenu.vue'
 import AddToPlaylistDialog from '@/components/AddToPlaylistDialog.vue'
+import BiliVideoSkipDialog from '@/components/BiliVideoSkipDialog.vue'
+import { resolveBiliVideoSkipBvid } from '@/modules/playback/biliVideoSkip'
 import { usePlayerStore, type TrackInfo } from '@/stores/player'
 import { useToastStore } from '@/stores/toast'
 import { useDownloadStore } from '@/stores/download'
@@ -58,6 +60,8 @@ const menu = ref<{ open: boolean; x: number; y: number; track: TrackInfo | null 
 })
 const playlistDialogOpen = ref(false)
 const playlistTarget = ref<TrackInfo | null>(null)
+const videoSkipDialogOpen = ref(false)
+const videoSkipTarget = ref<TrackInfo | null>(null)
 
 function close() {
   menu.value.open = false
@@ -80,6 +84,9 @@ const items = computed<ContextMenuItem[]>(() => {
     list.push(createContextMenuItem(t('player.add_to_playlist'), { id: 'add-to-playlist', icon: 'playlist_add' }))
   }
   if (!isLocalTrack(track)) list.push(downloadMenuItem.value)
+  if (resolveBiliVideoSkipBvid(track)) {
+    list.push(createContextMenuItem(t('player.bili_skip_manage'), { id: 'bili-video-skip', icon: 'skip_next' }))
+  }
   list.push(
     createContextMenuSeparator('track-copy'),
     createContextMenuItem(t('player.copy_title'), { id: 'copy-title', icon: 'content_copy' }),
@@ -140,6 +147,12 @@ function handleClick(item: ContextMenuActionItem) {
       playlistDialogOpen.value = true
       break
     case 'download': void downloadFromMenu(); break
+    case 'bili-video-skip':
+      if (!resolveBiliVideoSkipBvid(track)) return
+      videoSkipTarget.value = { ...track, syncPayload: track.syncPayload ? { ...track.syncPayload } : undefined }
+      videoSkipDialogOpen.value = true
+      close()
+      break
     case 'copy-title': void copy(track.title); break
     case 'copy-info': void copy(`${track.title} - ${track.artist}`); break
     case 'reveal': {
@@ -163,4 +176,5 @@ defineExpose({ open, openAt, close })
     @click="handleClick"
   />
   <AddToPlaylistDialog v-model:open="playlistDialogOpen" :track="playlistTarget" />
+  <BiliVideoSkipDialog v-model:open="videoSkipDialogOpen" :track="videoSkipTarget" />
 </template>

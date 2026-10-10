@@ -3,6 +3,7 @@
 // 启动时在创建 store 之前一次性拉取快照，store 仍可同步恢复；旧版 localStorage
 // 数据按数据域导入一次。写入经串行队列发出，先发出的命令一定先落库
 import { invoke } from '@tauri-apps/api/core'
+import type { BiliVideoSkipRule } from '@/modules/playback/biliVideoSkip'
 
 export const LEGACY_PLAYER_STATE_KEY = 'neri:player-state'
 export const LEGACY_HISTORY_KEY = 'neri:play-history'
@@ -18,6 +19,7 @@ export interface UserDataSnapshot {
   playbackState: Record<string, unknown> | null
   history: PersistedHistory
   lyricOffsets: Record<string, number>
+  biliVideoSkipRules?: BiliVideoSkipRule[]
   migrated: { playbackState: boolean; history: boolean; lyricOffsets: boolean }
 }
 

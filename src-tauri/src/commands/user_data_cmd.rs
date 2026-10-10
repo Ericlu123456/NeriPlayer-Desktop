@@ -6,10 +6,12 @@ use std::collections::BTreeMap;
 
 use serde::Serialize;
 use serde_json::Value;
+use tauri::{AppHandle, Emitter, State};
 
 use crate::db::{self, meta, UserDatabase};
 use crate::error::{AppError, AppResult};
-use crate::library::{lyric_offsets, play_history, playback_queue};
+use crate::library::{bili_video_skip, lyric_offsets, play_history, playback_queue};
+use crate::state::AppState;
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -25,6 +27,7 @@ pub struct UserDataSnapshot {
     pub playback_state: Option<Value>,
     pub history: play_history::PlayHistory,
     pub lyric_offsets: BTreeMap<String, i64>,
+    pub bili_video_skip_rules: Vec<bili_video_skip::BiliVideoSkipRule>,
     pub migrated: LegacyMigrationState,
 }
 
@@ -34,6 +37,7 @@ fn snapshot_from(database: &UserDatabase) -> AppResult<UserDataSnapshot> {
             playback_state: playback_queue::load_from(connection)?,
             history: play_history::load_from(connection)?,
             lyric_offsets: lyric_offsets::load_from(connection)?,
+            bili_video_skip_rules: bili_video_skip::load_from(connection)?,
             migrated: LegacyMigrationState {
                 playback_state: meta::is_flag_set(connection, playback_queue::LEGACY_IMPORT_KEY)?,
                 history: meta::is_flag_set(connection, play_history::LEGACY_IMPORT_KEY)?,
@@ -146,10 +150,73 @@ pub async fn replace_lyric_offsets(offsets: BTreeMap<String, i64>) -> AppResult<
     blocking(move |database| database.write(|transaction| lyric_offsets::replace(transaction, &offsets))).await
 }
 
+#[tauri::command]
+pub async fn get_bili_video_skip_rules() -> AppResult<Vec<bili_video_skip::BiliVideoSkipRule>> {
+    blocking(|database| database.read(bili_video_skip::load_from)).await
+}
+
+#[tauri::command]
+pub async fn get_bili_video_skip_targets(
+    bvid: String,
+    state: State<'_, AppState>,
+) -> AppResult<Vec<bili_video_skip::BiliVideoSkipTargetOption>> {
+    let bvid = bvid.trim();
+    if bvid.is_empty() {
+        return Ok(Vec::new());
+    }
+    let info = state.bilibili().get_video_info(bvid).await?;
+    Ok(bili_video_skip::target_options(&info))
+}
+
+#[tauri::command]
+pub async fn set_bili_video_skip_rule(
+    app: AppHandle,
+    bvid: String,
+    cid: i64,
+    intervals: Vec<bili_video_skip::BiliVideoSkipInterval>,
+    duration_ms: Option<i64>,
+) -> AppResult<Option<bili_video_skip::BiliVideoSkipRule>> {
+    let (rule, changed) = blocking(move |database| {
+        // 与同步共用写入版本，网络请求期间保存的区间不能被旧快照覆盖
+        let _guard = crate::library::playlist::lock_io();
+        let result = database.write(|transaction| bili_video_skip::set(
+            transaction, &bvid, cid, &intervals, duration_ms.unwrap_or(0), chrono::Utc::now().timestamp_millis(),
+        ))?;
+        if result.1 {
+            crate::library::playlist::mark_io_changed();
+        }
+        Ok(result)
+    }).await?;
+    if changed {
+        let _ = app.emit("playlists-changed", ());
+    }
+    Ok(rule)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn snapshot_includes_bili_skip_rules_without_requiring_legacy_migration() {
+        let database = UserDatabase::open_in_memory().unwrap();
+        let rules = json!([{
+            "bvid": "BV1test",
+            "cid": 9,
+            "intervals": [{"startMs": 1000, "endMs": 2500}],
+            "modifiedAt": 10,
+            "isDeleted": false
+        }]);
+        database.write(|transaction| {
+            crate::sync::storage::update_archive_extensions(transaction, |extensions| {
+                extensions.insert("biliVideoSkipRules".into(), rules.clone());
+                Ok(())
+            })
+        }).unwrap();
+        let snapshot = serde_json::to_value(snapshot_from(&database).unwrap()).unwrap();
+        assert_eq!(snapshot["biliVideoSkipRules"], rules);
+    }
 
     #[test]
     fn legacy_import_runs_once_per_domain_even_without_data() {

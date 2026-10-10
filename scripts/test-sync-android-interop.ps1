@@ -226,6 +226,14 @@ fun main(args: Array<String>) {
                 require(song.lyricSyncRevision == 1L && song.lyricSyncEdited == true)
                 require(override.lyricSyncRevision == 1L && override.lyricSyncEdited == true)
                 require(legacySong.lyricSyncRevision == 0L && legacySong.lyricSyncEdited == null)
+                val skipRules = decoded.filter { it.first == 14 }.map { it.second as SyncBiliVideoSkipRule }
+                require(skipRules.size == 2)
+                val activeSkip = skipRules.single { it.cid == 99L }
+                require(activeSkip.bvid == "BVinterop" && activeSkip.modifiedAt == 10L && !activeSkip.isDeleted)
+                require(activeSkip.intervals.map { it.startMs to it.endMs } == listOf(1000L to 2000L, 5000L to 7000L))
+                val deletedSkip = skipRules.single { it.cid == 100L }
+                require(deletedSkip.bvid == "BVinterop" && deletedSkip.modifiedAt == 11L && deletedSkip.isDeleted && deletedSkip.intervals.isEmpty())
+                println("BILI_SKIP_IDENTITY_INTERVALS_AND_TOMBSTONE_ASSERTIONS_PASSED")
                 println("IDS_CHINESE_NEWLINE_NULL_REVISION_AND_LEGACY_ASSERTIONS_PASSED")
             }
             require(decoded.isEmpty() || (decoded.single { it.first == 15 }.second as SyncSong).name.isEmpty())

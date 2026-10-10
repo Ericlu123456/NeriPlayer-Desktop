@@ -135,6 +135,7 @@ pub(crate) fn complete_cloud_sync(
     local: &SyncData,
     epoch: u64,
 ) -> AppResult<SyncOutcome> {
+    let bili_video_skip_rules = crate::library::bili_video_skip::rules_from_extensions(&completed.merged.extensions)?;
     let lyric_offsets = apply_cloud_sync_locally(&completed.merged, &completed.scope, epoch)?;
     let previous_playlists = completed
         .remote
@@ -175,6 +176,7 @@ pub(crate) fn complete_cloud_sync(
                 .sum::<usize>()
                 .saturating_sub(previous_songs) as i32,
             lyric_offsets,
+            bili_video_skip_rules: Some(bili_video_skip_rules),
             ..Default::default()
         },
         &completed.merged,
@@ -592,13 +594,15 @@ fn sync_platform_identity(track: &TrackInfo) -> SyncPlatformIdentity {
     }
 
     if let Some(bili_id) = track.id.strip_prefix("bilibili:") {
+        let audio_id = bilibili_bvid_from_album(&track.album)
+            .unwrap_or_else(|| bili_id.split(':').next().unwrap_or(bili_id).trim().to_string());
         let sub_audio_id = bilibili_cid_from_album(&track.album);
         let sub_audio = sub_audio_id.as_deref().unwrap_or("");
         return SyncPlatformIdentity {
-            id: stable_remote_android_id("bilibili", bili_id, sub_audio).to_string(),
+            id: stable_remote_android_id("bilibili", &audio_id, sub_audio).to_string(),
             media_uri: None,
             channel_id: Some("bilibili".into()),
-            audio_id: Some(bili_id.to_string()),
+            audio_id: Some(audio_id),
             sub_audio_id,
         };
     }
@@ -626,7 +630,18 @@ fn numeric_id_or_zero(value: &str) -> i64 {
 fn bilibili_cid_from_album(album: &str) -> Option<String> {
     album
         .strip_prefix("Bilibili|")
+        .and_then(|identity| identity.split('|').next())
+        .map(str::trim)
         .filter(|cid| !cid.is_empty())
+        .map(String::from)
+}
+
+fn bilibili_bvid_from_album(album: &str) -> Option<String> {
+    album
+        .strip_prefix("Bilibili|")
+        .and_then(|identity| identity.split('|').nth(1))
+        .map(str::trim)
+        .filter(|bvid| !bvid.is_empty())
         .map(String::from)
 }
 
@@ -1410,6 +1425,28 @@ mod tests {
             playlist_track_identity_key_pub(&imported),
             playlist_track_identity_key_pub(&fresh)
         );
+    }
+
+    #[test]
+    fn bilibili_resolved_album_uses_exact_bvid_and_cid_for_sync_identity() {
+        let mut resolved = track("bilibili:12529502280002", 0);
+        resolved.source = TrackSource::Bilibili;
+        resolved.album = "Bilibili|987654|BV1actual".into();
+        let song = track_to_sync_song(&resolved);
+        assert_eq!(song.audio_id.as_deref(), Some("BV1actual"));
+        assert_eq!(song.sub_audio_id.as_deref(), Some("987654"));
+        assert_eq!(song.id, stable_remote_android_id("bilibili", "BV1actual", "987654").to_string());
+        assert_eq!(song.album, resolved.album);
+    }
+
+    #[test]
+    fn bilibili_legacy_album_keeps_cid_and_removes_page_suffix_from_audio_id() {
+        let mut resolved = track("bilibili:BV1legacy:2", 0);
+        resolved.source = TrackSource::Bilibili;
+        resolved.album = "Bilibili|987654".into();
+        let song = track_to_sync_song(&resolved);
+        assert_eq!(song.audio_id.as_deref(), Some("BV1legacy"));
+        assert_eq!(song.sub_audio_id.as_deref(), Some("987654"));
     }
 
     #[test]

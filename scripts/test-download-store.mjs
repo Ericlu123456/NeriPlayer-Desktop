@@ -554,4 +554,25 @@ for (const retained of [false, true]) {
   assert.equal(await clean.store.resumePendingDownloads(), 0)
   assert.equal(clean.messages.length, 0)
 }
+{
+  const item = { ...track('bili-identity'), id: 'bilibili:BVdownload', source: 'bilibili', album: 'Bilibili' }
+  const r = await runtime({ resolve: async () => ({
+    ...stream, biliVideoSkipTarget: { bvid: 'BVresolvedDownload', cid: 222 },
+  }) })
+  await r.store.downloadTrack(item)
+  await flush()
+  const launched = r.invoked.find(call => call.command === 'download_track')
+  assert.ok(launched, 'resolved Bilibili download starts')
+  assert.equal(launched.args.album, 'Bilibili|222|BVresolvedDownload', 'download metadata retains the actual BV/CID for offline skip rules')
+}
+{
+  const item = track('bili-fallback-identity')
+  const r = await runtime({ resolve: async () => ({
+    ...stream, biliVideoSkipTarget: { bvid: 'BVfallbackDownload', cid: 333 },
+  }) })
+  await r.store.downloadTrack(item)
+  await flush()
+  const launched = r.invoked.find(call => call.command === 'download_track')
+  assert.equal(launched.args.album, item.album, 'Bilibili fallback audio preserves the original Netease identity')
+}
 console.log('download store lifecycle tests passed')

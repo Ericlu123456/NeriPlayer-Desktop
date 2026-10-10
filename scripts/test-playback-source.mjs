@@ -193,6 +193,21 @@ await run('cache-first reads only the preferred-quality key', async () => {
   assert.equal(biliCandidate.cacheKey, resolved?.cacheKey)
 })
 
+await run('retains the resolved Bilibili part identity for interval playback', async () => {
+  globalThis.__playbackInvoke = async (command, args) => {
+    assert.equal(command, 'get_bili_audio_url')
+    assert.equal(args.avid, 123456)
+    return {
+      url: 'https://audio.example/bili-identity', bandwidth: 192_000,
+      codecs: 'mp4a.40.2', candidates: [], bvid: 'BVresolved', cid: 789,
+    }
+  }
+  const resolved = await resolvePlaybackSource({
+    ...track(99901), id: 'bilibili:123456', source: 'bilibili', album: '',
+  }, settings)
+  assert.deepEqual(resolved?.biliVideoSkipTarget, { bvid: 'BVresolved', cid: 789 })
+})
+
 await run('uses Android sync subAudioId as the Bilibili CID', async () => {
   const syncedTrack = {
     id: 'bilibili:BV1sync',
@@ -665,7 +680,7 @@ await run('Bili fallback keeps other matching videos and their cache identities'
     ]
     assert.equal(command, 'get_bili_audio_url')
     assert.equal(args.cid, args.bvid === 'BVfirst' ? 12 : 34)
-    return { url: `https://a.bilivideo.com/${args.bvid}.m4a`, bandwidth: 128_000, codecs: 'mp4a.40.2', quality_key: 'high', candidate_urls: [] }
+    return { url: `https://a.bilivideo.com/${args.bvid}.m4a`, bandwidth: 128_000, codecs: 'mp4a.40.2', quality_key: 'high', candidate_urls: [], bvid: args.bvid, cid: args.cid }
   }
   const resolved = await new PlaybackUrlResolver().resolve(original, fallbackSettings)
   assert.equal(resolved.source, 'bilibili')
@@ -674,6 +689,8 @@ await run('Bili fallback keeps other matching videos and their cache identities'
   assert.equal(second.url, 'https://a.bilivideo.com/BVsecond.m4a')
   assert.match(playbackCacheWriteOptions(resolved, 1).cacheKey, /^bili-BVsecond-34-/)
   assert.equal(second.durationMs, 179_000)
+  assert.deepEqual(resolved.biliVideoSkipTarget, { bvid: 'BVfirst', cid: 12 })
+  assert.deepEqual(second.biliVideoSkipTarget, { bvid: 'BVsecond', cid: 34 })
   assert.equal(original.id, 'netease:902')
 })
 

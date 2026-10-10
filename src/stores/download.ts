@@ -555,7 +555,9 @@ export const useDownloadStore = defineStore('download', () => {
         trackId: track.id,
         title: track.title,
         artist: track.artist,
-        album: track.album || '',
+        album: source === 'bilibili' && resolved.biliVideoSkipTarget
+          ? `Bilibili|${resolved.biliVideoSkipTarget.cid}|${resolved.biliVideoSkipTarget.bvid}`
+          : track.album || '',
         durationMs: resolved.durationMs || track.durationMs,
         coverUrl: track.coverUrl || null,
         source,

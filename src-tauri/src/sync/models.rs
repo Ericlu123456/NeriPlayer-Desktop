@@ -1074,6 +1074,9 @@ pub struct SyncResult {
     /// 合并结果校正了本地逐曲歌词偏移时，给出新的完整映射
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lyric_offsets: Option<std::collections::BTreeMap<String, i64>>,
+    /// 归档中的 B 站区间已经落库，前端播放器与编辑窗口跟随这份完整规则
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bili_video_skip_rules: Option<Vec<crate::library::bili_video_skip::BiliVideoSkipRule>>,
     /// 同步期间本地数据有变化，这一轮没有写回任何东西，前端应稍后再同步一次
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub deferred: bool,

@@ -648,6 +648,28 @@ mod tests {
     }
 
     #[test]
+    fn bilibili_download_metadata_keeps_resolved_identity_from_album() {
+        let track = super::super::DownloadedTrack {
+            id: "bilibili:12529502280002".into(),
+            title: "Video".into(),
+            artist: "Owner".into(),
+            album: "Bilibili|987654|BV1actual".into(),
+            duration_ms: 30000,
+            cover_url: None,
+            source: "bilibili".into(),
+            file_path: "Video.m4a".into(),
+            file_size: 1000,
+            downloaded_at: 100,
+        };
+        let metadata = DownloadMetadata::for_track(&track);
+        assert_eq!(metadata.identity_album.as_deref(), Some("Bilibili|987654|BV1actual"));
+        assert_eq!(metadata.audio_id.as_deref(), Some("BV1actual"));
+        assert_eq!(metadata.sub_audio_id.as_deref(), Some("987654"));
+        assert_eq!(metadata.channel_id.as_deref(), Some("bilibili"));
+        assert_eq!(metadata.album.as_deref(), Some(""));
+    }
+
+    #[test]
     fn asset_references_cannot_escape_the_managed_root() {
         let root = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();
