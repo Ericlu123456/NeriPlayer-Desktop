@@ -78,9 +78,6 @@ export interface AppSettings {
   dynamicBackground: boolean
   colorMode: ColorMode
   audioReactive: boolean
-  /** Caps the frame rate and pauses background animation while a full-screen overlay is
-   * open (off by default: visuals come first) */
-  lowPerformanceMode: boolean
   coverBlurBg: boolean
   coverBlurAmount: number
   coverBlurDarken: number
@@ -229,7 +226,6 @@ const DEFAULT_SETTINGS: AppSettings = {
   dynamicBackground: true,
   colorMode: 'cover',
   audioReactive: true,
-  lowPerformanceMode: false,
   coverBlurBg: false,
   coverBlurAmount: 1.5,
   coverBlurDarken: 0.2,
@@ -323,7 +319,6 @@ const LEGACY_KEYS: Partial<Record<SettingKey, string>> = {
   advancedLyrics: 'advanced_lyrics',
   dynamicBackground: 'dynamic_bg',
   audioReactive: 'audio_reactive',
-  lowPerformanceMode: 'low_performance_mode',
   coverBlurBg: 'cover_blur_bg',
   coverBlurAmount: 'cover_blur_amount',
   coverBlurDarken: 'cover_blur_darken',
@@ -664,7 +659,6 @@ export const useSettingsStore = defineStore('settings', () => {
   const dynamicBackground = ref(initial.dynamicBackground)
   const colorMode = ref<ColorMode>(initial.colorMode)
   const audioReactive = ref(initial.audioReactive)
-  const lowPerformanceMode = ref(initial.lowPerformanceMode)
   const coverBlurBg = ref(initial.coverBlurBg)
   const coverBlurAmount = ref(initial.coverBlurAmount)
   const coverBlurDarken = ref(initial.coverBlurDarken)
@@ -727,8 +721,7 @@ export const useSettingsStore = defineStore('settings', () => {
     crossfadeOutDuration, keepProgress, rememberLongFormProgress, keepPlaybackMode, showTranslation,
     showRomanization, lyricBlur, lyricBlurAmount, lyricEmphasisThresholdMs, cloudMusicOffset, qqMusicOffset, kugouOffset, lrclibOffset,
     amllTtmlOffset, coverStyle,
-    advancedLyrics, preferWordTimedLyrics, defaultLyricSource, dynamicBackground, colorMode, audioReactive,
-    lowPerformanceMode, coverBlurBg,
+    advancedLyrics, preferWordTimedLyrics, defaultLyricSource, dynamicBackground, colorMode, audioReactive, coverBlurBg,
     coverBlurAmount, coverBlurDarken, neteaseQuality, qqMusicQuality,
     youtubeQuality, biliQuality, bypassProxy, internationalizationEnabled, exploreSearchHistoryEnabled,
     youtubePlaybackSource, neteaseAutoSourceSwitch, neteaseLocalSourceFallback,
@@ -827,7 +820,7 @@ export const useSettingsStore = defineStore('settings', () => {
     lyricBlur, lyricBlurAmount, lyricEmphasisThresholdMs,
     cloudMusicOffset, qqMusicOffset, kugouOffset, lrclibOffset, amllTtmlOffset,
     advancedLyrics, preferWordTimedLyrics, defaultLyricSource, dynamicBackground,
-    colorMode, audioReactive, lowPerformanceMode, coverBlurBg, coverBlurAmount, coverBlurDarken,
+    colorMode, audioReactive, coverBlurBg, coverBlurAmount, coverBlurDarken,
     neteaseQuality, qqMusicQuality, youtubeQuality, biliQuality, bypassProxy,
     youtubePlaybackSource, neteaseAutoSourceSwitch, neteaseLocalSourceFallback,
     internationalizationEnabled, exploreSearchHistoryEnabled, backgroundImageUri, backgroundImageBlur,

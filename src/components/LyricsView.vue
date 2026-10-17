@@ -31,16 +31,12 @@ const props = withDefaults(defineProps<{
   isPlaying: boolean
   lyricOffsetMs?: number
   seekSeq?: number
-  /** Suspended while a full-screen overlay covers the lyrics in low performance mode
-   * (the per-word masks and inline blur are recomputed every frame) */
-  suspended?: boolean
 }>(), {
   currentTimeMs: 0,
   previewTimeMs: null,
   isPlaying: false,
   lyricOffsetMs: undefined,
   seekSeq: 0,
-  suspended: false,
 })
 
 const emit = defineEmits<{ seek: [timeMs: number] }>()
@@ -482,7 +478,7 @@ function onVisibilityChange(): void {
 }
 
 function startFrameLoop(): void {
-  if (rafId || document.hidden || props.suspended) return
+  if (rafId || document.hidden) return
   lastFrameAt = performance.now()
   // Runs on the shared frame loop: the same rAF as the background shader and the waveform,
   // which is where low performance mode caps the frame rate
@@ -502,13 +498,6 @@ function startFrameLoop(): void {
     rafId = scheduleFrame(tick)
   })
 }
-
-// Restart after the overlay closes and let the first frame resync the position, which may
-// have moved far ahead while the loop was suspended
-watch(() => props.suspended, suspended => {
-  if (suspended) stopFrameLoop()
-  else syncForeground()
-})
 
 function stopFrameLoop(): void {
   if (!rafId) return

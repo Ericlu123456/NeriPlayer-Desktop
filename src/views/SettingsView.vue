@@ -110,7 +110,7 @@ const {
   keepProgress, rememberLongFormProgress, keepPlaybackMode,
   showTranslation, showRomanization, lyricBlur, lyricBlurAmount, lyricEmphasisThresholdMs,
   advancedLyrics, preferWordTimedLyrics, defaultLyricSource, dynamicBackground, colorMode, audioReactive,
-  lowPerformanceMode, coverBlurBg, coverBlurAmount, coverBlurDarken,
+  coverBlurBg, coverBlurAmount, coverBlurDarken,
   neteaseQuality, youtubeQuality, biliQuality,
   youtubePlaybackSource, neteaseAutoSourceSwitch, neteaseLocalSourceFallback,
   bypassProxy, internationalizationEnabled, exploreSearchHistoryEnabled,
@@ -2821,15 +2821,6 @@ useEscapeClose(
         </div>
       </template>
     </div></Transition>
-
-    <div class="setting-card">
-      <div class="setting-icon-wrap"><span class="material-symbols-rounded">speed</span></div>
-      <div class="setting-info">
-        <div class="setting-title">{{ t('settings.low_performance_mode') }}</div>
-        <div class="setting-desc">{{ t('settings.low_performance_mode_desc') }}</div>
-      </div>
-      <label class="m3-switch"><input type="checkbox" v-model="lowPerformanceMode" /><span class="track"><span class="thumb"><span v-if="lowPerformanceMode" class="material-symbols-rounded" style="font-size: 14px">check</span></span></span></label>
-    </div>
         </div>
 
     <!-- 播放源 -->

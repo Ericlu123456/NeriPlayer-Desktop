@@ -1008,8 +1008,6 @@
     "audio_output_role_software_mix": "软件混音",
     "audio_output_role_usb_stream": "USB 直通",
     "audio_output_role_converter": "采样率/声道转换",
-    "low_performance_mode": "低性能模式",
-    "low_performance_mode_desc": "背景动画、歌词与波形统一限到 30fps，打开评论、播放列表、更多选项等全屏浮层时暂停逐帧动画；画面会不如默认流畅",
     "title": "设置",
     "accounts": "账号",
     "nav_accounts_desc": "管理平台登录与授权状态",

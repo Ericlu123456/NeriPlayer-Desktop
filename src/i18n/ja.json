@@ -1008,8 +1008,6 @@
     "audio_output_role_software_mix": "ソフトウェアミックス",
     "audio_output_role_usb_stream": "USB ストリーム",
     "audio_output_role_converter": "サンプルレート/チャンネル変換",
-    "low_performance_mode": "低負荷モード",
-    "low_performance_mode_desc": "背景アニメーション・歌詞・波形を 30fps に制限し、コメント・再生リスト・その他オプションなどの全画面パネル表示中は毎フレーム描画を停止します。動きは既定より滑らかではなくなります",
     "title": "設定",
     "accounts": "アカウント",
     "nav_accounts_desc": "サービスのログインと認証を管理",
