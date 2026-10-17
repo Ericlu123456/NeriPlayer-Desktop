@@ -50,6 +50,63 @@ fn classify_playback_finish(
     }
 }
 
+/// Linux 上优先用集成显卡的 Mesa 驱动，而不是 GLVND 默认挑中的 NVIDIA
+///
+/// 混合显卡机器上 GLVND 会按文件名顺序把 EGL 交给 NVIDIA（`10_nvidia.json` 排在
+/// `50_mesa.json` 前），而 KWin 这类合成器通常跑在集成显卡的 Mesa 上。两边不是同一块
+/// GPU 时，DMABUF 要跨显卡共享，画面会闪。这里在固件主显卡是 Intel 且 Mesa 的 iris
+/// 驱动可用时，把 EGL 与 GLX 限定到 Mesa；条件不满足就什么都不改（退回 GLVND 默认），
+/// 这样 NVIDIA 单显卡、缺 Mesa 驱动的环境行为不变。`NERI_WEBKIT_GPU=nvidia|mesa|auto`
+/// 可显式选择，见 README「已知限制与排查」。
+#[cfg(target_os = "linux")]
+fn prefer_integrated_gpu() {
+    const MESA_EGL_ICD: &str = "/usr/share/glvnd/egl_vendor.d/50_mesa.json";
+    const INTEL_MESA_DRIVER: &str = "/usr/lib/dri/iris_dri.so";
+    // 用户自己指定过 EGL 厂商或 PRIME 时不要覆盖
+    if std::env::var_os("__EGL_VENDOR_LIBRARY_FILENAMES").is_some()
+        || std::env::var_os("DRI_PRIME").is_some()
+    {
+        return;
+    }
+    let enabled = match std::env::var("NERI_WEBKIT_GPU").as_deref() {
+        Ok("nvidia") => false,
+        Ok("mesa") => true,
+        _ => primary_gpu_is_intel(),
+    };
+    if !enabled
+        || !std::path::Path::new(MESA_EGL_ICD).exists()
+        || !std::path::Path::new(INTEL_MESA_DRIVER).exists()
+    {
+        return;
+    }
+    std::env::set_var("__EGL_VENDOR_LIBRARY_FILENAMES", MESA_EGL_ICD);
+    std::env::set_var("__GLX_VENDOR_LIBRARY_NAME", "mesa");
+}
+
+/// 固件主显卡（`boot_vga`）是不是 Intel：混合显卡机器上它同时是合成器用的那块
+#[cfg(target_os = "linux")]
+fn primary_gpu_is_intel() -> bool {
+    let Ok(entries) = std::fs::read_dir("/sys/class/drm") else {
+        return false;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        // 跳过 card0-DP-1 这类连接器条目
+        if !name.starts_with("card") || name.contains('-') {
+            continue;
+        }
+        let device = entry.path().join("device");
+        let boot_vga = std::fs::read_to_string(device.join("boot_vga")).unwrap_or_default();
+        if boot_vga.trim() != "1" {
+            continue;
+        }
+        let vendor = std::fs::read_to_string(device.join("vendor")).unwrap_or_default();
+        return vendor.trim().eq_ignore_ascii_case("0x8086");
+    }
+    false
+}
+
 fn main() {
     // 崩溃收集必须最早安装：之后任何线程 panic 都会把现场落盘
     neri_player_desktop::logging::install_panic_hook(env!("CARGO_PKG_VERSION"));
@@ -64,6 +121,8 @@ fn main() {
     // NVIDIA 私有驱动、虚拟机等环境若出现白屏/黑屏或 WebGL 背景失效，可用
     // WEBKIT_DISABLE_DMABUF_RENDERER=1 规避（见 README「已知限制与排查」）。
     // 这里不再替用户设置，显式给出的环境变量原样生效
+    #[cfg(target_os = "linux")]
+    prefer_integrated_gpu();
 
     // 在其余插件之前初始化统一日志：启动期直接读取持久化设置决定
     // 是否写文件与日志级别（此时尚无 app handle）
