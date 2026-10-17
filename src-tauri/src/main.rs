@@ -59,13 +59,11 @@ fn main() {
     std::env::set_var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
         "--enable-gpu --enable-gpu-rasterization --enable-zero-copy --enable-features=CanvasOopRasterization");
 
-    // WebKitGTK 的 DMABUF 渲染在 Nvidia 私有驱动与虚拟机上有已知的白屏/
-    // WebGL 失效问题，而本应用重度依赖 WebGL 背景。取舍：禁用 DMABUF 牺牲
-    // 少量合成性能，换取这类环境下能正常显示。用户已显式设置时尊重用户选择
-    #[cfg(target_os = "linux")]
-    if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
-        std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
-    }
+    // 默认让 WebKitGTK 走 DMABUF 硬件合成。关掉它会让合成退化为共享内存回读，
+    // 代价随像素面积增长：同一 WebGL 负载 2560×1440 实测 56fps vs 12fps。
+    // NVIDIA 私有驱动、虚拟机等环境若出现白屏/黑屏或 WebGL 背景失效，可用
+    // WEBKIT_DISABLE_DMABUF_RENDERER=1 规避（见 README「已知限制与排查」）。
+    // 这里不再替用户设置，显式给出的环境变量原样生效
 
     // 在其余插件之前初始化统一日志：启动期直接读取持久化设置决定
     // 是否写文件与日志级别（此时尚无 app handle）

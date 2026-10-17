@@ -295,6 +295,7 @@ The server runs on Cloudflare Workers + Durable Objects. See [NeriPlayer-LTW](ht
 | Global shortcuts do not respond | Enable the global switch, inspect registration errors and check conflicts with the OS or other programs |
 | Older clients fail to sync | Update all clients; back up the remote and read the confirmation prompt before upgrading |
 | App updates | No in-app auto-update is provided yet; download and install the corresponding Preview release manually |
+| Slow or blank playback page on Linux (WebKitGTK rendering) | WebKitGTK's DMABUF hardware compositing is on by default; turning it off degrades compositing to shared-memory readback, measured on the same WebGL workload at 2560×1440 as roughly 56fps versus 12fps. If the proprietary NVIDIA driver, a virtual machine or another environment shows a white or blank screen or loses the WebGL background, fall back to shared-memory compositing with `WEBKIT_DISABLE_DMABUF_RENDERER=1 pnpm tauri dev` (same prefix for an installed build) |
 
 Proxy settings include a Bypass System Proxy switch; adjust it to your network and test. Debug connectivity probes only check whether the transport layer receives a response. They do not prove valid login, playable content or successful business API calls.
 
