@@ -8,9 +8,13 @@ const props = withDefaults(defineProps<{
   isPlaying: boolean
   activeColor?: string
   inactiveColor?: string
+  /** Suspended while a full-screen overlay covers the waveform in low performance mode:
+   * the wave stays on its last frame and a watcher restarts it afterwards */
+  suspended?: boolean
 }>(), {
   activeColor: '#fff',
   inactiveColor: 'rgba(255,255,255,0.35)',
+  suspended: false,
 })
 
 const emit = defineEmits<{
@@ -61,6 +65,11 @@ function wavePath(startX: number, endX: number, cy: number): string {
 }
 
 function animate(timestamp: number) {
+  if (props.suspended) {
+    looping = false
+    lastTime = 0
+    return
+  }
   if (!lastTime) lastTime = timestamp
   const dt = timestamp - lastTime
   lastTime = timestamp
@@ -101,7 +110,7 @@ function animate(timestamp: number) {
 }
 
 function startLoop() {
-  if (looping) return
+  if (looping || props.suspended) return
   looping = true
   lastTime = 0
   animFrame = scheduleFrame(animate)
@@ -118,6 +127,7 @@ onMounted(() => {
 
 // 播放态/拖拽/进度变化时重启渲染循环（停表后需要更新一帧位置或恢复波动）
 watch(() => props.isPlaying, startLoop)
+watch(() => props.suspended, startLoop)
 watch(isDragging, startLoop)
 watch(currentProgress, startLoop)
 onUnmounted(() => {

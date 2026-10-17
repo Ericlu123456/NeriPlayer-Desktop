@@ -17,8 +17,16 @@ const props = withDefaults(defineProps<{
   saturateOffset?: number
   /** 暂停时律动和调色过渡收敛后停表，画面停在最后一帧 */
   playing?: boolean
+  /** Low performance mode: no quality adaptation, pinned to the lowest internal
+   * resolution tier (the shared frame loop caps the frame rate) */
+  lowPerformance?: boolean
+  /** Suspended while a full-screen overlay covers the canvas in low performance mode:
+   * the picture stays on its last frame and continues once the overlay closes */
+  suspended?: boolean
 }>(), {
   playing: true,
+  lowPerformance: false,
+  suspended: false,
   musicLevel: 0,
   beatImpulse: 0,
   colors: () => [
@@ -87,6 +95,12 @@ function sampleFrameInterval(nowMs: number): void {
 }
 
 function adjustQuality(nowMs: number): void {
+  // Low performance mode skips adaptation entirely and pins the lowest tier, so the
+  // global frame cap and the tier gate cannot stack into two layers of throttling
+  if (props.lowPerformance) {
+    scaleTier = QUALITY_SCALES.length - 1
+    return
+  }
   if (nowMs - lastQualityCheckAt < QUALITY_ADJUST_INTERVAL_MS) return
   lastQualityCheckAt = nowMs
   if (!avgFrameInterval) return
@@ -291,6 +305,12 @@ function initGL() {
 // where low performance mode caps the frame rate for all three
 function render(nowMs = performance.now()) {
   if (!gl || !program) return
+  // In low performance mode the overlay covers the whole canvas: stop the loop and let the
+  // watcher start it again once the overlay closes
+  if (props.suspended) {
+    animFrame = 0
+    return
+  }
   sampleFrameInterval(nowMs)
   adjustQuality(nowMs)
 
@@ -382,7 +402,7 @@ function render(nowMs = performance.now()) {
 
 /// 停表后由播放态、调色板、律动、尺寸变化重新拉起；窗口不可见时不拉
 function wake() {
-  if (!gl || !program || animFrame || document.hidden) return
+  if (!gl || !program || animFrame || document.hidden || props.suspended) return
   // 重置帧时钟，避免 dt 巨大导致平滑量跳变
   lastFrameMs = performance.now()
   lastTickAt = 0
@@ -413,7 +433,7 @@ function handleContextRestored() {
 }
 
 watch(
-  () => [props.playing, props.colors, props.isDark, props.lightOffset, props.saturateOffset],
+  () => [props.playing, props.suspended, props.colors, props.isDark, props.lightOffset, props.saturateOffset],
   wake,
 )
 

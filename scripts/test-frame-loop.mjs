@@ -80,6 +80,23 @@ test('cancelled callbacks do not run, and cancelling the last one stops the loop
   assert.equal(loop.scheduledFrames, 0, 'emptying the callback table cancels the rAF too')
 })
 
+test('the frame cap only runs after the interval, and removing it restores per-frame work', () => {
+  const loop = loadFrameLoop()
+  let ticks = 0
+  const task = () => { ticks++; loop.scheduleFrame(task) }
+  loop.setFrameInterval(1000 / 30)
+  loop.scheduleFrame(task)
+  loop.advance(16)
+  assert.equal(ticks, 1, 'the first frame always runs, otherwise the picture freezes')
+  loop.advance(16)
+  assert.equal(ticks, 1, '16ms is short of 33ms, so this frame is skipped')
+  loop.advance(16)
+  assert.equal(ticks, 2, 'accumulated 32ms crosses the interval')
+  loop.setFrameInterval(0)
+  loop.advance(16)
+  assert.equal(ticks, 3, 'without a cap every frame runs')
+})
+
 test('callbacks receive the shared dispatch timestamp instead of reading their own clock', () => {
   const loop = loadFrameLoop()
   const stamps = []

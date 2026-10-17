@@ -1008,6 +1008,8 @@
     "audio_output_role_software_mix": "Software mixing",
     "audio_output_role_usb_stream": "USB stream",
     "audio_output_role_converter": "Sample rate/channel converter",
+    "low_performance_mode": "Low performance mode",
+    "low_performance_mode_desc": "Caps the background animation, lyrics and waveform at 30fps and pauses per-frame animation while a full-screen panel such as comments, queue or more options is open. Motion will be less smooth than the default",
     "title": "Settings",
     "accounts": "Accounts",
     "nav_accounts_desc": "Manage platform sign-ins and access",
