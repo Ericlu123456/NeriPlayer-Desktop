@@ -2,8 +2,12 @@ import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import ts from 'typescript'
 
-const component = await readFile(new URL('../src/components/NowPlaying.vue', import.meta.url), 'utf8')
-const script = component.match(/<script setup lang="ts">([\s\S]*?)<\/script>/)[1]
+// 封面导出逻辑已随右键菜单移到子组件；两个文件的脚本一起解析。
+// Cover export moved into the context-menu child; parse both scripts.
+const components = await Promise.all(['NowPlaying.vue', 'NowPlayingContextMenu.vue'].map(
+  name => readFile(new URL(`../src/components/${name}`, import.meta.url), 'utf8'),
+))
+const script = components.map(component => component.match(/<script setup lang="ts">([\s\S]*?)<\/script>/)[1]).join('\n')
 const parsed = ts.createSourceFile('now-playing.ts', script, ts.ScriptTarget.ES2022, true)
 const functions = ['readCoverBytes', 'imageExtension'].map(name => {
   const node = parsed.statements.find(item => ts.isFunctionDeclaration(item) && item.name?.text === name)

@@ -172,13 +172,6 @@ impl YouTubeClient {
         super::search::search_creators(self, query).await
     }
 
-    /// 获取音频流 (兼容入口: 委托 playback; 无 auth 时仅 guest 路径)
-    /// 正式播放请走 commands 注入 YouTubeAuth, 以便 Premium 生效
-    pub async fn get_streams(&self, video_id: &str) -> AppResult<Vec<YtAudioStream>> {
-        let _ = self;
-        super::playback::resolve_audio_streams(video_id, None).await
-    }
-
     /// 获取歌词（通过 next endpoint）
     pub async fn get_lyrics(&self, video_id: &str) -> AppResult<Option<String>> {
         let body = json!({
@@ -430,19 +423,6 @@ impl YouTubeClient {
         Err(AppError::Api(
             "YouTube followed artists pagination did not reach an end".into(),
         ))
-    }
-
-    /// YouTube Music 歌单详情（需登录）
-    pub async fn get_playlist_detail(
-        &self,
-        browse_id: &str,
-        auth: &crate::auth::state::YouTubeAuth,
-    ) -> AppResult<Value> {
-        let body = json!({
-            "context": self.build_context(),
-            "browseId": browse_id
-        });
-        self.innertube_post_auth("browse", &body, auth).await
     }
 
     /// 认证版 InnerTube POST, 并回收 Set-Cookie 用于会话保鲜

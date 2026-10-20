@@ -247,7 +247,7 @@ fn save_snapshot(directory: &Path, record: &PlayerRecord, now: u64) -> std::io::
             (modified, entry.path())
         })
         .collect::<Vec<_>>();
-    others.sort_by(|left, right| right.0.cmp(&left.0));
+    others.sort_by_key(|entry| std::cmp::Reverse(entry.0));
     for (_, stale) in others.into_iter().skip(SNAPSHOT_LIMIT.saturating_sub(1)) {
         let _ = std::fs::remove_file(stale);
     }
@@ -739,7 +739,7 @@ mod tests {
         let player = std::fs::read_to_string(path).unwrap();
         let signature = "AOq0QJ8wRQIhAKz3rNb6mP2v0yX1bD9cS7eF4gH5iJ6kL7mN8oP9qR0sAiBtU1vW2xY3zA4bC5dE6fG7hI8jK9lM0nO1pQ2rS3tU4vW5x".to_string();
         let throttling = "kQ9xY2zW8vU7tS6r".to_string();
-        let requests = challenge_requests(&[signature.clone()], &[throttling.clone()]);
+        let requests = challenge_requests(std::slice::from_ref(&signature), std::slice::from_ref(&throttling));
         for stack_mb in [8usize, 16, 32, 64, 128, 240] {
             let player = player.clone();
             let requests = requests.clone();
@@ -760,7 +760,7 @@ mod tests {
                         solutions.throttling.contains_key(&throttling),
                         preprocessed.len(),
                     );
-                    let requests = challenge_requests(&[signature.clone()], &[throttling.clone()]);
+                    let requests = challenge_requests(std::slice::from_ref(&signature), std::slice::from_ref(&throttling));
                     let fast_started = Instant::now();
                     let fast = on_test_solver_thread(move || {
                         solve_preprocessed(&preprocessed, &requests)

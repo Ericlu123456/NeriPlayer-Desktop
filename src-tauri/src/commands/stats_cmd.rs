@@ -103,39 +103,6 @@ pub async fn record_playback_session(
     Ok(())
 }
 
-/// 批量上报，退出前一次性 flush 用
-#[tauri::command]
-pub async fn record_playback_sessions(
-    sessions: Vec<PlaybackSessionInput>,
-    app: AppHandle,
-    state: State<'_, AppState>,
-) -> AppResult<()> {
-    if sessions.is_empty() {
-        return Ok(());
-    }
-    let device_id = manager::get_or_create_device_id_pub(&app);
-    let played_at = now_ms();
-    {
-        let mut store = state.stats.lock();
-        for session in &sessions {
-            store.record(&to_session(session), &device_id, played_at);
-        }
-        stats::save(&store);
-    }
-    let playlists = sessions.iter().filter_map(counted_local_playlist_id).collect();
-    record_local_playlist_plays(device_id, playlists, played_at).await;
-    Ok(())
-}
-
-#[tauri::command]
-pub async fn get_playback_stats(
-    period: StatsPeriod,
-    state: State<'_, AppState>,
-) -> AppResult<PlaybackStatsSummary> {
-    let store = state.stats.lock();
-    Ok(store.summarize(period, now_ms()))
-}
-
 /// 一次性返回全部区间，避免切换 tab 时来回 IPC
 #[tauri::command]
 pub async fn get_playback_stats_overview(
@@ -250,14 +217,6 @@ pub async fn get_playback_stat_tracks(
         .iter()
         .map(|key| by_key.get(key.as_str()).and_then(|stat| stat_to_track(stat)))
         .collect())
-}
-
-/// 计算曲目的统计身份键，供前端上报时使用
-#[tauri::command]
-pub async fn playback_stats_identity_key(
-    track: crate::state::TrackInfo,
-) -> AppResult<String> {
-    Ok(manager::playback_stats_identity_key_pub(&track))
 }
 
 #[cfg(test)]

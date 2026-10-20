@@ -19,8 +19,6 @@ export const LtRepeatMode = {
   ALL: 2,
 } as const
 
-export type LtRepeatModeValue = (typeof LtRepeatMode)[keyof typeof LtRepeatMode]
-
 export interface ListenTogetherTrack {
   stableKey: string
   channelId: string

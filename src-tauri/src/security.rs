@@ -7,6 +7,17 @@
 // 应用侧加密、零系统交互。威胁模型一致——防的是「文件被拷走后可读」，
 // 不承诺抵御同机同用户的恶意进程（Keychain 对未签名应用同样给不出这个承诺）。
 // 旧 Keychain 凭据在首次读取时自动迁入并删除。
+//
+// Release builds use app-managed encrypted files; debug builds use plaintext files
+// under a random directory. Each credential kind gets its own file so clearing
+// cookies cannot wipe sync credentials.
+//
+// Why not the OS keychain: an unsigned app changes its binary fingerprint on every
+// update, so macOS Keychain keeps asking for authorization (sometimes the login
+// password), which looks like credential theft to users. The threat model matches
+// Android's EncryptedSharedPreferences: protect files copied off the machine, not a
+// malicious process running as the same user. Legacy Keychain entries are migrated
+// once on first read and then deleted.
 
 const SERVICE_NAME: &str = "moe.ouom.neriplayer.desktop";
 

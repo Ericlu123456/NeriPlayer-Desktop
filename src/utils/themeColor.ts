@@ -254,12 +254,6 @@ export function cancelSmoothThemeTransition() {
   document.documentElement.classList.remove('theme-switching')
 }
 
-/** 获取色块的展示色 */
-export function getSwatchColor(key: string): string {
-  const scheme = THEME_COLORS.find(c => c.key === key)
-  return scheme?.dark['--md-primary'] || 'rgb(208, 188, 255)'
-}
-
 // 深色模式下会通过行内样式覆盖的 surface 变量列表
 const SURFACE_PROPS = [
   '--md-surface', '--md-background', '--md-surface-dim',

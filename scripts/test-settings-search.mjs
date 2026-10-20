@@ -5,6 +5,19 @@ import * as pinyinPro from 'pinyin-pro'
 
 const read = path => readFile(new URL(path, import.meta.url), 'utf8')
 const view = (await read('../src/views/SettingsView.vue')).replace(/\r\n/g, '\n')
+// 设置页已按 section 拆成子组件，面板与标题可能位于子组件模板中。
+// The settings page is split into section components, so panels and titles may live
+// in child component templates.
+const sectionSources = [
+  { file: 'SettingsView.vue', text: view.slice(view.indexOf('<template>')) },
+  ...(await Promise.all(
+    ['SettingsAccountsSection', 'SettingsLanguageSection', 'SettingsAboutSection', 'SettingsStorageSection']
+      .map(async name => ({
+        file: `${name}.vue`,
+        text: (await read(`../src/components/settings/${name}.vue`)).replace(/\r\n/g, '\n'),
+      })),
+  )),
+]
 const indexSource = await read('../src/modules/settings/searchIndex.ts')
 const exports = {}
 new Function('exports', ts.transpileModule(indexSource, {
@@ -15,25 +28,31 @@ const index = exports.SETTINGS_SEARCH_INDEX
 const sectionIds = [...view.matchAll(/^\s+\| '(\w+)'$/gm)].map(match => match[1])
 assert.ok(sectionIds.length >= 15, 'SettingsSectionId union is parsed')
 
-const template = view.slice(view.indexOf('<template>'))
-const panels = [...template.matchAll(/<div v-show="activeSettingsSection === '(\w+)'" class="settings-section-panel" data-section="(\w+)">/g)]
+const panels = []
+for (const source of sectionSources) {
+  for (const match of source.text.matchAll(/<div[^>]*class="settings-section-panel"[^>]*data-section="(\w+)"/g)) {
+    panels.push({ section: match[1], file: source.file, index: match.index })
+  }
+}
 assert.ok(panels.length > 0, 'every settings panel carries data-section')
-for (const [, shown, tagged] of panels) {
-  assert.equal(shown, tagged, `panel ${shown} is tagged with its own section id`)
-  assert.ok(sectionIds.includes(shown), `panel ${shown} is a declared section`)
+for (const panel of panels) {
+  assert.ok(sectionIds.includes(panel.section), `panel ${panel.section} in ${panel.file} is a declared section`)
 }
 for (const id of sectionIds) {
-  assert.ok(panels.some(panel => panel[1] === id), `section ${id} has a panel`)
+  assert.ok(panels.some(panel => panel.section === id), `section ${id} has a panel`)
 }
 
 const indexed = new Set(index.map(entry => `${entry.section}:${entry.title}`))
 const missing = []
-panels.forEach((panel, i) => {
-  const body = template.slice(panel.index, panels[i + 1]?.index ?? template.length)
-  for (const match of body.matchAll(/class="setting-title"[^>]*>\{\{ t\('([\w.]+)'\) \}\}/g)) {
-    if (!indexed.has(`${panel[1]}:${match[1]}`)) missing.push(`${panel[1]}:${match[1]}`)
-  }
-})
+for (const source of sectionSources) {
+  const filePanels = panels.filter(panel => panel.file === source.file).sort((a, b) => a.index - b.index)
+  filePanels.forEach((panel, i) => {
+    const body = source.text.slice(panel.index, filePanels[i + 1]?.index ?? source.text.length)
+    for (const match of body.matchAll(/class="setting-title"[^>]*>\{\{ t\('([\w.]+)'\) \}\}/g)) {
+      if (!indexed.has(`${panel.section}:${match[1]}`)) missing.push(`${panel.section}:${match[1]}`)
+    }
+  })
+}
 assert.deepEqual(missing, [], 'every static setting title is searchable')
 for (const entry of index) assert.ok(sectionIds.includes(entry.section), `index entry ${entry.title} points to a real section`)
 

@@ -826,11 +826,6 @@ impl NeteaseClient {
         ).await
     }
 
-    /// 下载和在线播放使用同一个 EAPI 入口
-    pub async fn get_song_download_url(&self, song_id: u64, quality: &str) -> AppResult<NeteaseSongUrl> {
-        self.get_song_url(song_id, quality).await
-    }
-
     /// 关注歌手列表使用 Android 相同的 WEAPI 分页入口
     pub async fn get_followed_artists(&self, offset: u32, limit: u32) -> AppResult<Value> {
         self.weapi_post(

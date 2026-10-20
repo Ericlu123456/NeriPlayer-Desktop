@@ -1,6 +1,10 @@
 //! 原子落盘工具：所有持久化 JSON/二进制文件必须经由此模块写入，
 //! 避免崩溃/断电/并发时留下半截文件（半截 JSON 解析失败会被上层
 //! 误判为空数据并二次覆盖，造成永久数据丢失）
+//!
+//! Atomic writes: every persisted JSON/binary file must go through this module.
+//! A half-written file is worse than no file: a failed parse is often treated as
+//! "empty data" and overwritten, which turns a crash into permanent data loss.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};

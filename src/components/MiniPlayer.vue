@@ -16,18 +16,10 @@ import { useEscapeClose } from '@/composables/useEscapeClose'
 import { useToastStore } from '@/stores/toast'
 import { closeDesktopLyricsWindow, desktopLyricsOpen, openDesktopLyricsWindow } from '@/modules/desktopLyrics/bridge'
 
-type CoverSnapshot = {
-  rect: { left: number; top: number; width: number; height: number }
-  borderRadius: string
-  src: string
-}
-
 const emit = defineEmits<{ expand: [] }>()
 const props = withDefaults(defineProps<{
-  coverHiddenByFlip?: boolean
   coverFallbackSrc?: string
 }>(), {
-  coverHiddenByFlip: false,
   coverFallbackSrc: '',
 })
 const player = usePlayerStore()
@@ -192,28 +184,6 @@ const displayCoverUrl = computed(() => {
     || getTrackCoverUrl(queuedTrack)
     || ''
 })
-const coverRef = ref<HTMLDivElement>()
-
-function getCoverSnapshot(): CoverSnapshot | null {
-  const el = coverRef.value
-  const src = displayCoverUrl.value
-  if (!el || !src) return null
-  const rect = el.getBoundingClientRect()
-  return {
-    rect: {
-      left: rect.left,
-      top: rect.top,
-      width: rect.width,
-      height: rect.height,
-    },
-    borderRadius: getComputedStyle(el).borderRadius,
-    src,
-  }
-}
-
-defineExpose({
-  getCoverSnapshot,
-})
 </script>
 
 <template>
@@ -245,7 +215,7 @@ defineExpose({
     <div class="mp-body">
       <!-- 左：封面 + 歌曲信息 -->
       <div class="mp-left" @click="emit('expand')" @contextmenu="openTrackMenu">
-        <div ref="coverRef" class="mp-cover" :class="{ playing: player.isPlaying, 'mp-cover-hidden': props.coverHiddenByFlip }">
+        <div class="mp-cover" :class="{ playing: player.isPlaying }">
           <BilibiliCoverImage
             v-if="displayCoverUrl"
             :src="displayCoverUrl"
@@ -554,10 +524,6 @@ defineExpose({
   overflow: hidden;
 
   &.playing { border-radius: var(--radius-md); }
-}
-
-.mp-cover-hidden {
-  opacity: 0;
 }
 
 .mp-cover-img {

@@ -247,10 +247,8 @@ fn ensure_playback_request(state: &State<'_, AppState>, request_generation: u64)
     }
 }
 
-fn advance_playback_request(state: &State<'_, AppState>) -> u64 {
-    state.playback_generation.fetch_add(1, Ordering::AcqRel) + 1
-}
-
+// 参数由前端 IPC 契约决定，必须平铺；改为结构体会同时改掉所有调用点
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn begin_playback_request(
     request_generation: u64,
@@ -286,7 +284,6 @@ pub struct PlayerStateDto {
     pub volume: f32,
     pub position_ms: u64,
     pub duration_ms: u64,
-    pub current_track: Option<crate::state::TrackInfo>,
     pub repeat_mode: crate::state::RepeatMode,
     pub shuffle: bool,
 }
@@ -309,89 +306,6 @@ pub async fn play_file(
         )
     })
     .await
-}
-
-/// 使用稳定缓存键直接播放已验证音频，避免命中缓存时仍等待平台 URL 解析
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CachedAudioPlaybackRequest {
-    cache_key: String,
-    duration_hint_ms: u64,
-    start_position_ms: Option<u64>,
-    use_crossfade: bool,
-    fade_out_ms: u32,
-    fade_in_ms: u32,
-    cache_limit_bytes: Option<u64>,
-    request_generation: u64,
-}
-
-#[tauri::command]
-pub async fn play_cached_audio(
-    request: CachedAudioPlaybackRequest,
-    app: AppHandle,
-    state: State<'_, AppState>,
-) -> AppResult<Option<u64>> {
-    let CachedAudioPlaybackRequest {
-        cache_key,
-        duration_hint_ms,
-        start_position_ms,
-        use_crossfade,
-        fade_out_ms,
-        fade_in_ms,
-        cache_limit_bytes,
-        request_generation,
-    } = request;
-    claim_playback_request(&state, request_generation)?;
-    let Some(cache) = playback_cache(
-        &app,
-        Some(&cache_key),
-        cache_limit_bytes,
-        None,
-        duration_hint_ms,
-    ) else {
-        return Ok(None);
-    };
-
-    let validation_started = std::time::Instant::now();
-    let path = tokio::task::spawn_blocking(move || cache.ready_path())
-        .await
-        .map_err(|err| AppError::Other(err.to_string()))?;
-    let Some(path) = path else {
-        return Ok(None);
-    };
-    ensure_playback_request(&state, request_generation)?;
-    log::info!(
-        target: "play_cached_audio",
-        "cache hit in {}ms: {}",
-        validation_started.elapsed().as_millis(),
-        path.display()
-    );
-
-    let path = path.to_string_lossy().into_owned();
-    let duration_ms = run_player_play(Arc::clone(&state.player), move |player| {
-        if use_crossfade {
-            player.request_crossfade_file_with_hint(
-                &path,
-                duration_hint_ms,
-                fade_out_ms,
-                fade_in_ms,
-                request_generation,
-            )
-        } else {
-            player.request_play_file_at_with_hint(
-                &path,
-                duration_hint_ms,
-                start_position_ms.unwrap_or(0),
-                request_generation,
-            )
-        }
-    })
-    .await?;
-    Ok(Some(if duration_ms > 0 {
-        duration_ms
-    } else {
-        duration_hint_ms
-    }))
 }
 
 #[derive(Deserialize)]
@@ -575,84 +489,8 @@ pub async fn play_cached_audio_candidates(
     }))
 }
 
-/// 从 URL 下载音频并播放（网易云 / B站 / YouTube 流式播放）
-#[tauri::command]
-pub async fn play_url(
-    url: String,
-    duration_hint_ms: u64,
-    start_position_ms: Option<u64>,
-    request_generation: u64,
-    state: State<'_, AppState>,
-) -> AppResult<u64> {
-    claim_playback_request(&state, request_generation)?;
-    log::info!(
-        target: "play_url",
-        "start: url_len={}, hint={}ms",
-        url.len(),
-        duration_hint_ms
-    );
-
-    let referer = playback_referer(&url);
-
-    let start = std::time::Instant::now();
-    let resp = state.http().get(&url)
-        .header("Referer", referer)
-        .header("User-Agent", playback_user_agent(&url))
-        .send().await
-        .map_err(|e| {
-            log::error!(
-                target: "play_url",
-                "HTTP send error: {}",
-                summarize_playback_error(&e),
-            );
-            AppError::Network(e)
-        })?;
-
-    let status = resp.status();
-    log::info!(target: "play_url", "HTTP status: {}", status);
-
-    if !status.is_success() {
-        return Err(AppError::Api(format!(
-            "HTTP {}: stream fetch failed",
-            status
-        )));
-    }
-
-    let bytes = resp.bytes().await.map_err(|e| {
-        log::error!(
-            target: "play_url",
-            "body read error: {}",
-            summarize_playback_error(&e),
-        );
-        AppError::Network(e)
-    })?;
-
-    log::info!(
-        target: "play_url",
-        "downloaded {} bytes in {}ms",
-        bytes.len(),
-        start.elapsed().as_millis()
-    );
-
-    if bytes.is_empty() {
-        return Err(AppError::Audio("Empty audio data received".into()));
-    }
-
-    ensure_playback_request(&state, request_generation)?;
-    let data = bytes.to_vec();
-    run_player_play(Arc::clone(&state.player), move |player| {
-        player.request_play_bytes_at(
-            data,
-            duration_hint_ms,
-            start_position_ms.unwrap_or(0),
-            request_generation,
-        )
-    })
-    .await
-}
-
 /// 快速播放 URL：把响应落到临时文件后按本地文件播放。
-/// 相比 play_url 的整首下载到 Vec 再 Cursor 解码，File + BufReader 通常能减少内存拷贝和解码初始化等待。
+/// 相比把整首下载到 Vec 再 Cursor 解码，File + BufReader 通常能减少内存拷贝和解码初始化等待。
 // Tauri 命令签名由 IPC 契约决定：参数必须平铺，改成结构体会同时改掉前端调用点
 #[allow(clippy::too_many_arguments)]
 #[tauri::command]
@@ -1089,17 +927,6 @@ pub async fn resume(state: State<'_, AppState>) -> AppResult<()> {
 }
 
 #[tauri::command]
-pub async fn toggle_play_pause(state: State<'_, AppState>) -> AppResult<bool> {
-    let mut player = state.player.lock();
-    if player.is_playing {
-        player.pause();
-    } else {
-        player.resume();
-    }
-    Ok(player.is_playing)
-}
-
-#[tauri::command]
 pub async fn set_volume(level: f32, state: State<'_, AppState>) -> AppResult<()> {
     state.player.lock().set_volume(level);
     Ok(())
@@ -1317,36 +1144,6 @@ pub async fn resume_with_fade(duration_ms: u32, state: State<'_, AppState>) -> A
     run_player_blocking(player, |engine| {
         engine.commit_fade_resume();
         Ok(())
-    })
-    .await
-}
-
-#[tauri::command]
-pub async fn crossfade_url(
-    url: String,
-    duration_hint_ms: u64,
-    fade_out_ms: u32,
-    fade_in_ms: u32,
-    request_generation: u64,
-    state: State<'_, AppState>,
-) -> AppResult<u64> {
-    claim_playback_request(&state, request_generation)?;
-    let data = download_url_bytes(
-        &url,
-        &state,
-        "crossfade_url",
-        request_generation,
-    )
-    .await?;
-    ensure_playback_request(&state, request_generation)?;
-    run_player_play(Arc::clone(&state.player), move |player| {
-        player.request_crossfade_bytes(
-            data,
-            duration_hint_ms,
-            fade_out_ms,
-            fade_in_ms,
-            request_generation,
-        )
     })
     .await
 }
@@ -2147,7 +1944,6 @@ pub async fn get_player_state(state: State<'_, AppState>) -> AppResult<PlayerSta
         volume: player.volume,
         position_ms: player.position_ms(),
         duration_ms: player.duration_ms,
-        current_track: queue.current().cloned(),
         repeat_mode: queue.repeat_mode,
         shuffle: queue.shuffle,
     })
@@ -2175,76 +1971,6 @@ pub async fn update_media_metadata(
     Ok(())
 }
 
-// 废弃/危险: next_track/prev_track/set_queue 以 request_play_file_with_hint 播放
-// TrackInfo.url——远程曲目该字段是 https 直链, 会走 File 解码器打开失败。前端对这些命令
-// 零调用（队列推进全在 player.ts）。改接媒体键前务必先改为按 source 解析直链, 否则所有
-// 远程曲目播放失败（PB-07）
-#[tauri::command]
-pub async fn next_track(state: State<'_, AppState>) -> AppResult<Option<crate::state::TrackInfo>> {
-    let request_generation = advance_playback_request(&state);
-    let track = {
-        let mut queue = state.queue.lock();
-        queue.next().cloned()
-    };
-    if let Some(ref t) = track {
-        let url = t.url.clone();
-        let duration_ms = t.duration_ms;
-        run_player_play(Arc::clone(&state.player), move |player| {
-            player.request_play_file_with_hint(&url, duration_ms, request_generation)
-        })
-        .await?;
-    }
-    Ok(track)
-}
-
-#[tauri::command]
-pub async fn prev_track(state: State<'_, AppState>) -> AppResult<Option<crate::state::TrackInfo>> {
-    let request_generation = advance_playback_request(&state);
-    let track = {
-        let mut queue = state.queue.lock();
-        queue.prev().cloned()
-    };
-    if let Some(ref t) = track {
-        let url = t.url.clone();
-        let duration_ms = t.duration_ms;
-        run_player_play(Arc::clone(&state.player), move |player| {
-            player.request_play_file_with_hint(&url, duration_ms, request_generation)
-        })
-        .await?;
-    }
-    Ok(track)
-}
-
-#[tauri::command]
-pub async fn set_queue(
-    tracks: Vec<crate::state::TrackInfo>,
-    start_index: usize,
-    state: State<'_, AppState>,
-) -> AppResult<()> {
-    let request_generation = advance_playback_request(&state);
-    let track = {
-        let mut queue = state.queue.lock();
-        queue.set_tracks(tracks, start_index);
-        queue.current().cloned()
-    };
-    if let Some(track) = track {
-        let url = track.url.clone();
-        let duration_ms = track.duration_ms;
-        run_player_play(Arc::clone(&state.player), move |player| {
-            player.request_play_file_with_hint(&url, duration_ms, request_generation)
-        })
-        .await?;
-    }
-    Ok(())
-}
-
-#[tauri::command]
-pub async fn toggle_shuffle(state: State<'_, AppState>) -> AppResult<bool> {
-    let mut queue = state.queue.lock();
-    queue.toggle_shuffle();
-    Ok(queue.shuffle)
-}
-
 #[tauri::command]
 pub async fn cycle_repeat(state: State<'_, AppState>) -> AppResult<crate::state::RepeatMode> {
     let mut queue = state.queue.lock();
@@ -2265,7 +1991,7 @@ mod tests {
 
     use super::{
         balance_centi, claim_generation, is_generation_current, playback_referer,
-        playback_trace_field, stream_length_matches, CachedAudioPlaybackRequest,
+        playback_trace_field, stream_length_matches,
         PlaybackUiTraceRequest,
     };
     use std::sync::atomic::AtomicU64;
@@ -2312,25 +2038,6 @@ mod tests {
         assert!(stream_length_matches(Some(128), 128));
         assert!(!stream_length_matches(Some(128), 127));
         assert!(stream_length_matches(None, 127));
-    }
-
-    #[test]
-    fn cached_audio_request_accepts_frontend_camel_case_fields() {
-        let request: CachedAudioPlaybackRequest = serde_json::from_value(serde_json::json!({
-            "cacheKey": "bili-BV1-high",
-            "durationHintMs": 272_000,
-            "startPositionMs": 22_720,
-            "useCrossfade": false,
-            "fadeOutMs": 0,
-            "fadeInMs": 0,
-            "cacheLimitBytes": 1024_u64 * 1024 * 1024,
-            "requestGeneration": 42,
-        }))
-        .expect("cached playback request");
-
-        assert_eq!(request.cache_key, "bili-BV1-high");
-        assert_eq!(request.start_position_ms, Some(22_720));
-        assert_eq!(request.request_generation, 42);
     }
 
     #[test]

@@ -15,6 +15,7 @@ Use recoverable copies of your data during development. Third-party APIs can cha
 | Window, security, resource, and packaging configuration | [tauri.conf.json](./src-tauri/tauri.conf.json), [capabilities](./src-tauri/capabilities/) |
 | Development startup and build metadata | [run-tauri.mjs](./scripts/run-tauri.mjs), [build.rs](./src-tauri/build.rs) |
 | Checks, test packages, and releases | [.github/workflows](./.github/workflows/) |
+| Module map, file size, and splitting policy | [ARCHITECTURE.md](./ARCHITECTURE.md) |
 | FFmpeg builds, distribution, and decoder validation | [FFmpeg README](./src-tauri/native/ffmpeg/README.md) |
 | Contribution and community standards | [PR template](./.github/PULL_REQUEST_TEMPLATE.md), [CODE_OF_CONDUCT.md](./CODE_OF_CONDUCT.md) |
 
@@ -108,7 +109,7 @@ Adding a command requires an implementation in `commands/`, registration through
 
 ### Common extension entry points
 
-- **Settings**: register `AppSettings` fields/defaults in `stores/settings.ts`; update `SettingsView.vue`, translations, search, and migration. Reuse commands and `settings/` persistence for backend behavior and preserve `formatVersion` compatibility.
+- **Settings**: register `AppSettings` fields/defaults in `stores/settings.ts`; update the matching `components/settings/Settings*Section.vue` (create a section component for a new group), translations, search, and migration. Reuse commands and `settings/` persistence for backend behavior and preserve `formatVersion` compatibility.
 - **Platforms**: start with `api/`, `auth/`, `search_cmd.rs`, and stream commands in `settings_cmd.rs`, then align frontend source mapping, routes, downloads, lyrics, covers, and statistics identity.
 - **Lyrics**: inspect Rust `lyrics/manager.rs`, frontend `modules/lyrics/`, and `stores/currentLyrics.ts`. Preserve matched lyrics, translation/romanization, offsets, and AMLL word timing; sources do not all share one format.
 
@@ -137,6 +138,32 @@ cargo check --manifest-path src-tauri/Cargo.toml --locked
 cargo test --manifest-path src-tauri/Cargo.toml --locked --lib
 cargo clippy --manifest-path src-tauri/Cargo.toml --locked
 ```
+
+### Quality gates
+
+CI rejects the following; run them locally before submitting:
+
+```bash
+pnpm build                 # vue-tsc, includes noUnusedLocals / noUnusedParameters
+pnpm test:dead-code        # unreachable files and exports that are never referenced
+pnpm test:guardrails       # @ts-ignore / console.log / #[allow(dead_code)] / re-export shims / locale parity
+pnpm check:rust-fmt        # rustfmt ratchet, see below
+
+cd src-tauri
+cargo clippy --locked --all-targets -- -D warnings
+cargo test --locked --lib
+```
+
+`cargo clippy` runs with `-D warnings` in CI, so warnings fail the build. `check:rust-fmt` only requires changed `.rs` files that were already rustfmt-clean at the base revision, plus new files, to stay clean; legacy unformatted files are not reformatted in one go and need a dedicated commit before switching to a full check.
+
+For intentional exceptions, add an entry to `scripts/dead-code-allowlist.json` or argue the case in the PR; do not bypass the checks with `#[allow(dead_code)]`, `@ts-ignore`, or by deleting the check.
+
+### Large files and splitting
+
+- `NowPlaying.vue` effectively orchestrates the app's main service; cover and lyric animations share one clock and layout measurement, so it is not split by line count. Put new features in dedicated components or composables.
+- `SettingsView.vue` is being split into `components/settings/Settings*Section.vue` in batches; shared styles live in `styles/settings-common.scss` and expanded state stays in the shell. Create a section component for new settings instead of adding more markup to the shell.
+- Rust `audio/player.rs` and `audio/remote.rs` are cohesive playback/streaming engines; extend the existing sections first. If a split is required, follow the boundaries documented at the top of each module and keep a single state machine.
+- Unit tests for the largest files now live in sibling `tests.rs` files (`audio/player/tests.rs`, `audio/remote/tests.rs`, `sync/merge/tests.rs`, `commands/sync_cmd/tests.rs`). Add new tests there instead of mixing thousands of test lines into production files.
 
 `pnpm test` uses `scripts/test-frontend.mjs` to enumerate all `test:*` commands and run them sequentially. Coverage includes pure logic, stores, component mocks, and source constraints, rather than browser end-to-end testing. Register new regressions in `package.json` and maintain component/IPC mocks using existing patterns.
 

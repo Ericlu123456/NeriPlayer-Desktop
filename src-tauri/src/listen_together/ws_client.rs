@@ -1,10 +1,8 @@
 use futures_util::{SinkExt, StreamExt};
-use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter};
 use tokio::sync::mpsc;
 use tokio::sync::watch;
-use tokio::sync::Mutex as TokioMutex;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::Message;
 use uuid::Uuid;
@@ -250,9 +248,6 @@ impl Drop for LtWsClient {
         self.write_handle.abort();
     }
 }
-
-/// 全局 WS 客户端引用（存在 AppState 中）
-pub type SharedWsClient = Arc<TokioMutex<Option<LtWsClient>>>;
 
 #[cfg(test)]
 mod tests {

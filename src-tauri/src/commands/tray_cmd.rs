@@ -364,8 +364,11 @@ fn set_page_visible(window: &WebviewWindow, visible: bool) {
             log::warn!(target: "tray", "could not reach the webview to set visibility: {error}");
         }
     }
-    #[cfg(not(windows))]
-    let _ = (window, visible);
+    // 前端据此暂停 rAF 与 CSS 动画；Linux 没有 WebView2 的 SetIsVisible，
+    // 也不保证 GTK hide 会触发 Page Visibility。
+    // The frontend pauses rAF/CSS animations from this event; Linux has neither
+    // WebView2's SetIsVisible nor a reliable GTK-hide Page Visibility signal.
+    let _ = window.emit("main-window-visible", visible);
 }
 
 pub fn show_main_window(app: &AppHandle) {
@@ -384,10 +387,13 @@ pub fn hide_main_window(app: &AppHandle) {
     if !window.is_visible().unwrap_or(false) {
         return;
     }
-    let _ = window.hide();
+    // 先通知页面暂停，再隐藏窗口：窗口不可见后 WebKitGTK 可能延迟派发 JS 事件。
+    // Notify the page to pause before hiding; after the window is hidden WebKitGTK
+    // may delay delivering JS events.
     if !MAIN_HIDDEN.swap(true, Ordering::AcqRel) {
         set_page_visible(&window, false);
     }
+    let _ = window.hide();
 }
 
 /// 主窗口被其他途径（前端 show、系统切换）重新显示并获得焦点时，补上恢复页面渲染

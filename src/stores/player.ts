@@ -1,3 +1,18 @@
+// 播放状态编排 / Playback state orchestration.
+//
+// 单例 store，负责队列、当前曲目、播放源解析、seek/淡入淡出、播放统计与一起听联动。
+// 关键不变量 / Invariants:
+// - 每个播放请求带 generation，旧请求结果绝不能覆盖新请求。
+//   Every request carries a generation; stale results must never win.
+// - 队列推进在本 store，后端 `PlayQueue` 只是兼容用的状态镜像。
+//   Queue advancement lives here; the backend `PlayQueue` is a compatibility mirror.
+// - 任何新增的 invoke 命令都必须先在 Rust 侧注册，并通过本 store 调用。
+//   Every new invoke command must be registered in Rust and called through this store.
+//
+// 文件较大是业务本身决定的；新增独立能力优先放 `modules/playback/`，不要继续堆在这里。
+// The size reflects the domain; put new independent logic under `modules/playback/`
+// instead of growing this file.
+
 import { defineStore } from 'pinia'
 import { ref, computed, watch } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
@@ -429,6 +444,7 @@ function audioFilePathKey(path: string | undefined | null) {
   return /^[a-z]:\//i.test(key) || key.startsWith('//') ? key.toLowerCase() : key
 }
 
+import { useSleepTimer } from '@/composables/useSleepTimer'
 export const usePlayerStore = defineStore('player', () => {
   const audioFileMutations = new Map<string, {
     trackId: string | null
@@ -491,56 +507,18 @@ export const usePlayerStore = defineStore('player', () => {
   // 当前会话是否命中播放缓存 (非下载文件)
   const isPlayingFromCache = ref(false)
 
-  // 睡眠定时器
-  const sleepTimerEndMs = ref(0) // 0 = 未启用
-  const sleepTimerMode = ref<'countdown' | 'end_of_track' | 'end_of_queue' | null>(null)
-  const sleepTimerNowMs = ref(Date.now())
-  let _sleepTimerInterval: ReturnType<typeof setInterval> | null = null
-
-  /** 剩余睡眠时间（秒） */
-  const sleepRemainingSeconds = computed(() => {
-    if (!sleepTimerMode.value || sleepTimerEndMs.value <= 0) return 0
-    if (sleepTimerMode.value === 'end_of_track') return -1 // 特殊标记
-    return Math.max(0, Math.ceil((sleepTimerEndMs.value - sleepTimerNowMs.value) / 1000))
+  // 睡眠定时器 / Sleep timer. The countdown pauses through the shared `pause` action;
+  // end-of-track/end-of-queue are evaluated in `handleTrackEnded`.
+  const {
+    sleepTimerMode,
+    sleepRemainingSeconds,
+    startSleepTimer,
+    startSleepTimerEndOfTrack,
+    startSleepTimerEndOfQueue,
+    cancelSleepTimer,
+  } = useSleepTimer(() => {
+    void pause('local_safety')
   })
-
-  function startSleepTimer(minutes: number) {
-    cancelSleepTimer()
-    const now = Date.now()
-    sleepTimerMode.value = 'countdown'
-    sleepTimerNowMs.value = now
-    sleepTimerEndMs.value = now + minutes * 60 * 1000
-    _sleepTimerInterval = setInterval(() => {
-      const now = Date.now()
-      sleepTimerNowMs.value = now
-      if (now >= sleepTimerEndMs.value) {
-        void pause('local_safety')
-        cancelSleepTimer()
-      }
-    }, 1000)
-  }
-
-  function startSleepTimerEndOfTrack() {
-    cancelSleepTimer()
-    sleepTimerMode.value = 'end_of_track'
-    sleepTimerEndMs.value = 1 // 非零表示启用
-  }
-
-  function startSleepTimerEndOfQueue() {
-    cancelSleepTimer()
-    sleepTimerMode.value = 'end_of_queue'
-    sleepTimerEndMs.value = 1
-  }
-
-  function cancelSleepTimer() {
-    if (_sleepTimerInterval) {
-      clearInterval(_sleepTimerInterval)
-      _sleepTimerInterval = null
-    }
-    sleepTimerMode.value = null
-    sleepTimerEndMs.value = 0
-    sleepTimerNowMs.value = Date.now()
-  }
 
   // 音频分析数据
   const audioLevel = ref(0)
@@ -568,8 +546,6 @@ export const usePlayerStore = defineStore('player', () => {
   let eventsInitialized = false
   // seek 后忽略 position 事件的时间窗口
   let seekGuardUntil = 0
-  // 记住最后 seek 的位置，用于 resume 时重新 seek（防止后端丢失 seek-while-paused）
-  let lastSeekedMs: number | null = null
   // seek 后等待后端位置收敛，防止刚开播的旧 position 把进度条拉回去
   let pendingSeek: PendingSeekState | null = null
   let pauseGuardUntil = 0
@@ -1126,7 +1102,6 @@ export const usePlayerStore = defineStore('player', () => {
       requestGeneration: playbackRequestToken,
       fromPlaybackStart: options.fromPlaybackStart === true,
     }
-    lastSeekedMs = safeTargetMs
     clearPauseGuard()
     armPendingSeek(safeTargetMs)
     return safeTargetMs
@@ -1209,6 +1184,14 @@ export const usePlayerStore = defineStore('player', () => {
     _interpLastTickTime = 0
 
     function tick() {
+      // 主窗口收进托盘时停表，避免不可见页面继续按 60fps 触发响应式更新/重绘；
+      // 恢复可见时由 neri-runtime-visibility 监听器重新启动。
+      // Stop while the main window is hidden so an invisible page does not keep
+      // updating reactive state at 60fps; the visibility listener restarts it.
+      if (typeof document !== 'undefined' && document.documentElement?.classList.contains('window-hidden')) {
+        _interpLoopStarted = false
+        return
+      }
       // 空闲（未播放且无 pendingSeek）时渲染一次最终位置后停表，避免常驻逐帧唤醒
       if (!_interpIsPlaying && !pendingSeek) {
         interpolatedPositionMs.value = Math.round(_interpRenderedMs)
@@ -2009,7 +1992,6 @@ export const usePlayerStore = defineStore('player', () => {
             deferredSeekFailed = true
             pendingSeek = null
             seekGuardUntil = 0
-            lastSeekedMs = null
             log.warn('deferred seek failed after media load:', error)
           }
         }
@@ -2023,14 +2005,12 @@ export const usePlayerStore = defineStore('player', () => {
         : clampPlaybackPosition(appliedLoadPositionMs)
       if (startMs > 0) {
         setRenderedPosition(startMs)
-        lastSeekedMs = startMs
         armPendingSeek(startMs)
       } else {
         setRenderedPosition(0)
         pendingSeek = null
         seekGuardUntil = 0
         clearPauseGuard()
-        lastSeekedMs = null
       }
       isPlaying.value = true
       hasPlaybackSession.value = true
@@ -2211,8 +2191,6 @@ export const usePlayerStore = defineStore('player', () => {
         } else {
           await invoke('resume')
         }
-        // 恢复播放成功后不再需要 pause seek 兜底
-        lastSeekedMs = null
       } else if (settings.fadeIn && settings.fadeOutDuration > 0) {
         playbackStartupWatchdog.cancel()
         await invoke('pause_with_fade', { durationMs: Math.round(settings.fadeOutDuration) })
@@ -2616,7 +2594,7 @@ export const usePlayerStore = defineStore('player', () => {
   }
 
   async function toggleShuffle() {
-    // 同 PB-03: 本地翻转, 不采信后端 toggle_shuffle 返回值
+    // 同 PB-03: 本地翻转，后端不保存队列状态
     shuffleEnabled.value = !shuffleEnabled.value
     // Shuffle 三栈管理
     if (shuffleEnabled.value) {
@@ -3595,6 +3573,18 @@ export const usePlayerStore = defineStore('player', () => {
   loadPlayerState()
   void applyPersistedSettings()
   void loadDecoderCapabilities()
+
+  // 主窗口从托盘恢复时重启进度插值（隐藏时 tick 已自行停表）。
+  // Restart progress interpolation when the main window returns from the tray.
+  if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+    window.addEventListener('neri-runtime-visibility', () => {
+      if (typeof document !== 'undefined'
+        && !document.documentElement?.classList.contains('window-hidden')
+        && _interpIsPlaying) {
+        _startInterpolationLoop()
+      }
+    })
+  }
 
   return {
     isPlaying, currentTrack, currentBiliVideoSkipTarget, positionMs, durationMs, queue, queueIndex,

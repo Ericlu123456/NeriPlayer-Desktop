@@ -9,6 +9,9 @@ use crate::state::AppState;
 
 const NETEASE_PAGE_SIZE: u32 = 30;
 
+/// 分类分页字段名 + 行映射函数：三个平台共用同一套分页循环
+type ExplorePageSpec = (&'static str, &'static str, fn(&Value) -> Option<ExploreItem>);
+
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ExploreItem {
@@ -110,7 +113,7 @@ fn netease_artist(artist: &Value) -> Option<ExploreItem> {
 
 fn netease_page(body: &Value, kind: &str, offset: u32) -> ExplorePage {
     let result = &body["result"];
-    let (list, total_key, mapper): (&str, &str, fn(&Value) -> Option<ExploreItem>) = match kind {
+    let (list, total_key, mapper): ExplorePageSpec = match kind {
         "playlists" => ("playlists", "playlistCount", netease_playlist),
         "artists" => ("artists", "artistCount", netease_artist),
         _ => ("songs", "songCount", netease_song),

@@ -13,7 +13,6 @@ type Aes128CbcEnc = cbc::Encryptor<aes::Aes128>;
 const PRESET_KEY: &[u8; 16] = b"0CoJUm6Qyw8W8jud";
 const IV: &[u8; 16] = b"0102030405060708";
 const EAPI_KEY: &[u8; 16] = b"e82ckenh8dichen8";
-const LINUX_KEY: &[u8; 16] = b"rFgB&h#%2?^eDg:Q";
 
 // RSA 公钥
 const RSA_PUB_KEY_HEX: &str = "010001";
@@ -147,10 +146,4 @@ pub fn eapi_encrypt(url: &str, json: &str) -> String {
     let data = format!("{}-36cd479b6b5-{}-36cd479b6b5-{}", path, json, digest);
     let encrypted = aes_ecb_encrypt(data.as_bytes(), EAPI_KEY);
     hex::encode_upper(&encrypted)
-}
-
-/// LinuxAPI 加密
-pub fn linux_encrypt(json: &str) -> String {
-    let encrypted = aes_ecb_encrypt(json.as_bytes(), LINUX_KEY);
-    hex::encode(&encrypted)
 }

@@ -73,11 +73,6 @@ pub fn set_document<T: Serialize + ?Sized>(connection: &Connection, key: &str, v
     Ok(())
 }
 
-pub fn remove_document(connection: &Connection, key: &str) -> AppResult<()> {
-    connection.execute("DELETE FROM sync_metadata WHERE key = ?1", [key])?;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

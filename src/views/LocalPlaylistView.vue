@@ -70,7 +70,6 @@ let dragRowSnapshots: Array<{
   layoutTop: number
   layoutHeight: number
 }> = []
-let dragListBounds: { top: number; bottom: number } | null = null
 let dragLandingTimer: ReturnType<typeof window.setTimeout> | null = null
 // 拖拽行的相邻行 key，用于屏蔽等价于原位的无效落点
 let dragPrevSiblingKey: string | null = null
@@ -584,12 +583,10 @@ function captureTrackDragSnapshot() {
   const draggedKey = dragTrackKey.value
   if (!list || !draggedKey) {
     dragRowSnapshots = []
-    dragListBounds = null
     return
   }
 
   const listRect = list.getBoundingClientRect()
-  dragListBounds = { top: listRect.top, bottom: listRect.bottom }
   const rows = [...list.querySelectorAll<HTMLElement>('.track-item')]
   const draggedIndex = rows.findIndex(row => (row.dataset.trackKey || '') === draggedKey)
   dragPrevSiblingKey = draggedIndex > 0 ? rows[draggedIndex - 1].dataset.trackKey || null : null
@@ -707,7 +704,6 @@ function cleanupTrackDrag() {
   dragRowHeight.value = 0
   dragOffsetY.value = 0
   dragRowSnapshots = []
-  dragListBounds = null
 }
 
 function cancelTrackDrag() {

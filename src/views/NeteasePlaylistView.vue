@@ -233,7 +233,7 @@ function shufflePlay() {
   player.shufflePlay(tracks.value)
 }
 
-function playTrack(track: TrackInfo, index: number) {
+function playTrack(track: TrackInfo) {
   if (selectionMode.value) {
     toggleSelected(track.id)
     return
@@ -497,7 +497,7 @@ onMounted(() => {
           class="track-item"
           :class="{ active: player.currentTrack?.id === track.id, selected: selectionMode && selectedIds.has(track.id), 'selection-mode': selectionMode }"
           :data-track-key="track.id"
-          @click="playTrack(track, index)"
+          @click="playTrack(track)"
           @pointerenter="player.prefetchIntent(track)"
           @focusin="player.prefetchIntent(track)"
           @contextmenu.prevent.stop="openTrackContextMenu($event, track)"

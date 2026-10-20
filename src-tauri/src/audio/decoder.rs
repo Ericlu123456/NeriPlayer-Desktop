@@ -103,11 +103,9 @@ impl Iterator for FfmpegPcmSource {
     type Item = f32;
 
     fn next(&mut self) -> Option<f32> {
-        if self.position >= self.filled {
-            if self.finished || !self.refill() {
-                self.finished = true;
-                return None;
-            }
+        if self.position >= self.filled && (self.finished || !self.refill()) {
+            self.finished = true;
+            return None;
         }
         let sample = self.buffer.get(self.position).copied();
         self.position += 1;

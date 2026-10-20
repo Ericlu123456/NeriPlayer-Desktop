@@ -15,6 +15,7 @@ NeriPlayer Desktop 当前是**预览版**。多源播放、本地音乐管理、
 | 窗口、安全、资源和打包配置 | [tauri.conf.json](./src-tauri/tauri.conf.json)、[capabilities](./src-tauri/capabilities/) |
 | 开发启动、版本信息 | [run-tauri.mjs](./scripts/run-tauri.mjs)、[build.rs](./src-tauri/build.rs) |
 | 检查、测试包与发布 | [.github/workflows](./.github/workflows/) |
+| 模块地图、文件规模与拆分策略 | [ARCHITECTURE.md](./ARCHITECTURE.md) |
 | FFmpeg 构建、分发与解码验证 | [FFmpeg README](./src-tauri/native/ffmpeg/README.md) |
 | 贡献与社区规范 | [PR 模板](./.github/PULL_REQUEST_TEMPLATE.md)、[CODE_OF_CONDUCT.md](./CODE_OF_CONDUCT.md) |
 
@@ -108,7 +109,7 @@ pnpm tauri dev
 
 ### 常见扩展入口
 
-- **新增设置**：在 `stores/settings.ts` 的 `AppSettings` 与默认值登记，补齐 `SettingsView.vue`、翻译、搜索入口及迁移；后端行为复用现有命令与 `settings/` 持久化，保留 `formatVersion` 兼容。
+- **新增设置**：在 `stores/settings.ts` 的 `AppSettings` 与默认值登记，补齐对应 `components/settings/Settings*Section.vue`（新分区直接新建 section 组件）、翻译、搜索入口及迁移；后端行为复用现有命令与 `settings/` 持久化，保留 `formatVersion` 兼容。
 - **扩展平台**：从 `api/`、`auth/`、`search_cmd.rs` 与 `settings_cmd.rs` 的取流命令入手，再对齐前端来源映射、路由、下载、歌词、封面和统计身份。
 - **调整歌词**：检查 Rust `lyrics/manager.rs` 和前端 `modules/lyrics/`、`stores/currentLyrics.ts`，保留已匹配歌词、翻译/罗马字、偏移与 AMLL 逐字结构；不要假设所有来源使用同一格式。
 
@@ -137,6 +138,32 @@ cargo check --manifest-path src-tauri/Cargo.toml --locked
 cargo test --manifest-path src-tauri/Cargo.toml --locked --lib
 cargo clippy --manifest-path src-tauri/Cargo.toml --locked
 ```
+
+### 质量门禁
+
+CI 会拦下以下情况；本地提交前建议先跑一遍：
+
+```bash
+pnpm build                 # vue-tsc：含 noUnusedLocals / noUnusedParameters
+pnpm test:dead-code        # 入口不可达文件 + 只声明未引用的导出
+pnpm test:guardrails       # @ts-ignore / console.log / #[allow(dead_code)] / re-export 垫片 / 四语键集
+pnpm check:rust-fmt        # rustfmt 棘轮，见下
+
+cd src-tauri
+cargo clippy --locked --all-targets -- -D warnings
+cargo test --locked --lib
+```
+
+`cargo clippy` 在 CI 中以 `-D warnings` 运行，警告即失败。`check:rust-fmt` 只要求本次改动的 `.rs` 文件中“基线本来通过 rustfmt”的文件和新文件继续通过；历史未格式化的文件不会被一次性重排，需要单独提交再切到全量检查。
+
+需要例外时写进 `scripts/dead-code-allowlist.json`，或在 PR 里说明理由；不要用 `#[allow(dead_code)]`、`@ts-ignore` 或删除检查来绕过。
+
+### 大文件与拆分约定
+
+- `NowPlaying.vue` 实际承担主服务编排，封面与歌词动画共享时钟和布局测量，不按行数硬拆；新能力放独立组件或 composable。
+- `SettingsView.vue` 按 `components/settings/Settings*Section.vue` 分批拆分；共用样式在 `styles/settings-common.scss`，折叠状态留在外壳。新增设置分区请直接建 section 组件，不要再往外壳里堆模板。
+- Rust 的 `audio/player.rs`、`audio/remote.rs` 是内聚的播放与流式引擎，优先在既有段落内扩展；确需拆分时按模块头部注释给出的边界切，并保持单份状态机。
+- 大文件的单元测试已移到同级 `tests.rs`（`audio/player/tests.rs`、`audio/remote/tests.rs`、`sync/merge/tests.rs`、`commands/sync_cmd/tests.rs`），新增测试放对应 `tests.rs`，不要再把生产文件和几千行测试混在一起。
 
 `pnpm test` 由 `scripts/test-frontend.mjs` 枚举全部 `test:*` 并串行运行。覆盖纯逻辑、store、组件模拟与源码约束，并非浏览器端到端测试。新增回归在 `package.json` 注册，沿用已有组件与 IPC mock。
 

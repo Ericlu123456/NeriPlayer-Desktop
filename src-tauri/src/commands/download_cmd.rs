@@ -1846,12 +1846,6 @@ pub async fn download_track(
     })
 }
 
-/// 列出所有已下载的曲目
-#[tauri::command]
-pub async fn list_downloads(app: AppHandle) -> AppResult<Vec<DownloadedTrack>> {
-    Ok(validate_manifest_files(&app)?.tracks)
-}
-
 /// 校验下载清单，自动移除磁盘文件已不存在的记录
 #[tauri::command]
 pub async fn validate_downloads(app: AppHandle) -> AppResult<DownloadManifestValidation> {

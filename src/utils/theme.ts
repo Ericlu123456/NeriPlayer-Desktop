@@ -16,8 +16,6 @@ import {
 
 export type ThemeMode = 'system' | 'dark' | 'light'
 
-let currentMode: ThemeMode = 'system'
-
 export function getThemeMode(): ThemeMode {
   return (localStorage.getItem('theme-mode') as ThemeMode) || 'system'
 }
@@ -34,7 +32,6 @@ function resolvedIsDark(mode: ThemeMode): boolean {
  * classList 写后读触发强制 reflow
  */
 function applyThemeVisual(mode: ThemeMode) {
-  currentMode = mode
   const dark = resolvedIsDark(mode)
   document.documentElement.classList.toggle('light-theme', !dark)
   document.documentElement.classList.toggle('dark-theme', dark)

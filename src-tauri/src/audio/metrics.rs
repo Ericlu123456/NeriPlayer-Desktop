@@ -3,14 +3,12 @@
 //! 设备回调只做原子操作（计数、`fetch_max`、取单调时钟），汇总、日志和对外查询
 //! 都在控制线程或命令线程完成：回调里不加锁、不分配、不写日志。
 
-use std::collections::VecDeque;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 
-const RECENT_START_CAP: usize = 32;
 /// 首帧迟迟不来（例如起播后立刻被暂停）时放弃等待，探针不能无限堆积
 const PROBE_TIMEOUT_NS: u64 = 60_000_000_000;
 /// 播放中按这个周期汇总一次回调指标；1 小时长稳测试靠它统计欠载
@@ -166,26 +164,6 @@ pub struct StartTiming {
     pub first_frame_unix_ms: f64,
 }
 
-static RECENT_STARTS: Mutex<VecDeque<StartTiming>> = Mutex::new(VecDeque::new());
-
-fn remember_start(timing: StartTiming) {
-    let mut recent = RECENT_STARTS
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if recent.len() >= RECENT_START_CAP {
-        recent.pop_front();
-    }
-    recent.push_back(timing);
-}
-
-/// 最近的起播/seek 耗时，新的在前
-pub fn recent_starts() -> Vec<StartTiming> {
-    let recent = RECENT_STARTS
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    recent.iter().rev().cloned().collect()
-}
-
 /// 命令发出与控制线程开始处理它时的单调时钟读数
 pub struct CommandStamps {
     pub issued_ns: u64,
@@ -339,7 +317,6 @@ impl MetricsReporter {
         self.probes.retain(|probe| match probe.poll(now_ns, now_unix_ms) {
             ProbeState::Done(timing) => {
                 log_start_timing(&timing);
-                remember_start(timing);
                 false
             }
             ProbeState::Expired => {

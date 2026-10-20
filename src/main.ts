@@ -1,3 +1,11 @@
+// 前端入口：按窗口类型分派（主窗口 / 桌面歌词 / 托盘面板）。
+// Frontend entry: dispatch by window kind (main / desktop lyrics / tray popup).
+//
+// 桌面歌词与托盘面板只挂载自己的视图，不初始化路由，避免为一个小窗口付出整套
+// store/路由的启动成本。
+// The desktop-lyrics and tray-popup windows mount only their own view and skip the
+// router so a small window does not pay for the full store/router startup.
+
 import { createApp } from 'vue'
 import { createLogger } from '@/utils/logger'
 import { createPinia } from 'pinia'

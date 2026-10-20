@@ -363,27 +363,6 @@ pub fn expire_platform_cookies(jar: &Arc<Jar>, auth: &AuthState, platform: &str)
     expire_cookie_entries(jar, &discovered);
 }
 
-/// 解析 document.cookie 字符串为 CookieEntry 列表
-pub fn parse_document_cookies(cookie_str: &str, domain: &str) -> Vec<CookieEntry> {
-    cookie_str
-        .split(';')
-        .filter_map(|pair| {
-            let pair = pair.trim();
-            let (name, value) = pair.split_once('=')?;
-            let name = name.trim();
-            let value = value.trim();
-            if name.is_empty() {
-                return None;
-            }
-            Some(CookieEntry {
-                name: name.to_string(),
-                value: value.to_string(),
-                domain: domain.to_string(),
-            })
-        })
-        .collect()
-}
-
 /// 解析用户粘贴的原始 Cookie 文本（对齐 Android RawCookieTextParser）
 /// 支持分号、换行、回车分隔
 pub fn parse_raw_cookie_text(raw: &str, platform: &str) -> Vec<CookieEntry> {

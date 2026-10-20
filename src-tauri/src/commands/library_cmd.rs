@@ -6,20 +6,10 @@ use std::time::Instant;
 use tauri::{AppHandle, Emitter, State};
 use crate::error::{AppError, AppResult};
 use crate::state::{AppState, TrackInfo, TrackSource};
-use crate::library::{scanner, playlist::{self, PlaylistStore}};
+use crate::library::playlist::{self, PlaylistStore};
 use crate::sync::models::SyncFavoritePlaylist;
 use crate::sync::models::SyncCausalToken;
 use crate::sync::manager;
-
-#[tauri::command]
-pub async fn scan_music_directory(
-    dir: String,
-    name_template: Option<String>,
-) -> AppResult<scanner::ScanResult> {
-    tokio::task::spawn_blocking(move || scanner::scan_directory(&dir, name_template.as_deref()))
-        .await
-        .map_err(|e| AppError::Other(e.to_string()))?
-}
 
 #[tauri::command]
 pub async fn get_playlist_usage_stats() -> AppResult<Value> {

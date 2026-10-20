@@ -153,11 +153,6 @@ struct PlayerClientProfile {
     client_version: &'static str,
     user_agent: &'static str,
     platform: &'static str,
-    /// 兜底 locale；实际请求以 innertube_locale() 为准，随国际化开关变化
-    #[allow(dead_code)]
-    hl: &'static str,
-    #[allow(dead_code)]
-    gl: &'static str,
     host: PlayerHost,
     android_sdk_version: Option<i32>,
     os_name: Option<&'static str>,
@@ -177,7 +172,7 @@ fn playback_client_profiles() -> &'static [PlayerClientProfile] {
     &[
         PlayerClientProfile {
             client_id: "101", client_name: "VISIONOS", client_version: "0.1",
-            user_agent: STREAM_VISIONOS_USER_AGENT, platform: "MOBILE", hl: "en", gl: "US",
+            user_agent: STREAM_VISIONOS_USER_AGENT, platform: "MOBILE",
             host: PlayerHost::Www, android_sdk_version: None, os_name: Some("visionOS"),
             os_version: Some("1.3.21O771"), device_make: Some("Apple"), device_model: Some("RealityDevice14,1"),
             player_params: None, requires_visitor_data: false, supports_authenticated_context: false,
@@ -185,7 +180,7 @@ fn playback_client_profiles() -> &'static [PlayerClientProfile] {
         },
         PlayerClientProfile {
             client_id: "28", client_name: "ANDROID_VR", client_version: "1.65.10",
-            user_agent: STREAM_ANDROID_VR_USER_AGENT, platform: "MOBILE", hl: "en", gl: "US",
+            user_agent: STREAM_ANDROID_VR_USER_AGENT, platform: "MOBILE",
             host: PlayerHost::Www, android_sdk_version: Some(32), os_name: Some("Android"),
             os_version: Some("12L"), device_make: Some("Oculus"), device_model: Some("Quest 3"),
             player_params: None, requires_visitor_data: true, supports_authenticated_context: false,
@@ -193,7 +188,7 @@ fn playback_client_profiles() -> &'static [PlayerClientProfile] {
         },
         PlayerClientProfile {
             client_id: "67", client_name: "WEB_REMIX", client_version: "1.20260403.09.00",
-            user_agent: STREAM_WEB_USER_AGENT, platform: "DESKTOP", hl: "en", gl: "US",
+            user_agent: STREAM_WEB_USER_AGENT, platform: "DESKTOP",
             host: PlayerHost::Music, android_sdk_version: None, os_name: Some("Windows"),
             os_version: Some("10.0"), device_make: None, device_model: None,
             player_params: None, requires_visitor_data: false, supports_authenticated_context: true,
@@ -202,14 +197,14 @@ fn playback_client_profiles() -> &'static [PlayerClientProfile] {
         PlayerClientProfile {
             client_id: "7", client_name: "TVHTML5", client_version: "7.20260114.12.00",
             user_agent: "Mozilla/5.0 (ChromiumStylePlatform) Cobalt/25.lts.30.1034943-gold (unlike Gecko), Unknown_TV_Unknown_0/Unknown (Unknown, Unknown)",
-            platform: "TV", hl: "en", gl: "US", host: PlayerHost::Www, android_sdk_version: None,
+            platform: "TV", host: PlayerHost::Www, android_sdk_version: None,
             os_name: None, os_version: None, device_make: None, device_model: None,
             player_params: None, requires_visitor_data: false, supports_authenticated_context: true,
             requires_po_token: true,
         },
         PlayerClientProfile {
             client_id: "62", client_name: "WEB_CREATOR", client_version: "1.20260114.05.00",
-            user_agent: STREAM_WEB_USER_AGENT, platform: "DESKTOP", hl: "en", gl: "US",
+            user_agent: STREAM_WEB_USER_AGENT, platform: "DESKTOP",
             host: PlayerHost::Www, android_sdk_version: None, os_name: Some("Windows"),
             os_version: Some("10.0"), device_make: None, device_model: None,
             player_params: None, requires_visitor_data: false, supports_authenticated_context: true,
@@ -218,7 +213,7 @@ fn playback_client_profiles() -> &'static [PlayerClientProfile] {
         PlayerClientProfile {
             client_id: "7", client_name: "TVHTML5", client_version: "5.20260114",
             user_agent: "Mozilla/5.0 (ChromiumStylePlatform) Cobalt/Version",
-            platform: "TV", hl: "en", gl: "US", host: PlayerHost::Www, android_sdk_version: None,
+            platform: "TV", host: PlayerHost::Www, android_sdk_version: None,
             os_name: None, os_version: None, device_make: None, device_model: None,
             player_params: None, requires_visitor_data: false, supports_authenticated_context: true,
             requires_po_token: true,
@@ -1046,41 +1041,6 @@ pub async fn warm_playback(auth: Option<YouTubeAuth>, bypass_proxy: bool) {
         anonymous.is_ok(),
         started.elapsed().as_millis(),
     );
-}
-
-pub async fn resolve_audio_streams(
-    video_id: &str,
-    auth: Option<&YouTubeAuth>,
-) -> AppResult<Vec<YtAudioStream>> {
-    resolve_audio_streams_with_app(video_id, auth, None, false).await
-}
-
-pub async fn resolve_audio_streams_with_app(
-    video_id: &str,
-    auth: Option<&YouTubeAuth>,
-    app: Option<&tauri::AppHandle>,
-    force_refresh: bool,
-) -> AppResult<Vec<YtAudioStream>> {
-    resolve_audio_streams_with_strategy(video_id, auth, app, force_refresh, false).await
-}
-
-
-pub async fn resolve_audio_streams_with_strategy(
-    video_id: &str,
-    auth: Option<&YouTubeAuth>,
-    app: Option<&tauri::AppHandle>,
-    force_refresh: bool,
-    avoid_direct: bool,
-) -> AppResult<Vec<YtAudioStream>> {
-    resolve_audio_streams_with_source(
-        video_id,
-        auth,
-        app,
-        force_refresh,
-        avoid_direct,
-        "automatic",
-    )
-    .await
 }
 
 pub async fn resolve_audio_streams_with_source(

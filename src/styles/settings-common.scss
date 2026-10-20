@@ -1,0 +1,172 @@
+// 设置页共用样式：卡片、分组标题、胶囊选择器、滑块、可复制字段。
+// Shared settings styles: cards, section labels, chips, sliders and copyable fields.
+//
+// 由 SettingsView 与各个 Settings*Section 组件共同 @use，避免每个组件复制一份。
+// Imported with `@use` by SettingsView and every Settings*Section component so the
+// rules live in one place.
+
+.section-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  color: var(--md-primary);
+  margin: 24px 0 10px;
+  padding: 0 4px;
+
+  &:first-of-type { margin-top: 0; }
+}
+
+.section-label.clickable {
+  cursor: pointer;
+  user-select: none;
+
+  &:hover { opacity: 0.8; }
+}
+
+.section-arrow {
+  margin-left: auto;
+  font-size: 18px !important;
+  transition: transform var(--duration-medium) var(--ease-standard);
+  opacity: 0.5;
+
+  &.expanded { transform: rotate(180deg); }
+}
+
+.setting-card {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 14px 16px;
+  border-radius: var(--radius-lg);
+  background: var(--md-surface-container);
+  margin-bottom: 8px;
+  transition: background var(--duration-short);
+
+  &:hover { background: var(--md-surface-container-high); }
+}
+
+/* 子级设置卡片 / Nested card */
+.sub-card {
+  margin-left: 54px;
+  background: var(--md-surface-container-low) !important;
+}
+
+.setting-icon-wrap {
+  width: 40px;
+  height: 40px;
+  border-radius: var(--radius-md);
+  background: var(--md-surface-container-high);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  color: var(--md-on-surface-variant);
+
+  &.accent {
+    background: var(--md-primary-container);
+    color: var(--md-on-primary-container);
+  }
+}
+
+.setting-info { flex: 1; min-width: 0; }
+.setting-title { font-size: 14px; font-weight: 500; }
+.setting-desc { font-size: 12px; color: var(--md-on-surface-variant); margin-top: 2px; }
+
+.chip-row, .chip-wrap {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.chip-row { flex-shrink: 0; }
+.chip-wrap { margin-top: 8px; }
+
+.m3-chip {
+  padding: 6px 14px;
+  border-radius: var(--radius-full);
+  font-size: 13px;
+  font-weight: 500;
+  font-family: inherit;
+  background: var(--md-surface-container-highest);
+  color: var(--md-on-surface-variant);
+  border: 1px solid var(--md-outline-variant);
+  cursor: pointer;
+  transition: all var(--duration-short) var(--ease-standard);
+  white-space: nowrap;
+
+  &:hover { background: var(--md-surface-variant); }
+
+  &.active {
+    background: var(--md-primary);
+    color: var(--md-on-primary);
+    border-color: var(--md-primary);
+  }
+
+  &.sm {
+    padding: 4px 10px;
+    font-size: 12px;
+  }
+
+  /* 危险语义变体：error 色 outlined，用于重置身份等破坏性操作 */
+  &.danger {
+    color: var(--md-error);
+    border-color: color-mix(in srgb, var(--md-error) 40%, transparent);
+
+    &:hover { background: color-mix(in srgb, var(--md-error) 10%, transparent); }
+  }
+}
+
+/* M3 Slider */
+.m3-slider {
+  appearance: none;
+  width: 120px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--md-surface-container-highest);
+  outline: none;
+  cursor: pointer;
+  flex-shrink: 0;
+
+  &::-webkit-slider-thumb {
+    appearance: none;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: var(--md-primary);
+    cursor: pointer;
+    transition: transform var(--duration-short);
+  }
+
+  &::-webkit-slider-thumb:hover { transform: scale(1.2); }
+}
+
+.copyable-setting-card {
+  cursor: pointer;
+  user-select: none;
+
+  &:hover .copy-hint-icon {
+    opacity: 0.7;
+  }
+}
+
+.mono-build-value {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  letter-spacing: 0.02em;
+  font-variant-numeric: tabular-nums slashed-zero;
+  word-break: break-all;
+}
+
+.copy-hint-icon {
+  font-size: 14px;
+  opacity: 0.35;
+  flex-shrink: 0;
+  transition: opacity var(--duration-short);
+}
+
+@keyframes spin { to { transform: rotate(360deg); } }
+.spin { animation: spin 1s linear infinite; }

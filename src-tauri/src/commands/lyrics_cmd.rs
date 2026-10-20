@@ -75,15 +75,6 @@ pub async fn match_lyrics(request: MatchRequest, on_results: Channel<Vec<RankedM
     Ok(results)
 }
 
-#[tauri::command]
-pub async fn load_lyrics_file(path: String) -> AppResult<Vec<LyricLine>> {
-    let content = tokio::fs::read_to_string(&path)
-        .await
-        .map_err(|e| crate::error::AppError::Other(format!("Read lyrics: {}", e)))?;
-    // 本地歌词文件可能是 LRC 或 YRC, 统一自动解析
-    Ok(parser::parse_auto(&content))
-}
-
 /// 多源歌词获取
 // Tauri 命令签名由 IPC 契约决定：参数必须平铺，改成结构体会同时改掉前端调用点
 #[allow(clippy::too_many_arguments)]

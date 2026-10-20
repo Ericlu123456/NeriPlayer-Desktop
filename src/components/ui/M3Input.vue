@@ -2,11 +2,11 @@
 import { ref } from 'vue'
 
 const model = defineModel<string>({ default: '' })
-const props = withDefaults(defineProps<{
+defineProps<{
   label?: string
   placeholder?: string
   maxlength?: number
-}>(), {})
+}>()
 
 const isFocused = ref(false)
 const inputRef = ref<HTMLInputElement>()

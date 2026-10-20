@@ -670,9 +670,13 @@ fn solve_graphic_correction(residual: &[f64; GRAPHIC_BAND_COUNT]) -> [f64; GRAPH
             if row == pivot {
                 continue;
             }
-            let factor = matrix[row][pivot] / matrix[pivot][pivot];
-            for column in pivot..=N {
-                matrix[row][column] -= factor * matrix[pivot][column];
+            let pivot_row = matrix[pivot];
+            let factor = matrix[row][pivot] / pivot_row[pivot];
+            for (cell, pivot_cell) in matrix[row][pivot..=N]
+                .iter_mut()
+                .zip(&pivot_row[pivot..=N])
+            {
+                *cell -= factor * pivot_cell;
             }
         }
     }

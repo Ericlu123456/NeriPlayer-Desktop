@@ -25,11 +25,6 @@ const SYNC_FILENAME: &str = "neriplayer-sync.json";
 /// 用固定前缀 + 判别函数让 manager 能把 412 与其他失败区分开做重试。
 const PRECONDITION_CONFLICT_PREFIX: &str = "WebDAV precondition failed (412)";
 
-/// 判断错误是否为 If-Match 未命中导致的 412 并发冲突
-pub fn is_precondition_conflict(error: &crate::error::AppError) -> bool {
-    matches!(error, AppError::Api(message) if message.starts_with(PRECONDITION_CONFLICT_PREFIX))
-}
-
 impl WebDavApiClient {
     pub fn new(http: &Client, server_url: &str, username: &str, password: &str, base_path: &str) -> Self {
         Self {

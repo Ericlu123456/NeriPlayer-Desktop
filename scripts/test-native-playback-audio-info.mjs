@@ -115,7 +115,9 @@ async function runtime(options = {}) {
     neteaseAutoSourceSwitch: false, neteaseLocalSourceFallback: !!options.localFallback,
     rememberLongFormProgress: options.rememberLongForm !== false,
   })
+  const sleepTimer = await load(await readFile(new URL('composables/useSleepTimer.ts', root), 'utf8'), { vue })
   const loaded = await load(source, {
+    '@/composables/useSleepTimer': sleepTimer,
     '@/modules/audioEffects/model': audioEffectsModel,
     '@/modules/audioEffects/listening': listeningTuning,
     vue, pinia, '@tauri-apps/api/core': core,

@@ -1,4 +1,11 @@
 <script setup lang="ts">
+// 主窗口收进托盘时后端会加 window-hidden；直接读 DOM 类，避免组件依赖额外模块。
+// The backend adds window-hidden when the main window is tucked into the tray; read
+// the class directly so components do not need another module dependency.
+function runtimeHidden(): boolean {
+  return typeof document !== 'undefined' && document.documentElement?.classList.contains('window-hidden') === true
+}
+
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { DomLyricPlayer, type LyricLineMouseEvent } from '@amll-core/lyric-player/dom/index.ts'
 import type {
@@ -469,7 +476,7 @@ function wakeFrameLoop(): void {
 }
 
 function syncForeground(): void {
-  if (document.hidden || !lyricPlayer) return
+  if (document.hidden || runtimeHidden() || !lyricPlayer) return
   // 等播放时钟的恢复帧先校准位置，再重置当前行的逐字动画
   needsForegroundSync = true
   stopFrameLoop()
@@ -477,12 +484,12 @@ function syncForeground(): void {
 }
 
 function onVisibilityChange(): void {
-  if (document.hidden) stopFrameLoop()
+  if (document.hidden || runtimeHidden()) stopFrameLoop()
   else syncForeground()
 }
 
 function startFrameLoop(): void {
-  if (rafId || document.hidden || props.suspended) return
+  if (rafId || document.hidden || runtimeHidden() || props.suspended) return
   lastFrameAt = performance.now()
   // Runs on the shared frame loop: the same rAF as the background shader and the waveform,
   // which is where low performance mode caps the frame rate
@@ -688,6 +695,7 @@ onMounted(() => {
       wakeTarget.addEventListener(type, wakeFrameLoop, { passive: true })
     }
     document.addEventListener('visibilitychange', onVisibilityChange)
+    window.addEventListener('neri-runtime-visibility', onVisibilityChange)
     document.fonts?.addEventListener?.('loadingdone', onFontsLoaded)
     window.addEventListener('focus', syncForeground)
 
@@ -698,6 +706,7 @@ onMounted(() => {
 
 onUnmounted(() => {
   document.removeEventListener('visibilitychange', onVisibilityChange)
+  window.removeEventListener('neri-runtime-visibility', onVisibilityChange)
   document.fonts?.removeEventListener?.('loadingdone', onFontsLoaded)
   window.removeEventListener('focus', syncForeground)
   stopFrameLoop()

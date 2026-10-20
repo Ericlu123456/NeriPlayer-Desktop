@@ -255,16 +255,6 @@ export function normalizeBitrateKbps(value?: number | null): number | undefined 
   return Math.round(value > 10_000 ? value / 1000 : value)
 }
 
-export function playbackCacheKey(
-  track: TrackInfo,
-  parts: Array<string | number | null | undefined>,
-): string {
-  const normalizedParts = parts
-    .map(part => String(part ?? '').trim().toLowerCase())
-    .filter(Boolean)
-  return ['v1', track.id, ...normalizedParts].join('|')
-}
-
 export function playbackQualityCachePrefix(
   track: TrackInfo,
   settings: PlaybackSourceSettings,

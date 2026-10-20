@@ -19,12 +19,6 @@ export interface PlatformAuth {
   avatarUrl: string | null
 }
 
-export interface AuthStatusResponse {
-  netease: PlatformAuth & { platform: string }
-  bilibili: PlatformAuth & { platform: string }
-  youtube: PlatformAuth & { platform: string }
-}
-
 const emptyAuth = (): PlatformAuth => ({ loggedIn: false, nickname: null, avatarUrl: null })
 
 function sameAuth(a: PlatformAuth, b: PlatformAuth): boolean {

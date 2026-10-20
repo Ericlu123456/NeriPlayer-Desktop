@@ -542,15 +542,6 @@ export function resolveStoredLyricText(payload: Record<string, unknown> | undefi
   return null
 }
 
-export function resolveStoredTranslatedLyricText(
-  payload: Record<string, unknown> | undefined | null,
-): string | null {
-  const state = resolveStoredTranslatedLyricStateFromPayload(payload)
-  if (state.kind === 'present') return state.text
-  if (state.kind === 'cleared') return ''
-  return null
-}
-
 /**
  * 更新 sync_payload 歌词字段
  * 首次覆盖时保留 original*

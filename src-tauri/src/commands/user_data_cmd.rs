@@ -151,11 +151,6 @@ pub async fn replace_lyric_offsets(offsets: BTreeMap<String, i64>) -> AppResult<
 }
 
 #[tauri::command]
-pub async fn get_bili_video_skip_rules() -> AppResult<Vec<bili_video_skip::BiliVideoSkipRule>> {
-    blocking(|database| database.read(bili_video_skip::load_from)).await
-}
-
-#[tauri::command]
 pub async fn get_bili_video_skip_targets(
     bvid: String,
     state: State<'_, AppState>,

@@ -1,3 +1,18 @@
+//! 桌面进程入口 / Desktop process entry point.
+//!
+//! 顺序很重要 / Order matters:
+//! 1. panic hook 必须最先安装，之后任何线程崩溃都能落盘现场。
+//!    Install the panic hook first so any later thread panic is captured.
+//! 2. 单实例插件必须早于其它插件，避免两个进程同时写同一份同步状态。
+//!    Register single-instance before anything else that can write shared state.
+//! 3. 日志插件在其余插件之前初始化，启动阶段的错误才不会丢。
+//!    Logging is initialized before the remaining plugins so startup errors survive.
+//!
+//! 窗口标签 `main` / `desktop-lyrics` / `tray-popup` 由 `window_command_allowed`
+//! 限定可调用的命令；新增窗口时要同步更新白名单与测试。
+//! The `main` / `desktop-lyrics` / `tray-popup` labels are restricted by
+//! `window_command_allowed`; update the allowlist and its tests when adding a window.
+
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use neri_player_desktop::audio::analyzer::SharedAudioLevel;
@@ -59,11 +74,17 @@ fn main() {
     std::env::set_var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
         "--enable-gpu --enable-gpu-rasterization --enable-zero-copy --enable-features=CanvasOopRasterization");
 
-    // 默认让 WebKitGTK 走 DMABUF 硬件合成。关掉它会让合成退化为共享内存回读，
-    // 代价随像素面积增长：同一 WebGL 负载 2560×1440 实测 56fps vs 12fps。
-    // NVIDIA 私有驱动、虚拟机等环境若出现白屏/黑屏或 WebGL 背景失效，可用
-    // WEBKIT_DISABLE_DMABUF_RENDERER=1 规避（见 README「已知限制与排查」）。
-    // 这里不再替用户设置，显式给出的环境变量原样生效
+    // Linux NVIDIA 私有驱动：在 GTK/WebKit 初始化前应用兼容设置，消除页面切换闪烁。
+    // 默认只限制在途帧数并关闭 explicit sync，不关闭 DMA-BUF/硬件加速；确需退回
+    // 共享内存合成时用 NERI_WEBKIT_DISABLE_DMABUF=1，完全跳过用
+    // NERI_DISABLE_NVIDIA_QUIRK=1。显式设置的环境变量始终优先。
+    // Linux + NVIDIA proprietary: apply compatibility settings before GTK/WebKit init to
+    // stop page-switch flicker. By default this only caps in-flight frames and disables
+    // explicit sync; DMA-BUF/hardware acceleration stays on. Use
+    // NERI_WEBKIT_DISABLE_DMABUF=1 for the shared-memory fallback, or
+    // NERI_DISABLE_NVIDIA_QUIRK=1 to skip the layer. Explicit env vars always win.
+    #[cfg(target_os = "linux")]
+    neri_player_desktop::linux_graphics::apply_nvidia_webkit_workarounds();
 
     // 在其余插件之前初始化统一日志：启动期直接读取持久化设置决定
     // 是否写文件与日志级别（此时尚无 app handle）
@@ -90,6 +111,17 @@ fn main() {
             let handle = app.handle().clone();
             // 日志插件初始化时把 max_level 放到了 Trace，这里收回到设置的级别
             neri_player_desktop::logging::set_runtime_level(log_cfg.level);
+
+            #[cfg(target_os = "linux")]
+            if let Some(quirk) = neri_player_desktop::linux_graphics::apply_nvidia_webkit_workarounds() {
+                log::info!(
+                    target: "linux-graphics",
+                    "NVIDIA WebKitGTK workaround active: explicit_sync_disabled={}, frames_allowed={:?}, vsync_disabled={}, dmabuf_atlas_disabled={}, dmabuf_shm_forced={}, dmabuf_disabled={}, software_compositing={}",
+                    quirk.explicit_sync_disabled, quirk.frames_allowed, quirk.vsync_disabled,
+                    quirk.dmabuf_atlas_disabled, quirk.dmabuf_shm_forced, quirk.dmabuf_disabled,
+                    quirk.software_compositing,
+                );
+            }
 
             // 安装包把 FFmpeg 放在资源目录的 ffmpeg/ 下，各平台、各包格式的位置由 Tauri 给出
             match app.path().resource_dir() {
@@ -434,16 +466,13 @@ fn main() {
             player_cmd::trace_playback_ui,
             player_cmd::begin_playback_request,
             player_cmd::play_file,
-            player_cmd::play_cached_audio,
             player_cmd::play_cached_audio_candidates,
             player_cmd::has_cached_audio,
-            player_cmd::play_url,
             player_cmd::play_url_fast,
             player_cmd::play_url_streaming,
             player_cmd::prewarm_remote_audio,
             player_cmd::pause,
             player_cmd::resume,
-            player_cmd::toggle_play_pause,
             player_cmd::set_volume,
             player_cmd::list_audio_output_devices,
             player_cmd::set_audio_output_device,
@@ -461,20 +490,12 @@ fn main() {
             player_cmd::reset_audio_effects,
             player_cmd::pause_with_fade,
             player_cmd::resume_with_fade,
-            player_cmd::crossfade_url,
             player_cmd::crossfade_url_fast,
             player_cmd::crossfade_url_streaming,
             player_cmd::crossfade_file,
             player_cmd::get_player_state,
             player_cmd::update_media_metadata,
-            player_cmd::next_track,
-            player_cmd::prev_track,
-            player_cmd::set_queue,
-            player_cmd::toggle_shuffle,
             player_cmd::cycle_repeat,
-            library_cmd::scan_music_directory,
-            local_files_cmd::scan_local_files,
-            local_files_cmd::cancel_local_scan,
             local_files_cmd::get_local_playlist_tracks,
             local_files_cmd::local_library_snapshot,
             local_files_cmd::local_library_add_folder,
@@ -525,7 +546,6 @@ fn main() {
             comment_cmd::set_comment_liked,
             image_cmd::fetch_bilibili_cover,
             lyrics_cmd::parse_lrc_content,
-            lyrics_cmd::load_lyrics_file,
             lyrics_cmd::fetch_lyrics,
             lyrics_cmd::fetch_word_timed_lyrics,
             lyrics_cmd::fetch_netease_romanized_lyric,
@@ -543,10 +563,10 @@ fn main() {
             settings_cmd::save_file_bytes,
             settings_cmd::set_bypass_proxy,
             settings_cmd::get_build_info,
+            settings_cmd::get_linux_graphics_compat,
             settings_cmd::get_system_accent_color,
             settings_cmd::probe_platform_connectivity,
             debug_cmd::get_recent_logs,
-            debug_cmd::audio_engine_stats,
             debug_cmd::export_debug_report,
             debug_cmd::reveal_in_file_manager,
             debug_cmd::list_crash_reports,
@@ -606,7 +626,6 @@ fn main() {
             sync_cmd::sync_webdav,
             sync_cmd::disconnect_webdav_sync,
             download_cmd::download_track,
-            download_cmd::list_downloads,
             download_cmd::validate_downloads,
             download_cmd::delete_download,
             download_cmd::cancel_download,
@@ -624,12 +643,9 @@ fn main() {
             listen_together_cmd::lt_send_control,
             listen_together_cmd::lt_send_ping,
             stats_cmd::record_playback_session,
-            stats_cmd::record_playback_sessions,
-            stats_cmd::get_playback_stats,
             stats_cmd::get_playback_stats_overview,
             stats_cmd::clear_playback_stats,
             stats_cmd::remove_playback_stats,
-            stats_cmd::playback_stats_identity_key,
             stats_cmd::get_playback_stat_tracks,
             user_data_cmd::load_user_data_snapshot,
             user_data_cmd::import_legacy_user_data,
@@ -640,7 +656,6 @@ fn main() {
             user_data_cmd::replace_play_history,
             user_data_cmd::set_lyric_offset,
             user_data_cmd::replace_lyric_offsets,
-            user_data_cmd::get_bili_video_skip_rules,
             user_data_cmd::get_bili_video_skip_targets,
             user_data_cmd::set_bili_video_skip_rule,
             cache_cmd::cache_get,

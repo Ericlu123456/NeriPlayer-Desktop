@@ -29,7 +29,6 @@ import {
   isValidLtNickname,
   LtChannels,
   normalizeLtHttpBaseUrl,
-  normalizeLtInviteBaseUrl,
   normalizeLtJoinSecret,
   normalizeLtRoomId,
   parseLtInvite,
@@ -309,7 +308,6 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
 
   /** 加入房间 */
   async function joinRoom(targetRoomId: string, joinSecret?: string, baseUrlOverride?: string) {
-    const player = usePlayerStore()
     const toast = useToastStore()
     const t = (i18n.global as any).t
     const generation = _sessionGeneration

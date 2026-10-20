@@ -1,4 +1,11 @@
 <script setup lang="ts">
+// 应用外壳：布局、迷你播放器/播放页切换、全局快捷键、托盘与同步生命周期。
+// App shell: layout, mini-player/now-playing switch, global shortcuts, tray and sync.
+//
+// 播放相关状态不要放在这里；这里只做窗口级编排与跨 store 的副作用安装。
+// Keep playback state out of this file; it only does window-level orchestration and
+// installs cross-store side effects.
+
 import {
   ref, computed, nextTick, onErrorCaptured, onMounted, onUnmounted, watch,
   type ComponentInternalInstance, type ComponentPublicInstance,
@@ -22,6 +29,7 @@ import { HISTORY_CHANGED_EVENT } from '@/stores/history'
 import { useLikedSongsStore } from '@/stores/likedSongs'
 import { useDownloadStore } from '@/stores/download'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
+import { setRuntimeHidden } from '@/modules/runtimeVisibility'
 import { invoke } from '@tauri-apps/api/core'
 import { convertFileSrc } from '@tauri-apps/api/core'
 import { getCurrentWindow } from '@tauri-apps/api/window'
@@ -42,8 +50,6 @@ import { hasVisiblePlaybackSession } from '@/modules/playback/playbackRequest'
 import { useUpcomingLyricsPrefetch } from '@/composables/useUpcomingLyricsPrefetch'
 
 type CoverSnapshot = {
-  rect: { left: number; top: number; width: number; height: number }
-  borderRadius: string
   src: string
 }
 
@@ -79,14 +85,13 @@ let uninstallShortcuts: (() => void) | null = null
 let stopSystemShortcuts: (() => void) | null = null
 let uninstallDesktopLyrics: (() => void) | null = null
 const contentRef = ref<HTMLElement | null>(null)
-const miniPlayerRef = ref<InstanceType<typeof MiniPlayer> | null>(null)
 const nowPlayingRef = ref<InstanceType<typeof NowPlaying> | null>(null)
 const playerTransitionPulse = ref(0)
-const flipOverlay = ref<CoverSnapshot | null>(null)
-const flipOverlayStyle = ref<Record<string, string> | null>(null)
-const flipTransitionMode = ref<'opening' | 'closing' | null>(null)
-const isFlipAnimating = ref(false)
 const nowPlayingMotionState = ref<'opening' | 'closing' | null>(null)
+// NVIDIA + WebKitGTK：整页滑入/滑出会重绘巨大图层并闪烁，改为瞬时切换
+// NVIDIA + WebKitGTK: sliding the full-screen layer repaints a huge area and
+// flickers, so switch instantly instead.
+const nvidiaCompat = ref(false)
 const lastCoverSnapshot = ref<{ trackId: string; src: string } | null>(null)
 
 const hasMiniPlayer = computed(() => hasVisiblePlaybackSession(
@@ -94,34 +99,12 @@ const hasMiniPlayer = computed(() => hasVisiblePlaybackSession(
   player.currentTrack?.id,
 ))
 const transitionTrackKey = computed(() => player.currentTrack?.id || 'empty')
-const hideMiniCoverForFlip = computed(() => isFlipAnimating.value)
 const isNowPlayingMotionActive = computed(() => nowPlayingMotionState.value !== null)
 const skipMiniEnter = ref(false)
 const miniTransitionName = computed(() => skipMiniEnter.value ? 'mini-none' : 'mini-enter')
-let flipAnimationFrame = 0
-let flipCleanupTimer: ReturnType<typeof setTimeout> | null = null
 let nowPlayingMotionTimer: ReturnType<typeof setTimeout> | null = null
 
-function cancelFlipAnimation() {
-  if (flipAnimationFrame) {
-    cancelAnimationFrame(flipAnimationFrame)
-    flipAnimationFrame = 0
-  }
-  if (flipCleanupTimer) {
-    clearTimeout(flipCleanupTimer)
-    flipCleanupTimer = null
-  }
-}
-
-function resetFlipState() {
-  cancelFlipAnimation()
-  isFlipAnimating.value = false
-  flipTransitionMode.value = null
-  flipOverlay.value = null
-  flipOverlayStyle.value = null
-}
-
-function scheduleNowPlayingMotionCleanup(delay = 520) {
+function scheduleNowPlayingMotionCleanup(delay = nvidiaCompat.value ? 0 : 520) {
   if (nowPlayingMotionTimer) {
     clearTimeout(nowPlayingMotionTimer)
   }
@@ -131,46 +114,9 @@ function scheduleNowPlayingMotionCleanup(delay = 520) {
   }, delay)
 }
 
-function setFlipStyle(snapshot: CoverSnapshot) {
-  flipOverlayStyle.value = {
-    left: `${snapshot.rect.left}px`,
-    top: `${snapshot.rect.top}px`,
-    width: `${snapshot.rect.width}px`,
-    height: `${snapshot.rect.height}px`,
-    borderRadius: snapshot.borderRadius,
-  }
-}
-
-function runFlipTransition(from: CoverSnapshot, to: CoverSnapshot, mode: 'opening' | 'closing') {
-  cancelFlipAnimation()
-  flipTransitionMode.value = mode
-  flipOverlay.value = from
-  setFlipStyle(from)
-  isFlipAnimating.value = true
-
-  flipAnimationFrame = requestAnimationFrame(() => {
-    flipAnimationFrame = requestAnimationFrame(() => {
-      flipOverlay.value = { ...to, src: from.src || to.src }
-      flipOverlayStyle.value = {
-        left: `${to.rect.left}px`,
-        top: `${to.rect.top}px`,
-        width: `${to.rect.width}px`,
-        height: `${to.rect.height}px`,
-        borderRadius: to.borderRadius,
-      }
-    })
-  })
-
-  flipCleanupTimer = window.setTimeout(() => {
-    flipCleanupTimer = null
-    resetFlipState()
-  }, mode === 'opening' ? 420 : 520)
-}
-
 async function openNowPlaying() {
   if (!hasMiniPlayer.value) return
   // 动画进行中允许打断，避免连点卡住
-  resetFlipState()
   nowPlayingMotionState.value = 'opening'
   scheduleNowPlayingMotionCleanup(520)
   playerTransitionPulse.value = Date.now()
@@ -209,7 +155,6 @@ async function closeNowPlaying() {
       src: from.src,
     }
   }
-  resetFlipState()
   nowPlayingMotionState.value = 'closing'
   scheduleNowPlayingMotionCleanup(520)
   skipMiniEnter.value = true
@@ -265,6 +210,7 @@ let periodicSyncTimer: ReturnType<typeof setInterval> | null = null
 let unlistenPlaylistChanged: UnlistenFn | null = null
 let unlistenPlaylistUsage: UnlistenFn | null = null
 let unlistenCloseRequested: UnlistenFn | null = null
+let unlistenMainVisible: UnlistenFn | null = null
 let uninstallTray: (() => void) | null = null
 
 function handleBeforeUnload() {
@@ -438,6 +384,21 @@ watch(
 
 // 启动时初始化：加载同步配置 + 检查登录状态 + 自动同步
 onMounted(async () => {
+  // NVIDIA + WebKitGTK 下整页 opacity/transform 过渡会触发大面积重绘并闪烁；
+  // 后端确认是 NVIDIA 后加类，让 CSS 把路由切换降为瞬时切换（不动画整页）。
+  // Full-page opacity/transform transitions repaint a large area and flicker on
+  // WebKitGTK + NVIDIA; after the backend confirms NVIDIA, add a class that makes
+  // route switches instant instead of animating the whole page.
+  if (detectPlatform() === 'linux') {
+    void invoke<{ nvidia: boolean }>('get_linux_graphics_compat')
+      .then((compat) => {
+        if (compat.nvidia) {
+          nvidiaCompat.value = true
+          document.documentElement.classList.add('nvidia-compat')
+        }
+      })
+      .catch(() => { /* 旧后端或非 Linux：保持默认过渡 */ })
+  }
   uninstallDesktopLyrics = installDesktopLyricsBridge({
     openSettings: () => {
       if (isNowPlayingOpen.value) closeNowPlaying()
@@ -458,6 +419,9 @@ onMounted(async () => {
   } catch {
     // 浏览器开发模式没有原生窗口事件时依赖 pagehide/beforeunload
   }
+  unlistenMainVisible = await listen<boolean>('main-window-visible', (event) => {
+    setRuntimeHidden(!event.payload)
+  })
 
   // Rust 配置是启动后的规范来源，本地影子只负责首屏快速显示
   // 播放统计要在任何播放发生之前接上，否则首曲不计数
@@ -601,7 +565,6 @@ onUnmounted(() => {
   window.removeEventListener('beforeunload', handleBeforeUnload)
   window.removeEventListener('pagehide', handleBeforeUnload)
   window.removeEventListener('focus', handleWindowFocus)
-  resetFlipState()
   if (nowPlayingMotionTimer) clearTimeout(nowPlayingMotionTimer)
   if (debounceSyncTimer) clearTimeout(debounceSyncTimer)
   if (historyBatchedTimer) clearTimeout(historyBatchedTimer)
@@ -612,6 +575,7 @@ onUnmounted(() => {
   if (unlistenPlaylistChanged) unlistenPlaylistChanged()
   if (unlistenPlaylistUsage) unlistenPlaylistUsage()
   if (unlistenCloseRequested) unlistenCloseRequested()
+  if (unlistenMainVisible) unlistenMainVisible()
   uninstallTray?.()
   uninstallTray = null
 })
@@ -651,8 +615,6 @@ onUnmounted(() => {
     <transition :name="miniTransitionName">
       <MiniPlayer
         v-if="hasMiniPlayer && !isNowPlayingOpen"
-        ref="miniPlayerRef"
-        :cover-hidden-by-flip="hideMiniCoverForFlip"
         :cover-fallback-src="miniCoverFallbackSrc"
         :key="`mini:${transitionTrackKey}:${playerTransitionPulse}`"
         @expand="openNowPlaying()"
@@ -682,20 +644,6 @@ onUnmounted(() => {
       @collapse="closeNowPlaying()"
       @toggle-more="nowPlayingRef?.toggleMore?.()"
     />
-
-    <Transition name="flip-cover-fade">
-      <div
-        v-if="flipOverlay && flipOverlayStyle"
-        class="flip-cover-overlay"
-        :class="{
-          'flip-cover-overlay--opening': flipTransitionMode === 'opening',
-          'flip-cover-overlay--closing': flipTransitionMode === 'closing',
-        }"
-        :style="flipOverlayStyle"
-      >
-        <img :src="flipOverlay.src" class="flip-cover-img" referrerpolicy="no-referrer" />
-      </div>
-    </Transition>
 
     <AppToast />
   </div>
@@ -763,49 +711,6 @@ onUnmounted(() => {
 }
 .mini-enter-leave-to {
   transform: translateY(100%);
-  opacity: 0;
-}
-
-.flip-cover-overlay {
-  position: fixed;
-  z-index: 350;
-  overflow: hidden;
-  pointer-events: none;
-  box-shadow: 0 20px 56px rgba(0, 0, 0, 0.36);
-  transition:
-    left 520ms cubic-bezier(0.22, 1, 0.36, 1),
-    top 520ms cubic-bezier(0.22, 1, 0.36, 1),
-    width 520ms cubic-bezier(0.22, 1, 0.36, 1),
-    height 520ms cubic-bezier(0.22, 1, 0.36, 1),
-    border-radius 520ms cubic-bezier(0.22, 1, 0.36, 1),
-    opacity 180ms ease;
-}
-
-.flip-cover-overlay--opening {
-  box-shadow: none;
-  transition:
-    left 360ms cubic-bezier(0.22, 1, 0.36, 1),
-    top 360ms cubic-bezier(0.22, 1, 0.36, 1),
-    width 360ms cubic-bezier(0.22, 1, 0.36, 1),
-    height 360ms cubic-bezier(0.22, 1, 0.36, 1),
-    border-radius 360ms cubic-bezier(0.22, 1, 0.36, 1),
-    opacity 120ms ease;
-}
-
-.flip-cover-img {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-  display: block;
-}
-
-.flip-cover-fade-enter-active,
-.flip-cover-fade-leave-active {
-  transition: opacity 160ms ease;
-}
-
-.flip-cover-fade-enter-from,
-.flip-cover-fade-leave-to {
   opacity: 0;
 }
 </style>

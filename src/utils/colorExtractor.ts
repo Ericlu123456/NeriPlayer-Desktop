@@ -143,11 +143,6 @@ let isActive = false
 // 缓存最近一次种子色，供深浅色瞬时切换时同步重算令牌，避免被预设主题色覆盖
 let lastSeed: RGB | null = null
 
-/** 动态取色是否正在覆盖全局主题色 */
-export function isDynamicColorActive(): boolean {
-  return isActive
-}
-
 /**
  * 用缓存种子按新的深浅色重算并应用令牌。
  * 供主题切换的视觉路径同步调用，避免闪回预设色。

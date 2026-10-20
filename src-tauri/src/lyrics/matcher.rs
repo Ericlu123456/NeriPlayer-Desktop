@@ -6,7 +6,6 @@
 
 use super::external::{self, AmllEntry, ExternalLyricsClient, KugouSong};
 use super::parser::{self, LyricLine};
-use super::LyricSource;
 use crate::api::lrclib::{LrcLibClient, LrcLibResult};
 use crate::api::netease::client::{NeteaseClient, NeteaseLyrics, NeteaseSearchResult};
 use crate::api::qq::client::{QqMusicClient, QqSearchResult};
@@ -83,15 +82,6 @@ impl MatchSource {
         }
     }
 
-    pub fn lyric_source(self) -> LyricSource {
-        match self {
-            Self::Kugou => LyricSource::Kugou,
-            Self::Netease => LyricSource::Netease,
-            Self::Qq => LyricSource::Qq,
-            Self::AmllTtml => LyricSource::AmllTtml,
-            Self::Lrclib => LyricSource::Lrclib,
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
