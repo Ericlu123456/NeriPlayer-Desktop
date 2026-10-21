@@ -191,15 +191,6 @@ html.nvidia-compat .slide-up-leave-to {
 html.nvidia-compat .np-underlay-scrim {
   transition: none;
 }
-
-/* 主窗口收进托盘：暂停所有 CSS 动画，避免不可见窗口继续驱动合成。 */
-/* Main window hidden in the tray: pause every CSS animation so an invisible window
-   does not keep driving the compositor. */
-html.window-hidden *,
-html.window-hidden *::before,
-html.window-hidden *::after {
-  animation-play-state: paused !important;
-}
 .slide-up-leave-to { transform: translateY(100%); }
 .slide-up-enter-to,
 .slide-up-leave-from { transform: translateY(0); }

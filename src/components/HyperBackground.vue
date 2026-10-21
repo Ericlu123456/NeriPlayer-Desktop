@@ -1,11 +1,4 @@
 <script setup lang="ts">
-// 主窗口收进托盘时后端会加 window-hidden；直接读 DOM 类，避免组件依赖额外模块。
-// The backend adds window-hidden when the main window is tucked into the tray; read
-// the class directly so components do not need another module dependency.
-function runtimeHidden(): boolean {
-  return typeof document !== 'undefined' && document.documentElement?.classList.contains('window-hidden') === true
-}
-
 import { ref, onMounted, onUnmounted, watch } from 'vue'
 import { hyperBackgroundVertexShader, hyperBackgroundFragmentShader } from '@/shaders/hyperBackground'
 import { createLogger } from '@/utils/logger'
@@ -409,7 +402,7 @@ function render(nowMs = performance.now()) {
 
 /// 停表后由播放态、调色板、律动、尺寸变化重新拉起；窗口不可见时不拉
 function wake() {
-  if (!gl || !program || animFrame || document.hidden || runtimeHidden() || props.suspended) return
+  if (!gl || !program || animFrame || document.hidden || props.suspended) return
   // 重置帧时钟，避免 dt 巨大导致平滑量跳变
   lastFrameMs = performance.now()
   lastTickAt = 0
@@ -418,7 +411,7 @@ function wake() {
 
 // 窗口不可见时暂停 rAF（全屏 shader 是主要功耗项），可见时恢复
 function handleVisibilityChange() {
-  if (document.hidden || runtimeHidden()) {
+  if (document.hidden) {
     cancelFrame(animFrame)
     animFrame = 0
   } else {
@@ -447,7 +440,6 @@ watch(
 onMounted(() => {
   initGL()
   document.addEventListener('visibilitychange', handleVisibilityChange)
-  window.addEventListener('neri-runtime-visibility', handleVisibilityChange)
   canvas.value?.addEventListener('webglcontextlost', handleContextLost)
   canvas.value?.addEventListener('webglcontextrestored', handleContextRestored)
   if (canvas.value && typeof ResizeObserver !== 'undefined') {
@@ -458,7 +450,6 @@ onMounted(() => {
 
 onUnmounted(() => {
   document.removeEventListener('visibilitychange', handleVisibilityChange)
-  window.removeEventListener('neri-runtime-visibility', handleVisibilityChange)
   canvas.value?.removeEventListener('webglcontextlost', handleContextLost)
   canvas.value?.removeEventListener('webglcontextrestored', handleContextRestored)
   resizeObserver?.disconnect()

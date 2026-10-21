@@ -29,7 +29,6 @@ import { HISTORY_CHANGED_EVENT } from '@/stores/history'
 import { useLikedSongsStore } from '@/stores/likedSongs'
 import { useDownloadStore } from '@/stores/download'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
-import { setRuntimeHidden } from '@/modules/runtimeVisibility'
 import { invoke } from '@tauri-apps/api/core'
 import { convertFileSrc } from '@tauri-apps/api/core'
 import { getCurrentWindow } from '@tauri-apps/api/window'
@@ -210,7 +209,6 @@ let periodicSyncTimer: ReturnType<typeof setInterval> | null = null
 let unlistenPlaylistChanged: UnlistenFn | null = null
 let unlistenPlaylistUsage: UnlistenFn | null = null
 let unlistenCloseRequested: UnlistenFn | null = null
-let unlistenMainVisible: UnlistenFn | null = null
 let uninstallTray: (() => void) | null = null
 
 function handleBeforeUnload() {
@@ -419,9 +417,6 @@ onMounted(async () => {
   } catch {
     // 浏览器开发模式没有原生窗口事件时依赖 pagehide/beforeunload
   }
-  unlistenMainVisible = await listen<boolean>('main-window-visible', (event) => {
-    setRuntimeHidden(!event.payload)
-  })
 
   // Rust 配置是启动后的规范来源，本地影子只负责首屏快速显示
   // 播放统计要在任何播放发生之前接上，否则首曲不计数
@@ -575,7 +570,6 @@ onUnmounted(() => {
   if (unlistenPlaylistChanged) unlistenPlaylistChanged()
   if (unlistenPlaylistUsage) unlistenPlaylistUsage()
   if (unlistenCloseRequested) unlistenCloseRequested()
-  if (unlistenMainVisible) unlistenMainVisible()
   uninstallTray?.()
   uninstallTray = null
 })

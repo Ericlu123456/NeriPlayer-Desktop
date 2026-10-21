@@ -1184,14 +1184,6 @@ export const usePlayerStore = defineStore('player', () => {
     _interpLastTickTime = 0
 
     function tick() {
-      // 主窗口收进托盘时停表，避免不可见页面继续按 60fps 触发响应式更新/重绘；
-      // 恢复可见时由 neri-runtime-visibility 监听器重新启动。
-      // Stop while the main window is hidden so an invisible page does not keep
-      // updating reactive state at 60fps; the visibility listener restarts it.
-      if (typeof document !== 'undefined' && document.documentElement?.classList.contains('window-hidden')) {
-        _interpLoopStarted = false
-        return
-      }
       // 空闲（未播放且无 pendingSeek）时渲染一次最终位置后停表，避免常驻逐帧唤醒
       if (!_interpIsPlaying && !pendingSeek) {
         interpolatedPositionMs.value = Math.round(_interpRenderedMs)
@@ -3573,18 +3565,6 @@ export const usePlayerStore = defineStore('player', () => {
   loadPlayerState()
   void applyPersistedSettings()
   void loadDecoderCapabilities()
-
-  // 主窗口从托盘恢复时重启进度插值（隐藏时 tick 已自行停表）。
-  // Restart progress interpolation when the main window returns from the tray.
-  if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
-    window.addEventListener('neri-runtime-visibility', () => {
-      if (typeof document !== 'undefined'
-        && !document.documentElement?.classList.contains('window-hidden')
-        && _interpIsPlaying) {
-        _startInterpolationLoop()
-      }
-    })
-  }
 
   return {
     isPlaying, currentTrack, currentBiliVideoSkipTarget, positionMs, durationMs, queue, queueIndex,
