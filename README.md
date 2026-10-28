@@ -33,6 +33,10 @@
 > [!WARNING]
 > 本项目仅供学习与研究使用，请勿用于任何非法用途。本项目及维护者不接受任何形式的赞助、捐赠或商业资助。
 
+> [!CAUTION]
+> **光敏性癫痫提示（Linux + NVIDIA 显卡）**
+> 该组合下，播放页的动态背景（WebGL 着色器）在切换页面、开合播放页时可能出现**间歇性闪烁**，这是已知问题。若你或身边的人有光敏性癫痫，或对闪烁敏感，请先关掉它再使用：**设置 → 动效设置 → 动态背景**。关闭后播放页不再渲染 WebGL 着色器背景，也可以改用「封面模糊背景」。其他平台版本不受该问题影响。
+
 NeriPlayer Desktop 不提供公共云端曲库或媒体分发服务。在线能力取决于第三方平台的可用接口、账号、地区与内容权限；会员或受限内容仍遵循原平台规则。
 
 ## 🧭 文档导航
@@ -304,7 +308,7 @@ Android 的 USB 独占播放、SAF、悬浮/状态栏歌词等移动平台能力
 | 全局快捷键不响应 | 开启全局开关，查看注册失败提示并检查系统/其它程序占用 |
 | 旧客户端同步失败 | 更新全部客户端，升级远端前备份并阅读确认提示 |
 | 应用升级 | 当前不提供应用内自动更新，下载对应预览版手动安装 |
-| Linux 播放页卡顿、白屏或切换界面闪烁（WebKitGTK 渲染） | 默认启用 WebKitGTK 的 DMABUF 硬件合成；关掉后合成退化为共享内存回读，实测同一 WebGL 负载 2560×1440 下约 56fps 对 12fps。检测到 NVIDIA 私有驱动时会自动设置 `__NV_DISABLE_EXPLICIT_SYNC=1`、`__GL_MaxFramesAllowed=1` 、`WEBKIT_DISABLE_DMABUF_ATLAS=1` 和 `WEBKIT_DMABUF_RENDERER_FORCE_SHM=1`：前两项处理 explicit sync 与在途帧，atlas 项避免复用仍在呈现的 GPU 缓冲区，SHM 项让合成走共享内存以稳定切换动画（实测不闪且可接受）。想保留硬件合成可用 `NERI_WEBKIT_KEEP_DMABUF=1`，想调整在途帧上限可用 `NERI_NVIDIA_FRAMES_ALLOWED=N`（0 为不设置），想关垂直同步可用 `NERI_NVIDIA_NO_VSYNC=1`（可能撕裂），想保留 atlas 可用 `NERI_WEBKIT_KEEP_DMABUF_ATLAS=1`，完全跳过自动设置可设 `NERI_DISABLE_NVIDIA_QUIRK=1`。若仍闪烁，依次试 `NERI_WEBKIT_DMABUF_NO_GBM=1`或 `NERI_WEBKIT_FORCE_VBLANK_TIMER=1`；最后才用 `NERI_WEBKIT_SOFTWARE_COMPOSITING=1`。检测到 NVIDIA 时前端还会把路由切换、播放页开合与压暗遮罩降为瞬时切换，避免整页动画触发重绘闪烁；其他平台保留原动画。显式设置的环境变量始终优先 |
+| Linux 播放页卡顿、白屏或切换界面闪烁（WebKitGTK 渲染） | 默认启用 WebKitGTK 的 DMABUF 硬件合成；关掉后合成退化为共享内存回读，实测同一 WebGL 负载 2560×1440 下约 56fps 对 12fps。检测到 NVIDIA 私有驱动时会自动设置 `__NV_DISABLE_EXPLICIT_SYNC=1`、`__GL_MaxFramesAllowed=1`、`WEBKIT_DISABLE_DMABUF_ATLAS=1` 与 `WEBKIT_FORCE_VBLANK_TIMER=1`：前两项处理 explicit sync 与在途帧，后两项才是 WebGL 背景与切页转场闪烁的解，而且仍然走 DMA-BUF 硬件合成。**不再默认强制共享内存合成**：实测强制 SHM 会让每帧多一次 GPU→CPU 回读，在混合显卡机器上还会把 Web 进程挑到独显渲染、再回读给核显上屏（独显被唤醒、约 185MiB 显存、合成线程 CPU 8%→45%），因此改为显式开关 `NERI_WEBKIT_FORCE_SHM=1`。想调整在途帧上限可用 `NERI_NVIDIA_FRAMES_ALLOWED=N`（0 为不设置），想关垂直同步可用 `NERI_NVIDIA_NO_VSYNC=1`（可能撕裂），想保留 atlas 可用 `NERI_WEBKIT_KEEP_DMABUF_ATLAS=1`（注意这等于撤掉半个修复：atlas 复用本身就是闪烁成因；此时若仍闪烁，请配合 `NERI_WEBKIT_FORCE_SHM=1`），想用驱动原生 vblank 可用 `NERI_WEBKIT_KEEP_NATIVE_VBLANK=1`，完全跳过自动设置可设 `NERI_DISABLE_NVIDIA_QUIRK=1`。若仍闪烁，依次试 `NERI_WEBKIT_FORCE_SHM=1`（旧的 `NERI_WEBKIT_KEEP_DMABUF=1` 会否决它，两者同时存在时请先删掉后者）、`NERI_WEBKIT_DMABUF_NO_GBM=1`；最后才用 `NERI_WEBKIT_SOFTWARE_COMPOSITING=1`。以上实测都来自"核显上屏 + NVIDIA 独显"的混合机器；**显示输出直接接在 NVIDIA 卡上的机器未验证**，若仍闪烁，用 `NERI_WEBKIT_FORCE_SHM=1 NERI_WEBKIT_KEEP_NATIVE_VBLANK=1` 可以还原成改动前的旧配置。检测到 NVIDIA 时前端还会把路由切换、播放页开合与压暗遮罩降为瞬时切换，避免整页动画触发重绘闪烁；其他平台保留原动画。显式设置的环境变量始终优先 |
 
 代理设置提供「绕过系统代理」开关，可按实际网络切换并测试。Debug 连通性探针只判断传输层是否收到响应，不证明登录有效、内容可播放或业务接口成功。
 
