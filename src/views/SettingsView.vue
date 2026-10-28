@@ -96,6 +96,8 @@ import { isMacPlatform } from '@/modules/shortcuts/platform'
 import { filterAndRank, searchValue } from '@/modules/search/textMatcher'
 import { useEscapeClose } from '@/composables/useEscapeClose'
 import { createLogger } from '@/utils/logger'
+import { isLinuxNvidia } from '@/utils/linuxNvidia'
+import M3Dialog from '@/components/ui/M3Dialog.vue'
 
 const log = createLogger('settings-view')
 
@@ -457,6 +459,62 @@ watch(dynamicBackground, on => {
 watch(coverBlurBg, on => {
   if (on && dynamicBackground.value) dynamicBackground.value = false
 })
+
+// 动态背景（WebGL 着色器）在 Linux + NVIDIA 私有驱动下切换页面时会间歇性闪烁，
+// 对光敏性癫痫用户有风险。这个开关默认开启，所以两条路径都要提示：进入设置页时如果
+// 它已经开着就提示一次（取消即关闭），用户手动再打开时也提示一次。结果在挂载时取回
+// 并缓存，处理函数保持同步，不会有竞态。
+// The WebGL shader background flickers intermittently on page switches under Linux +
+// proprietary NVIDIA, a risk for photosensitive epilepsy. The switch defaults to on, so
+// warn on both paths: once when the settings page opens with it already enabled
+// (cancelling turns it off) and once when the user turns it on by hand. The backend
+// answer is fetched on mount, so the handlers stay synchronous and cannot race a toggle.
+const nvidiaShaderWarning = ref(false)
+const dynamicBackgroundAcknowledged = ref(false)
+const dynamicBackgroundDialogOpen = ref(false)
+
+onMounted(() => {
+  void isLinuxNvidia().then(value => { nvidiaShaderWarning.value = value })
+})
+
+// 只在用户真正要开的时候才改状态：被拒绝的开启不会落到 dynamicBackground 上，
+// 所以下面那个“动态背景与封面模糊互斥”的 watcher 不会先把 coverBlurBg 清掉，
+// 用户取消时也就不会连原来的封面模糊背景一起丢掉。
+// Only change state when the user is actually allowed to enable it: a rejected
+// enable never reaches `dynamicBackground`, so the mutual-exclusion watcher below
+// cannot clear `coverBlurBg` first and cancelling keeps the previous background.
+function onDynamicBackgroundToggle(event: Event) {
+  const input = event.target as HTMLInputElement
+  if (!input.checked) {
+    dynamicBackground.value = false
+    return
+  }
+  if (nvidiaShaderWarning.value && !dynamicBackgroundAcknowledged.value) {
+    // 拒绝这次开启：复选框回弹，弹窗询问；确认后才真正写入设置
+    // Reject this enable: bounce the checkbox back and ask; the setting is only
+    // written after confirmation.
+    input.checked = false
+    dynamicBackgroundDialogOpen.value = true
+    return
+  }
+  dynamicBackground.value = true
+}
+
+function confirmDynamicBackgroundWarning() {
+  dynamicBackgroundAcknowledged.value = true
+  dynamicBackgroundDialogOpen.value = false
+  dynamicBackground.value = true
+}
+
+// 手动开启被拒时开关本来就是关的，再置一次无害；进入设置页那次提示对应的是“原本开着”，
+// 取消就是把动态背景关掉。
+// After a rejected manual toggle the switch is already off, so setting it again is
+// harmless; the mount-time prompt corresponds to "already on", where cancelling means
+// turning the dynamic background off.
+function cancelDynamicBackgroundWarning() {
+  dynamicBackgroundDialogOpen.value = false
+  dynamicBackground.value = false
+}
 
 
 // 文件日志开关仅在下次启动生效（受插件限制）：用户切换时提示需重启。
@@ -2838,8 +2896,17 @@ useEscapeClose(
         <div class="setting-title">{{ t('settings.dynamic_bg') }}</div>
         <div class="setting-desc">{{ t('settings.dynamic_bg_desc') }}</div>
       </div>
-      <label class="m3-switch"><input type="checkbox" v-model="dynamicBackground" /><span class="track"><span class="thumb"><span v-if="dynamicBackground" class="material-symbols-rounded" style="font-size: 14px">check</span></span></span></label>
+      <label class="m3-switch"><input type="checkbox" :checked="dynamicBackground" @change="onDynamicBackgroundToggle" /><span class="track"><span class="thumb"><span v-if="dynamicBackground" class="material-symbols-rounded" style="font-size: 14px">check</span></span></span></label>
     </div>
+
+    <M3Dialog
+      :open="dynamicBackgroundDialogOpen"
+      icon="warning"
+      :title="t('settings.dynamic_bg_warning_title')"
+      :confirm-text="t('settings.dynamic_bg_warning_confirm')"
+      @cancel="cancelDynamicBackgroundWarning"
+      @confirm="confirmDynamicBackgroundWarning"
+    >{{ t('settings.dynamic_bg_warning_body') }}</M3Dialog>
 
     <Transition @enter="onExpandEnter" @after-enter="onExpandAfterEnter" @leave="onExpandLeave" @after-leave="onExpandAfterLeave"><div v-if="isExpanded('effects')">
       <div v-if="dynamicBackground" class="setting-card sub-card">

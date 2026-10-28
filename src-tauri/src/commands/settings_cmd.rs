@@ -600,6 +600,40 @@ pub fn get_linux_graphics_compat() -> LinuxGraphicsCompat {
     compat
 }
 
+/// “首次运行已处理过”的标记文件，放在应用数据目录。
+/// Marker file in the app data directory recording that the first-run handling already
+/// happened.
+const SHADER_FLICKER_NOTICE_FILE: &str = "shader-flicker-notice-shown";
+
+/// 认领“首次运行处理”：第一次调用创建标记并返回 `true`，之后一直返回 `false`。
+///
+/// 启动流程用它把动态背景默认关掉（该驱动下 WebGL 背景会间歇性闪烁），之后用户仍可
+/// 在设置里手动打开，那时才弹提示。用空文件而不是设置字段，是为了完全不碰设置快照与
+/// 它的同步信封；`create_new` 保证同时调用时只有一个能认领成功。
+/// Claim the one-and-only first-run handling: the first call creates the marker and
+/// returns `true`, every later call returns `false`. The startup path uses it to turn
+/// the dynamic background off by default (the WebGL background flickers on this driver);
+/// the user can still enable it by hand in Settings, where the confirmation appears. An
+/// empty file instead of a settings field keeps the settings snapshot and its sync
+/// envelope untouched, and `create_new` makes the claim atomic when calls overlap.
+#[tauri::command]
+pub fn claim_shader_flicker_notice(app: AppHandle) -> AppResult<bool> {
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| AppError::Other(error.to_string()))?;
+    std::fs::create_dir_all(&dir)?;
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(dir.join(SHADER_FLICKER_NOTICE_FILE))
+    {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+        Err(error) => Err(error.into()),
+    }
+}
+
 #[tauri::command]
 pub async fn get_build_info() -> AppResult<BuildInfo> {
     Ok(BuildInfo {

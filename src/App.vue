@@ -16,6 +16,7 @@ import { syncFrequencyDelayMs, useSyncStore } from '@/stores/sync'
 import { useAuthStore } from '@/stores/auth'
 import { useRecommendStore } from '@/stores/recommend'
 import { useSettingsStore } from '@/stores/settings'
+import { claimFirstRunShaderNotice } from '@/utils/linuxNvidia'
 import { applyFontSettings } from '@/modules/settings/fonts'
 import { LOW_PERFORMANCE_INTERVAL_MS, setFrameInterval } from '@/utils/frameLoop'
 import { HISTORY_CHANGED_EVENT } from '@/stores/history'
@@ -450,11 +451,16 @@ onMounted(async () => {
   // route switches instant instead of animating the whole page.
   if (detectPlatform() === 'linux') {
     void invoke<{ nvidia: boolean }>('get_linux_graphics_compat')
-      .then((compat) => {
-        if (compat.nvidia) {
-          nvidiaCompat.value = true
-          document.documentElement.classList.add('nvidia-compat')
-        }
+      .then(async (compat) => {
+        if (!compat.nvidia) return
+        nvidiaCompat.value = true
+        document.documentElement.classList.add('nvidia-compat')
+        // 首次运行：该驱动下播放页的 WebGL 背景会间歇性闪烁，直接默认关掉；标记文件
+        // 保证只做一次，用户之后可以在设置里手动打开（那时会弹提示确认）。
+        // First run: the WebGL background flickers intermittently on this driver, so
+        // turn it off by default. The marker file makes this happen once; the user can
+        // still enable it in Settings later, where a confirmation is shown.
+        if (await claimFirstRunShaderNotice()) settingsStore.dynamicBackground = false
       })
       .catch(() => { /* 旧后端或非 Linux：保持默认过渡 */ })
   }
