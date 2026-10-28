@@ -17,6 +17,7 @@ import { useAuthStore } from '@/stores/auth'
 import { useRecommendStore } from '@/stores/recommend'
 import { useSettingsStore } from '@/stores/settings'
 import { applyFontSettings } from '@/modules/settings/fonts'
+import { LOW_PERFORMANCE_INTERVAL_MS, setFrameInterval } from '@/utils/frameLoop'
 import { HISTORY_CHANGED_EVENT } from '@/stores/history'
 import { useLikedSongsStore } from '@/stores/likedSongs'
 import { useDownloadStore } from '@/stores/download'
@@ -58,6 +59,15 @@ watch(
   ([appFontFamily, lyricFontFamily]) => applyFontSettings(appFontFamily, lyricFontFamily),
   { immediate: true },
 )
+// Low performance mode is a global rendering preference, applied as soon as the main
+// window mounts instead of waiting for the settings page to be opened. The three per-frame
+// animations (background shader, lyrics, waveform) share one scheduler, so capping the
+// frame rate is a single call here.
+watch(
+  () => settingsStore.lowPerformanceMode,
+  on => setFrameInterval(on ? LOW_PERFORMANCE_INTERVAL_MS : 0),
+  { immediate: true },
+)
 const likedSongs = useLikedSongsStore()
 const route = useRoute()
 const router = useRouter()
@@ -77,6 +87,10 @@ const flipOverlayStyle = ref<Record<string, string> | null>(null)
 const flipTransitionMode = ref<'opening' | 'closing' | null>(null)
 const isFlipAnimating = ref(false)
 const nowPlayingMotionState = ref<'opening' | 'closing' | null>(null)
+// NVIDIA + WebKitGTK：整页滑入/滑出会重绘巨大图层并闪烁，改为瞬时切换
+// NVIDIA + WebKitGTK: sliding the full-screen layer repaints a huge area and
+// flickers, so switch instantly instead.
+const nvidiaCompat = ref(false)
 const lastCoverSnapshot = ref<{ trackId: string; src: string } | null>(null)
 
 const hasMiniPlayer = computed(() => hasVisiblePlaybackSession(
@@ -111,7 +125,7 @@ function resetFlipState() {
   flipOverlayStyle.value = null
 }
 
-function scheduleNowPlayingMotionCleanup(delay = 520) {
+function scheduleNowPlayingMotionCleanup(delay = nvidiaCompat.value ? 0 : 520) {
   if (nowPlayingMotionTimer) {
     clearTimeout(nowPlayingMotionTimer)
   }
@@ -162,7 +176,7 @@ async function openNowPlaying() {
   // 动画进行中允许打断，避免连点卡住
   resetFlipState()
   nowPlayingMotionState.value = 'opening'
-  scheduleNowPlayingMotionCleanup(520)
+  scheduleNowPlayingMotionCleanup()
   playerTransitionPulse.value = Date.now()
   isNowPlayingOpen.value = true
 }
@@ -201,7 +215,7 @@ async function closeNowPlaying() {
   }
   resetFlipState()
   nowPlayingMotionState.value = 'closing'
-  scheduleNowPlayingMotionCleanup(520)
+  scheduleNowPlayingMotionCleanup()
   skipMiniEnter.value = true
   isNowPlayingOpen.value = false
   await nextTick()
@@ -428,6 +442,21 @@ watch(
 
 // 启动时初始化：加载同步配置 + 检查登录状态 + 自动同步
 onMounted(async () => {
+  // NVIDIA + WebKitGTK 下整页 opacity/transform 过渡会触发大面积重绘并闪烁；
+  // 后端确认是 NVIDIA 后加类，让 CSS 把路由切换降为瞬时切换（不动画整页）。
+  // Full-page opacity/transform transitions repaint a large area and flicker on
+  // WebKitGTK + NVIDIA; after the backend confirms NVIDIA, add a class that makes
+  // route switches instant instead of animating the whole page.
+  if (detectPlatform() === 'linux') {
+    void invoke<{ nvidia: boolean }>('get_linux_graphics_compat')
+      .then((compat) => {
+        if (compat.nvidia) {
+          nvidiaCompat.value = true
+          document.documentElement.classList.add('nvidia-compat')
+        }
+      })
+      .catch(() => { /* 旧后端或非 Linux：保持默认过渡 */ })
+  }
   uninstallDesktopLyrics = installDesktopLyricsBridge({
     openSettings: () => {
       if (isNowPlayingOpen.value) closeNowPlaying()

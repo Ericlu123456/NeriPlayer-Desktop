@@ -391,6 +391,9 @@ let _lastStallRecovery: { key: string; at: number } | null = null
 let shuffleBag: number[] = []       // 未播放索引池
 let shuffleHistory: number[] = []   // 已播放栈 (previous 回溯)
 let shuffleFuture: number[] = []    // 预排队栈 (next 或 previous 回退)
+// “下一首播放”选中当前曲目、且未开 shuffle 时，不能移动队列游标；记下待重播的 id，
+// 让下一次 next() 消费。只在本次会话有效，不持久化。
+let pendingReplayTrackId: string | null = null
 
 // playbackRequestToken 防竞态
 let playbackRequestToken = Date.now() * 1000
@@ -826,12 +829,18 @@ export const usePlayerStore = defineStore('player', () => {
     }
   }
 
-  /** 队列插入后更新 shuffle 索引 */
-  function shiftShuffleIndicesForInsert(insertIdx: number) {
+  /**
+   * Shifts shuffle indices after a "play next" insertion.
+   *
+   * The new slot must join the queued-future stack, not the unplayed bag: the next
+   * shuffled track only pops from `shuffleFuture` (LIFO), so a slot pushed into the bag
+   * is shuffled to a random position and the insertion looks like it did nothing.
+   */
+  function shiftShuffleIndicesForPlayNext(insertIdx: number) {
     shuffleBag = shuffleBag.map(i => i >= insertIdx ? i + 1 : i)
     shuffleHistory = shuffleHistory.map(i => i >= insertIdx ? i + 1 : i)
     shuffleFuture = shuffleFuture.map(i => i >= insertIdx ? i + 1 : i)
-    shuffleBag.push(insertIdx) // 新曲目加入未播放池
+    shuffleFuture.push(insertIdx)
   }
 
   /** 队列移除后更新 shuffle 索引 */
@@ -1478,6 +1487,9 @@ export const usePlayerStore = defineStore('player', () => {
       }
       return
     }
+    // An internal reload of the same track keeps a queued replay; a different track
+    // supersedes it.
+    if (pendingReplayTrackId && track.id !== pendingReplayTrackId) pendingReplayTrackId = null
     if (startPositionMs <= 0 && allowRememberedPosition && !forceResolve && commandSource === 'local') {
       startPositionMs = rememberedLongFormStart(track)
     }
@@ -2470,13 +2482,16 @@ export const usePlayerStore = defineStore('player', () => {
 
     // 睡眠定时器；以下都是播放器自己的推进，不是用户操作
     const isLast = !shuffleEnabled.value && queueIndex.value >= queue.value.length - 1
+    // A queued replay of the current track is a valid reason to advance even at the
+    // physical end of the queue with repeat off.
+    const hasPendingReplay = !shuffleEnabled.value && pendingReplayIndex() >= 0
     if (sleepTimerMode.value === 'end_of_track') {
       await pause('local_safety')
       cancelSleepTimer()
       return
     }
     if (sleepTimerMode.value === 'end_of_queue') {
-      if (isLast && repeatMode.value !== 'all') {
+      if (isLast && !hasPendingReplay && repeatMode.value !== 'all') {
         await pause('local_safety')
         cancelSleepTimer()
         return
@@ -2493,7 +2508,7 @@ export const usePlayerStore = defineStore('player', () => {
       await next(true, 'local_safety')
     } else {
       // 顺序播放：还有下一首则推进，否则停止
-      if (shuffleEnabled.value || queueIndex.value < queue.value.length - 1) {
+      if (shuffleEnabled.value || queueIndex.value < queue.value.length - 1 || hasPendingReplay) {
         await next(false, 'local_safety')
       } else {
         // 停止播放但保留队列（对齐 Android stopPlaybackPreservingQueue）
@@ -2518,6 +2533,15 @@ export const usePlayerStore = defineStore('player', () => {
     if (!_isAutoSkipping) {
       consecutivePlayFailures = 0
       consecutiveLoginSkips = 0
+    }
+
+    if (!shuffleEnabled.value && pendingReplayTrackId) {
+      const replayIndex = pendingReplayIndex()
+      pendingReplayTrackId = null
+      if (replayIndex >= 0) {
+        await play(queue.value[replayIndex], commandSource, 0, false, false)
+        return
+      }
     }
 
     let nextIdx: number
@@ -2617,6 +2641,7 @@ export const usePlayerStore = defineStore('player', () => {
   }
 
   async function toggleShuffle() {
+    pendingReplayTrackId = null
     // 同 PB-03: 本地翻转, 不采信后端 toggle_shuffle 返回值
     shuffleEnabled.value = !shuffleEnabled.value
     // Shuffle 三栈管理
@@ -3344,9 +3369,26 @@ export const usePlayerStore = defineStore('player', () => {
     play(shuffled[0])
   }
 
-  // 插入到当前曲目之后
+  /** Index of the current-track replay queued by Play Next, or -1 if none/stale. */
+  function pendingReplayIndex(): number {
+    if (!pendingReplayTrackId) return -1
+    return queue.value.findIndex(item => item.id === pendingReplayTrackId)
+  }
+
+  // Insert directly after the current track ("play next")
   function addToQueueNext(track: TrackInfo) {
     const existing = queue.value.findIndex(t => t.id === track.id)
+    // The target is the current track: neither its slot nor the playback index may move,
+    // it only has to become the next track. The remove-then-insert path below would drag
+    // queueIndex onto the previous track and desynchronize the queue highlight.
+    if (existing !== -1 && existing === queueIndex.value) {
+      if (shuffleEnabled.value) shuffleFuture.push(existing)
+      else pendingReplayTrackId = queue.value[existing]?.id ?? null
+      savePlayerState()
+      return
+    }
+    // A different Play Next request supersedes a queued current-track replay.
+    pendingReplayTrackId = null
     if (existing !== -1) {
       if (shuffleEnabled.value) shiftShuffleIndicesForRemove(existing)
       queue.value.splice(existing, 1)
@@ -3354,7 +3396,7 @@ export const usePlayerStore = defineStore('player', () => {
     }
     const idx = queueIndex.value + 1
     queue.value.splice(idx, 0, track)
-    if (shuffleEnabled.value) shiftShuffleIndicesForInsert(idx)
+    if (shuffleEnabled.value) shiftShuffleIndicesForPlayNext(idx)
     savePlayerState()
   }
 
