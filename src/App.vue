@@ -16,7 +16,9 @@ import { syncFrequencyDelayMs, useSyncStore } from '@/stores/sync'
 import { useAuthStore } from '@/stores/auth'
 import { useRecommendStore } from '@/stores/recommend'
 import { useSettingsStore } from '@/stores/settings'
-import { claimFirstRunShaderNotice } from '@/utils/linuxNvidia'
+import { claimFirstRunLinuxNotice } from '@/utils/linuxNotice'
+import M3Dialog from '@/components/ui/M3Dialog.vue'
+import { useI18n } from 'vue-i18n'
 import { applyFontSettings } from '@/modules/settings/fonts'
 import { LOW_PERFORMANCE_INTERVAL_MS, setFrameInterval } from '@/utils/frameLoop'
 import { HISTORY_CHANGED_EVENT } from '@/stores/history'
@@ -93,6 +95,8 @@ const nowPlayingMotionState = ref<'opening' | 'closing' | null>(null)
 // NVIDIA + WebKitGTK: sliding the full-screen layer repaints a huge area and
 // flickers, so switch instantly instead.
 const nvidiaCompat = ref(false)
+const linuxNoticeOpen = ref(false)
+const { t } = useI18n()
 const lastCoverSnapshot = ref<{ trackId: string; src: string } | null>(null)
 
 const hasMiniPlayer = computed(() => hasVisiblePlaybackSession(
@@ -450,27 +454,27 @@ onMounted(async () => {
   // WebKitGTK + NVIDIA; after the backend confirms NVIDIA, add a class that makes
   // route switches instant instead of animating the whole page.
   if (detectPlatform() === 'linux') {
-    void invoke<{ nvidia: boolean; nvidiaDriver?: boolean }>('get_linux_graphics_compat')
-      .then(async (compat) => {
+    void invoke<{ nvidia: boolean }>('get_linux_graphics_compat')
+      .then((compat) => {
         if (compat.nvidia) {
           nvidiaCompat.value = true
           document.documentElement.classList.add('nvidia-compat')
         }
-        // 首次运行策略按“驱动是否存在”判断，而不是按兼容层是否生效：
-        // 用户设了 NERI_DISABLE_NVIDIA_QUIRK=1 时驱动依然是 NVIDIA，闪烁风险照旧喵
-        // The first-run policy keys off "is the driver present", not "did the workaround
-        // run": with NERI_DISABLE_NVIDIA_QUIRK=1 the driver is still NVIDIA, so the risk
-        // is unchanged.
-        const nvidiaDriver = compat.nvidiaDriver ?? compat.nvidia
-        if (!nvidiaDriver) return
-        // 首次运行：该驱动下播放页的 WebGL 背景会间歇性闪烁，直接默认关掉；标记文件
-        // 保证只做一次，用户之后可以在设置里手动打开（那时会弹提示确认）。
-        // First run: the WebGL background flickers intermittently on this driver, so
-        // turn it off by default. The marker file makes this happen once; the user can
-        // still enable it in Settings later, where a confirmation is shown.
-        if (await claimFirstRunShaderNotice()) settingsStore.dynamicBackground = false
       })
       .catch(() => { /* 旧后端或非 Linux：保持默认过渡 */ })
+
+    // Linux 端整条渲染栈都建立在 WebKitGTK 上（2.54 起还整体换过合成器）：页面切换可能
+    // 闪一下、性能也可能明显差，动态背景的闪烁更是光敏性癫痫风险。首次运行给一次总
+    // 提示，并把动态背景默认关掉——它不是“体验问题”，是安全默认。
+    // The whole Linux rendering stack sits on WebKitGTK (which swapped its compositor in
+    // 2.54): page switches can flash, performance can be poor, and the dynamic
+    // background's flicker is a photosensitivity risk. The first run shows one notice and
+    // starts with the background off — a safety default, not a cosmetic one.
+    void claimFirstRunLinuxNotice().then((firstRun) => {
+      if (!firstRun) return
+      settingsStore.dynamicBackground = false
+      linuxNoticeOpen.value = true
+    })
   }
   uninstallDesktopLyrics = installDesktopLyricsBridge({
     openSettings: () => {
@@ -730,6 +734,16 @@ onUnmounted(() => {
         <img :src="flipOverlay.src" class="flip-cover-img" referrerpolicy="no-referrer" />
       </div>
     </Transition>
+
+    <M3Dialog
+      :open="linuxNoticeOpen"
+      icon="info"
+      :title="t('settings.linux_test_notice_title')"
+      :cancel-text="t('common.close')"
+      :confirm-text="t('settings.linux_test_notice_ack')"
+      @cancel="linuxNoticeOpen = false"
+      @confirm="linuxNoticeOpen = false"
+    >{{ t('settings.linux_test_notice_body') }}</M3Dialog>
 
     <AppToast />
     <BiliVideoPartsDialog />

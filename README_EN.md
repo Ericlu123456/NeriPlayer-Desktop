@@ -34,8 +34,11 @@
 > This project is for learning and research only. Do not use it for illegal purposes. The project and its maintainers do not accept sponsorships, donations or commercial funding in any form.
 
 > [!CAUTION]
-> **Photosensitive epilepsy notice (Linux + NVIDIA)**
-> On that combination the player's dynamic background (a WebGL shader) can show **intermittent flicker** when switching pages or opening/closing the player view. This is a known issue. If you or someone near you has photosensitive epilepsy, or is sensitive to flashing, turn it off before use: **Settings → Motion → Dynamic Background**. With it off, the player no longer renders the WebGL shader background; the cover-blur background is an alternative. Other platform builds are not affected.
+> **The Linux build is a test environment**
+> Rendering on Linux depends on WebKitGTK and is still a test environment here: it can be unstable, noticeably slower than Windows / macOS, and page switches may flash.
+>
+> **Photosensitive epilepsy notice (every Linux build)**
+> On this environment the player's dynamic background (a WebGL shader) **flickers** when the background or page changes, and no setting can remove it, so it is turned off on the first run together with a notice. If you or someone near you has photosensitive epilepsy, or is sensitive to flashing, do **not** enable it by hand: **Settings → Motion → Dynamic Background** (enabling it shows a severe warning again). The cover-blur background is an alternative. Other platform builds are not affected.
 
 NeriPlayer Desktop does not provide a public cloud music library or media distribution service. Online features depend on third-party APIs, accounts, regions and content permissions; membership and restricted content remain subject to the original platform's rules.
 

@@ -96,7 +96,7 @@ import { isMacPlatform } from '@/modules/shortcuts/platform'
 import { filterAndRank, searchValue } from '@/modules/search/textMatcher'
 import { useEscapeClose } from '@/composables/useEscapeClose'
 import { createLogger } from '@/utils/logger'
-import { detectLinuxNvidia } from '@/utils/linuxNvidia'
+import { isLinuxDesktop } from '@/utils/linuxNotice'
 import M3Dialog from '@/components/ui/M3Dialog.vue'
 
 const log = createLogger('settings-view')
@@ -460,15 +460,13 @@ watch(coverBlurBg, on => {
   if (on && dynamicBackground.value) dynamicBackground.value = false
 })
 
-// 动态背景（WebGL 着色器）在 Linux + NVIDIA 私有驱动下切换页面时会间歇性闪烁，
-// 对光敏性癫痫用户有风险。这个开关默认开启，所以两条路径都要提示：进入设置页时如果
-// 它已经开着就提示一次（取消即关闭），用户手动再打开时也提示一次。结果在挂载时取回
-// 并缓存，处理函数保持同步，不会有竞态。
-// The WebGL shader background flickers intermittently on page switches under Linux +
-// proprietary NVIDIA, a risk for photosensitive epilepsy. The switch defaults to on, so
-// warn on both paths: once when the settings page opens with it already enabled
-// (cancelling turns it off) and once when the user turns it on by hand. The backend
-// answer is fetched on mount, so the handlers stay synchronous and cannot race a toggle.
+// 动态背景（WebGL 着色器）在 Linux 下切换背景或页面时会闪烁，对光敏性癫痫用户有风险。
+// 首次运行的提示在 App.vue（会顺带把它默认关掉），这里只负责一件事：用户手动开启时
+// 先拒绝、弹严重警告，确认后才真正写入设置。
+// The WebGL shader background flickers on Linux when the background or page changes, a
+// risk for photosensitive epilepsy. The first-run notice lives in App.vue (which also
+// turns it off by default); this component only handles one path: a manual enable is
+// rejected first, a severe warning is shown, and the setting is written after confirming.
 const dynamicBackgroundAcknowledged = ref(false)
 const dynamicBackgroundDialogOpen = ref(false)
 
@@ -479,23 +477,19 @@ const dynamicBackgroundDialogOpen = ref(false)
 // enable never reaches `dynamicBackground`, so the mutual-exclusion watcher below
 // cannot clear `coverBlurBg` first and cancelling keeps the previous background.
 //
-// 打开前先等检测结果：检测未完成或探测失败（`unknown`）都不算“确认无风险”，
-// 一律走提示，别让一次 IPC 抖动把这个确认环节绕过去喵
-// Wait for the detection result first: neither a pending probe nor a failed one
-// (`unknown`) counts as "confirmed safe", so both go through the confirmation — one IPC
-// hiccup must not be able to bypass it.
-async function onDynamicBackgroundToggle(event: Event) {
+// Linux 端一律警告：闪烁是 WebKitGTK 的呈现路径问题，与显卡厂商无关（实测核显渲染时
+// 同样会闪）。这里先回弹复选框、确认后才真正写入设置。
+// Warn on every Linux desktop: the flicker comes from WebKitGTK's presentation path, not
+// from the GPU vendor (it reproduced while rendering on the integrated GPU). Bounce the
+// checkbox first and only write the setting after confirmation.
+function onDynamicBackgroundToggle(event: Event) {
   const input = event.target as HTMLInputElement
   if (!input.checked) {
     dynamicBackground.value = false
     return
   }
-  // 先按最坏情况回弹：检测是异步的，期间不能让复选框显示成已开启
-  // Bounce first, pessimistically: detection is async, and the box must not read as
-  // enabled while the answer is unknown.
   input.checked = false
-  const nvidia = await detectLinuxNvidia()
-  if (nvidia !== 'no' && !dynamicBackgroundAcknowledged.value) {
+  if (isLinuxDesktop() && !dynamicBackgroundAcknowledged.value) {
     dynamicBackgroundDialogOpen.value = true
     return
   }
@@ -2906,6 +2900,7 @@ useEscapeClose(
       icon="warning"
       :title="t('settings.dynamic_bg_warning_title')"
       :confirm-text="t('settings.dynamic_bg_warning_confirm')"
+      :confirm-danger="true"
       @cancel="cancelDynamicBackgroundWarning"
       @confirm="confirmDynamicBackgroundWarning"
     >{{ t('settings.dynamic_bg_warning_body') }}</M3Dialog>
