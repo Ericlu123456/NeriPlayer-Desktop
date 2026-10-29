@@ -573,7 +573,14 @@ pub struct BuildInfo {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LinuxGraphicsCompat {
+    /// 兼容层是否生效 / whether the workaround layer actually ran
     pub nvidia: bool,
+    /// NVIDIA 私有驱动是否已加载，与兼容层是否生效无关：用户设了
+    /// `NERI_DISABLE_NVIDIA_QUIRK=1` 时前者仍为 true，前端据此决定是否提示闪烁风险。
+    /// Whether the proprietary NVIDIA driver is loaded, independent of whether the
+    /// workaround layer ran: with `NERI_DISABLE_NVIDIA_QUIRK=1` this stays true, and the
+    /// frontend uses it to decide whether to warn about flicker.
+    pub nvidia_driver: bool,
     pub dmabuf_atlas_disabled: bool,
     pub dmabuf_shm_forced: bool,
     pub dmabuf_disabled: bool,
@@ -584,18 +591,22 @@ pub struct LinuxGraphicsCompat {
 pub fn get_linux_graphics_compat() -> LinuxGraphicsCompat {
     let mut compat = LinuxGraphicsCompat {
         nvidia: false,
+        nvidia_driver: false,
         dmabuf_atlas_disabled: false,
         dmabuf_shm_forced: false,
         dmabuf_disabled: false,
         software_compositing: false,
     };
     #[cfg(target_os = "linux")]
-    if let Some(quirk) = crate::linux_graphics::apply_nvidia_webkit_workarounds() {
-        compat.nvidia = true;
-        compat.dmabuf_atlas_disabled = quirk.dmabuf_atlas_disabled;
-        compat.dmabuf_shm_forced = quirk.dmabuf_shm_forced;
-        compat.dmabuf_disabled = quirk.dmabuf_disabled;
-        compat.software_compositing = quirk.software_compositing;
+    {
+        compat.nvidia_driver = crate::linux_graphics::nvidia_proprietary_driver_loaded();
+        if let Some(quirk) = crate::linux_graphics::apply_nvidia_webkit_workarounds() {
+            compat.nvidia = true;
+            compat.dmabuf_atlas_disabled = quirk.dmabuf_atlas_disabled;
+            compat.dmabuf_shm_forced = quirk.dmabuf_shm_forced;
+            compat.dmabuf_disabled = quirk.dmabuf_disabled;
+            compat.software_compositing = quirk.software_compositing;
+        }
     }
     compat
 }

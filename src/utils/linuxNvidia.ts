@@ -1,30 +1,38 @@
 import { invoke } from '@tauri-apps/api/core'
 import { detectPlatform } from '@/modules/shortcuts/platform'
 
-let cached: Promise<boolean> | null = null
+/** 检测结果：`unknown` 表示探测本身失败，与“确认不是 NVIDIA”区分开喵 */
+export type NvidiaDriverState = 'yes' | 'no' | 'unknown'
+
+let cached: Promise<NvidiaDriverState> | null = null
 
 /**
- * Linux + NVIDIA 私有驱动。
+ * 是否加载了 NVIDIA 私有驱动。
  *
- * 该组合下播放页的动态背景（WebGL 着色器）在切换页面时会间歇性闪烁，因此开启
- * 这个开关前要提示一次。结果来自后端 `get_linux_graphics_compat`，只探测一次并
- * 缓存；非 Linux、浏览器开发模式或旧后端一律当作“非 NVIDIA”，避免误报。
+ * 用的是后端单独探测的 `nvidiaDriver` 字段，而不是 `nvidia`（后者表示兼容层是否生效）：
+ * 用户设置 `NERI_DISABLE_NVIDIA_QUIRK=1` 跳过兼容层时，驱动依然是 NVIDIA，闪烁风险与
+ * 提示逻辑都应照旧。结果只探测一次并缓存；探测失败返回 `unknown` 并清缓存，下次调用
+ * 重试——调用方必须把 `unknown` 与 `no` 分开处理，别让一次 IPC 抖动变成“确认无风险”喵。
  *
- * Linux + the proprietary NVIDIA driver, where the player's WebGL shader background
- * flickers intermittently on page switches, so enabling it needs a one-time warning.
- * The backend answer is cached after the first call; non-Linux, browser dev mode and
- * older backends all resolve to false so nothing is ever reported by accident.
+ * Whether the proprietary NVIDIA driver is loaded, using the backend's dedicated
+ * `nvidiaDriver` field rather than `nvidia` (which reports whether the workaround layer
+ * ran): with `NERI_DISABLE_NVIDIA_QUIRK=1` the driver is still NVIDIA, so the flicker
+ * risk and the notice logic must stay. Probed once and cached; a failed probe returns
+ * `unknown` and clears the cache so the next call retries — callers must keep `unknown`
+ * distinct from `no`, so one IPC hiccup cannot look like a confirmed "no risk".
  */
-export function isLinuxNvidia(): Promise<boolean> {
-  if (detectPlatform() !== 'linux') return Promise.resolve(false)
-  cached ??= invoke<{ nvidia: boolean }>('get_linux_graphics_compat')
-    .then(compat => Boolean(compat?.nvidia))
+export function detectLinuxNvidia(): Promise<NvidiaDriverState> {
+  if (detectPlatform() !== 'linux') return Promise.resolve('no')
+  cached ??= invoke<{ nvidia?: boolean; nvidiaDriver?: boolean }>('get_linux_graphics_compat')
+    .then(compat => {
+      // 旧后端没有 nvidiaDriver 时退回 nvidia，宁可多提示也不要漏喵
+      // Fall back to `nvidia` on an older backend: better to warn than to stay silent.
+      const driver = compat?.nvidiaDriver ?? compat?.nvidia
+      return driver === true ? 'yes' : 'no'
+    })
     .catch(() => {
-      // 探测失败不要粘住：清掉缓存，下次调用重试，否则一次 IPC 抖动会让本次运行
-      // 永远不提示 / Do not cache a failed probe: clear it so a later call retries,
-      // otherwise one IPC hiccup silences the warning for the whole page load.
       cached = null
-      return false
+      return 'unknown' as const
     })
   return cached
 }
@@ -35,7 +43,7 @@ export function isLinuxNvidia(): Promise<boolean> {
  * 由启动流程调用：第一次返回 `true` 时把动态背景默认关掉，之后用户可以在设置里手动
  * 打开，那时才弹提示。标记是应用数据目录里的空文件（`create_new`），所以不碰设置快照
  * 与同步信封。刻意不缓存结果：`create_new` 本身幂等，多一次 IPC 可以忽略，而缓存
- * 第一次的 `true` 会让后续判断失真。失败按“已处理过”处理，下次启动重试。
+ * 第一次的 `true` 会让后续判断失真。失败按“已处理过”处理，下次启动重试喵。
  *
  * Claim the one-and-only first-run handling: the first call returns `true`, later calls
  * (across restarts) return `false`. The startup path uses it to turn the dynamic

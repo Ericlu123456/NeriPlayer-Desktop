@@ -96,7 +96,7 @@ import { isMacPlatform } from '@/modules/shortcuts/platform'
 import { filterAndRank, searchValue } from '@/modules/search/textMatcher'
 import { useEscapeClose } from '@/composables/useEscapeClose'
 import { createLogger } from '@/utils/logger'
-import { isLinuxNvidia } from '@/utils/linuxNvidia'
+import { detectLinuxNvidia } from '@/utils/linuxNvidia'
 import M3Dialog from '@/components/ui/M3Dialog.vue'
 
 const log = createLogger('settings-view')
@@ -469,13 +469,8 @@ watch(coverBlurBg, on => {
 // warn on both paths: once when the settings page opens with it already enabled
 // (cancelling turns it off) and once when the user turns it on by hand. The backend
 // answer is fetched on mount, so the handlers stay synchronous and cannot race a toggle.
-const nvidiaShaderWarning = ref(false)
 const dynamicBackgroundAcknowledged = ref(false)
 const dynamicBackgroundDialogOpen = ref(false)
-
-onMounted(() => {
-  void isLinuxNvidia().then(value => { nvidiaShaderWarning.value = value })
-})
 
 // 只在用户真正要开的时候才改状态：被拒绝的开启不会落到 dynamicBackground 上，
 // 所以下面那个“动态背景与封面模糊互斥”的 watcher 不会先把 coverBlurBg 清掉，
@@ -483,17 +478,24 @@ onMounted(() => {
 // Only change state when the user is actually allowed to enable it: a rejected
 // enable never reaches `dynamicBackground`, so the mutual-exclusion watcher below
 // cannot clear `coverBlurBg` first and cancelling keeps the previous background.
-function onDynamicBackgroundToggle(event: Event) {
+//
+// 打开前先等检测结果：检测未完成或探测失败（`unknown`）都不算“确认无风险”，
+// 一律走提示，别让一次 IPC 抖动把这个确认环节绕过去喵
+// Wait for the detection result first: neither a pending probe nor a failed one
+// (`unknown`) counts as "confirmed safe", so both go through the confirmation — one IPC
+// hiccup must not be able to bypass it.
+async function onDynamicBackgroundToggle(event: Event) {
   const input = event.target as HTMLInputElement
   if (!input.checked) {
     dynamicBackground.value = false
     return
   }
-  if (nvidiaShaderWarning.value && !dynamicBackgroundAcknowledged.value) {
-    // 拒绝这次开启：复选框回弹，弹窗询问；确认后才真正写入设置
-    // Reject this enable: bounce the checkbox back and ask; the setting is only
-    // written after confirmation.
-    input.checked = false
+  // 先按最坏情况回弹：检测是异步的，期间不能让复选框显示成已开启
+  // Bounce first, pessimistically: detection is async, and the box must not read as
+  // enabled while the answer is unknown.
+  input.checked = false
+  const nvidia = await detectLinuxNvidia()
+  if (nvidia !== 'no' && !dynamicBackgroundAcknowledged.value) {
     dynamicBackgroundDialogOpen.value = true
     return
   }

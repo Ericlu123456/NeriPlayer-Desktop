@@ -450,11 +450,19 @@ onMounted(async () => {
   // WebKitGTK + NVIDIA; after the backend confirms NVIDIA, add a class that makes
   // route switches instant instead of animating the whole page.
   if (detectPlatform() === 'linux') {
-    void invoke<{ nvidia: boolean }>('get_linux_graphics_compat')
+    void invoke<{ nvidia: boolean; nvidiaDriver?: boolean }>('get_linux_graphics_compat')
       .then(async (compat) => {
-        if (!compat.nvidia) return
-        nvidiaCompat.value = true
-        document.documentElement.classList.add('nvidia-compat')
+        if (compat.nvidia) {
+          nvidiaCompat.value = true
+          document.documentElement.classList.add('nvidia-compat')
+        }
+        // 首次运行策略按“驱动是否存在”判断，而不是按兼容层是否生效：
+        // 用户设了 NERI_DISABLE_NVIDIA_QUIRK=1 时驱动依然是 NVIDIA，闪烁风险照旧喵
+        // The first-run policy keys off "is the driver present", not "did the workaround
+        // run": with NERI_DISABLE_NVIDIA_QUIRK=1 the driver is still NVIDIA, so the risk
+        // is unchanged.
+        const nvidiaDriver = compat.nvidiaDriver ?? compat.nvidia
+        if (!nvidiaDriver) return
         // 首次运行：该驱动下播放页的 WebGL 背景会间歇性闪烁，直接默认关掉；标记文件
         // 保证只做一次，用户之后可以在设置里手动打开（那时会弹提示确认）。
         // First run: the WebGL background flickers intermittently on this driver, so
