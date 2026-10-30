@@ -42,6 +42,19 @@ flatpak run --command=sh org.gnome.Platform//49 -c \
   'pkg-config --modversion webkit2gtk-4.1; ldd --version | head -1'
 ```
 
+## 数据目录与迁移
+
+Flatpak 默认把数据放在 `~/.var/app/moe.ouom.neriplayer.desktop/`，和 deb/rpm 用的
+`~/.local/share/moe.ouom.neriplayer.desktop` 是两套。manifest 已经放开后者
+（`--filesystem=xdg-data/moe.ouom.neriplayer.desktop:create`），用脚本二选一：
+
+```bash
+scripts/flatpak-migrate-data.sh        # 复制宿主数据进 Flatpak（一次性迁移，推荐）
+scripts/flatpak-migrate-data.sh link   # 软链到宿主目录，两边真正共用一份
+```
+
+迁移前要先退出应用，脚本会检查喵。
+
 ## 已知取舍
 
 - **runtime 体积**：首次安装要拉 1GB 量级（runtime + GL 驱动），换来的是一致环境。
@@ -49,7 +62,11 @@ flatpak run --command=sh org.gnome.Platform//49 -c \
   （只渲染自家 UI，不加载第三方网页），但仍有图片解码等攻击面，分支需要定期跟进。
 - **本地文件**：原型用 `--filesystem=home` 让曲库与下载可用；正式提审建议改成
   portal 或具体目录（`--filesystem=xdg-music`、`--filesystem=xdg-download`）。
-- **托盘**：`libayatana-appindicator` 在沙箱里可用，但 GNOME 桌面需要 AppIndicator 扩展。
+- **托盘**：`libayatana-appindicator` 由 manifest 里的 shared module 提供；Tauri 会把图标写成
+  临时 PNG 并把路径当 `IconName` 传出去，所以还需要 `--filesystem=xdg-run/tray-icon`，
+  否则托盘能创建但图标是空的（沙箱里 `/run/user/$UID` 是私有 tmpfs）喵。
+  GNOME 桌面仍需要 AppIndicator 扩展才显示托盘喵。
+- **网络**：沙箱需要显式 `--share=network`，否则应用完全连不上网喵。
 - **全局快捷键**：沙箱内注册全局快捷键受限，媒体键仍走 MPRIS。
 
 ## 提交流程（Flathub 需要离线构建）

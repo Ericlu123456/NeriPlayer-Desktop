@@ -28,13 +28,24 @@ sdk-extensions:
 finish-args:
   # 图形：优先 Wayland，保留 X11 回退；需要 GPU 直通喵
   - --share=ipc
+  # 沙箱默认不带网络命名空间内的出站权限，实测不加这一条时应用完全连不上网喵
+  - --share=network
   - --socket=wayland
-  - --socket=fallback-x11
+  # 直接给 x11 而不是 fallback-x11：剪贴板与拖放在 Wayland 后端下仍有应用间差异，
+  # 保留 XWayland 通道更稳喵
+  - --socket=x11
   - --device=dri
   # 音频：PipeWire/PulseAudio 兼容通道喵
   - --socket=pulseaudio
   # 本地曲库与下载目录（原型阶段先用 home，正式提审时改成 portal 或具体目录）喵
   - --filesystem=home
+  # Tauri 把托盘图标写成临时 PNG（$XDG_RUNTIME_DIR/tray-icon/*.png）并把路径当 IconName
+  # 传出去；沙箱里 /run/user/$UID 是私有 tmpfs，宿主看不到，KDE 只能画空图标。
+  # 把该目录映射到宿主 XDG_RUNTIME_DIR 下，图标才读得到喵
+  - --filesystem=xdg-run/tray-icon
+  # 设置/歌单等数据：允许读写宿主原有的数据目录，配合 scripts/flatpak-migrate-data.sh
+  # 就能在 Flatpak 与 deb/rpm 之间共用同一份配置喵
+  - --filesystem=xdg-data/moe.ouom.neriplayer.desktop:create
   # 系统集成：通知、托盘、媒体会话喵
   - --talk-name=org.freedesktop.Notifications
   - --talk-name=org.kde.StatusNotifierWatcher
@@ -43,6 +54,10 @@ finish-args:
   - --talk-name=org.freedesktop.portal.Desktop
 
 modules:
+  # GNOME runtime 不带 appindicator，而 Tauri 的托盘依赖它；用 Flathub 官方 shared module
+  # （子模块 flatpak/shared-modules，路径相对本文件所在目录）喵
+  - shared-modules/libayatana-appindicator/libayatana-appindicator-gtk3.json
+
   - name: neriplayer
     buildsystem: simple
     build-options:
@@ -75,13 +90,14 @@ modules:
     sources:
       - type: dir
         path: ..
-        # 构建树只需要源码：把 target / node_modules / .git 这些大目录排除掉，
-        # 否则 flatpak-builder 会把它们整份复制进 build 目录（实测能把磁盘吃满）喵
+        # 构建树只需要源码：排除构建产物与缓存目录，否则 flatpak-builder 会整份复制。
+        # .git 和 vendor（AMLL 子模块）要保留：前者给 build.rs 取版本号，
+        # 后者是前端构建必需的源码喵
         skip:
           - src-tauri/target
           - node_modules
           - dist
-          - .git
-          - flatpak
+          # 只跳过 flatpak 自己的构建产物：desktop/metainfo 就在 flatpak/ 里，必须带上喵
+          - flatpak/build-dir
+          - flatpak/.flatpak-builder
           - docs
-          - vendor

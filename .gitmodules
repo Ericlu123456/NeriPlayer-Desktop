@@ -1,3 +1,6 @@
 [submodule "vendor/applemusic-like-lyrics"]
 	path = vendor/applemusic-like-lyrics
 	url = https://github.com/cwuom/applemusic-like-lyrics.git
+[submodule "flatpak/shared-modules"]
+	path = flatpak/shared-modules
+	url = https://github.com/flathub/shared-modules.git

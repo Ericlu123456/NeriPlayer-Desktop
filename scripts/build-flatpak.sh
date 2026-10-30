@@ -88,10 +88,12 @@ fi
 builder_args=(
   --user
   --force-clean
-  # 默认不存快照：这里只需要「能不能构建成功」，不需要秒级增量喵
-  --disable-cache
   --state-dir="$state_dir"
 )
+# 默认不存快照（体积大）；调试期间想复用中间结果就设 KEEP_CACHE=1喵
+if [[ "${KEEP_CACHE:-0}" != "1" ]]; then
+  builder_args+=(--disable-cache)
+fi
 if [[ "$install" -eq 1 ]]; then
   builder_args+=(--install)
 fi
