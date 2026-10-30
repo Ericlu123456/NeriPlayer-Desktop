@@ -98,6 +98,16 @@ modules:
       # 走 scripts/run-tauri.mjs 以保留 <gitsha>.<MMddHHmm> 版本格式喵
       - pnpm tauri build --no-bundle
       - install -Dm755 src-tauri/target/release/neri-player-desktop /app/bin/neri-player-desktop
+      # 可选：把预编译的 FFmpeg 动态库放到 /app/bin/ffmpeg（应用的第一搜索路径之一）。
+      # 自建仓库/手工分发允许打包预编译二进制；提交 Flathub 时必须改成源码模块喵
+      - |
+        if [ -d flatpak/ffmpeg-prebuilt ] && [ -n "$(ls -A flatpak/ffmpeg-prebuilt 2>/dev/null)" ]; then
+          install -d /app/bin/ffmpeg
+          cp -a flatpak/ffmpeg-prebuilt/. /app/bin/ffmpeg/
+          echo "bundled prebuilt FFmpeg: $(ls /app/bin/ffmpeg | head -3 | tr '\n' ' ')"
+        else
+          echo "no prebuilt FFmpeg; the app will use its built-in decoder"
+        fi
       - install -Dm644 flatpak/moe.ouom.neriplayer.desktop.desktop /app/share/applications/moe.ouom.neriplayer.desktop.desktop
       - install -Dm644 flatpak/moe.ouom.neriplayer.desktop.metainfo.xml /app/share/metainfo/moe.ouom.neriplayer.desktop.metainfo.xml
       - install -Dm644 src-tauri/icons/32x32.png /app/share/icons/hicolor/32x32/apps/moe.ouom.neriplayer.desktop.png

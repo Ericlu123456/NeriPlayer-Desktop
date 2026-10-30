@@ -29,6 +29,25 @@ cd src-tauri && cargo vendor --locked ../flatpak/cargo-vendor
 
 `scripts/build-flatpak.sh` 会先检查这个目录，缺失时直接给出上面这条命令喵。
 
+## 可选：随包带 FFmpeg
+
+`org.gnome.Platform` 不自带 FFmpeg（Flathub 上也没有可用的 `ffmpeg-full` 扩展），所以默认会回退到
+内置解码器。要带完整解码链路，把 CI 的 FFmpeg 产物放到 `flatpak/ffmpeg-prebuilt/`（已 gitignore），
+构建时会复制到 `/app/bin/ffmpeg`，也就是应用的第一搜索路径之一：
+
+```bash
+# 从 FFmpeg 工作流下载（产物名 ffmpeg-linux-x86_64）
+gh run download --repo cwuom/NeriPlayer-Desktop \
+  --name ffmpeg-linux-x86_64 --dir flatpak/ffmpeg-prebuilt
+```
+
+注意事项：
+
+- 产物必须在**老 glibc** 上构建（CI 的 ubuntu-22.04，glibc 2.35）才能在本 runtime 里加载；
+  直接拷宿主机的 `libav*` 会因为 glibc 版本更高而失败喵。
+- **自建仓库/手工分发允许打包预编译二进制**；提交 Flathub 时必须改成源码模块（`scripts/ffmpeg/build-ffmpeg.sh`
+  作为 flatpak module），否则审查会拒绝喵。
+
 ## 构建
 
 ```bash

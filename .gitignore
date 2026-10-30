@@ -54,3 +54,6 @@ flatpak/.flatpak-builder/
 
 # 本地 cargo vendor 产物（构建 Flatpak 用，体积大，不入库）
 flatpak/cargo-vendor/
+
+# Flatpak 用的预编译 FFmpeg 动态库（CI 产物，体积大，不入库）
+flatpak/ffmpeg-prebuilt/
