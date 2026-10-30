@@ -88,6 +88,9 @@ fi
 builder_args=(
   --user
   --force-clean
+  # 交互式构建里 rofiles-fuse 经常在中断后留下坏掉的挂载点，接着报 Permission denied；
+  # 它只是加速用的，直接关掉更省事喵
+  --disable-rofiles-fuse
   --state-dir="$state_dir"
 )
 # 默认不存快照（体积大）；调试期间想复用中间结果就设 KEEP_CACHE=1喵

@@ -82,6 +82,10 @@ modules:
       - install -d /app/bin
       # 1.95.0 与 rust-toolchain.toml 保持一致喵
       - sh -c 'curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain 1.95.0'
+      # crates 走本地 vendor：沙箱里拉 crates.io 索引经常超时（实测一次卡 10 分钟以上），
+      # 而 vendor 目录由宿主 `cargo vendor --locked flatpak/cargo-vendor` 生成喵
+      - mkdir -p src-tauri/.cargo
+      - printf '[source.crates-io]\nreplace-with = "vendored-sources"\n\n[source.vendored-sources]\ndirectory = "../flatpak/cargo-vendor"\n' > src-tauri/.cargo/config.toml
       # pnpm 版本由 package.json 的 packageManager 钉住，corepack 负责拉取喵
       - corepack enable --install-directory /app/bin
       - corepack prepare --activate
