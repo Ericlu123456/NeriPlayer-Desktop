@@ -32,6 +32,15 @@ done
 
 die() { echo "error: $*" >&2; exit 1; }
 
+# flatpak-builder 会在 state dir 里为每条 build command 存快照，Tauri 这种「前端依赖 +
+# Rust release 构建」的体量很容易把磁盘吃掉（实测一次 81G），所以先看空间再动手喵
+free_gib=$(df -BG --output=avail "$repo_root" | tail -1 | tr -dc '0-9')
+min_gib="${MIN_FREE_GIB:-20}"
+if (( free_gib < min_gib )); then
+  die "磁盘剩余 ${free_gib}G，低于 $min_gib G；先清空间（可删 flatpak/.flatpak-builder）或设 MIN_FREE_GIB 覆盖"
+fi
+echo "==> 剩余空间 ${free_gib}G，开始构建喵"
+
 [[ -f "$manifest" ]] || die "manifest not found: $manifest"
 
 command -v flatpak >/dev/null 2>&1 || die "flatpak 未安装（Arch: sudo pacman -S flatpak）"
@@ -79,6 +88,8 @@ fi
 builder_args=(
   --user
   --force-clean
+  # 默认不存快照：这里只需要「能不能构建成功」，不需要秒级增量喵
+  --disable-cache
   --state-dir="$state_dir"
 )
 if [[ "$install" -eq 1 ]]; then
@@ -87,6 +98,11 @@ fi
 
 echo "==> flatpak-builder（runtime $runtime_branch）喵"
 flatpak-builder "${builder_args[@]}" "$build_dir" "$manifest"
+
+# 中间目录默认删掉，只留最终的 flatpak 包；要复用就设 KEEP_CACHE=1喵
+if [[ "${KEEP_CACHE:-0}" != "1" ]]; then
+  rm -rf "$build_dir" "$state_dir"
+fi
 
 if [[ "$install" -eq 1 ]]; then
   echo

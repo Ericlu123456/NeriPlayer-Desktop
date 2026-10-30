@@ -19,10 +19,11 @@ sdk: org.gnome.Sdk
 command: neri-player-desktop
 
 sdk-extensions:
-  # GNOME 49 基于 freedesktop-sdk 25.08，扩展分支必须显式写出来：
-  # flatpak-builder 默认去要 //49，而扩展只发在 24.08 / 25.08 / 26.08 上喵
-  - org.freedesktop.Sdk.Extension.rust-stable//25.08
-  - org.freedesktop.Sdk.Extension.node22//25.08
+  # 不要在这里写 //分支：SDK 用通用扩展点 `org.freedesktop.Sdk.Extension`
+  # （GNOME 49 里声明的 version = 25.08）来解析子扩展，写上 //25.08 反而会被
+  # 当成 id 的一部分，去找 .../rust-stable//25.08/x86_64/49 这种不存在的 ref喵
+  - org.freedesktop.Sdk.Extension.rust-stable
+  - org.freedesktop.Sdk.Extension.node22
 
 finish-args:
   # 图形：优先 Wayland，保留 X11 回退；需要 GPU 直通喵
@@ -45,12 +46,19 @@ modules:
   - name: neriplayer
     buildsystem: simple
     build-options:
+      # 原型阶段允许构建期联网：corepack 要拉 pnpm，pnpm 要拉依赖。
+      # 提 Flathub 之前必须换成离线构建（node-sources.json + cargo-sources.json），
+      # 并把这一行删掉，否则审查会直接拒喵
+      build-args:
+        - --share=network
       append-path: /usr/lib/sdk/rust-stable/bin:/usr/lib/sdk/node22/bin
       env:
         CARGO_HOME: /run/build/neriplayer/.cargo
         npm_config_cache: /run/build/neriplayer/.npm
         COREPACK_HOME: /run/build/neriplayer/.corepack
     build-commands:
+      # corepack 要求目标目录已存在，而构建沙箱里的 /app 是空的喵
+      - install -d /app/bin
       # pnpm 版本由 package.json 的 packageManager 钉住，corepack 负责拉取喵
       - corepack enable --install-directory /app/bin
       - corepack prepare --activate
@@ -67,3 +75,13 @@ modules:
     sources:
       - type: dir
         path: ..
+        # 构建树只需要源码：把 target / node_modules / .git 这些大目录排除掉，
+        # 否则 flatpak-builder 会把它们整份复制进 build 目录（实测能把磁盘吃满）喵
+        skip:
+          - src-tauri/target
+          - node_modules
+          - dist
+          - .git
+          - flatpak
+          - docs
+          - vendor
