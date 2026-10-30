@@ -58,14 +58,6 @@ Development focuses on multi-source discovery, native playback, local control, a
 
 ---
 
-> [!CAUTION]
-> **The Linux build is a test environment**: rendering depends on WebKitGTK, so it can be unstable, noticeably slower than Windows / macOS, and page switches may flash.
->
-> **Photosensitive epilepsy notice (every Linux build)**: on this environment the player's dynamic background (a WebGL shader) **flickers** when the background or page changes, and no setting can remove it, so it is turned off on the first run together with a notice.
-> If you or someone near you has photosensitive epilepsy, or is sensitive to flashing, do **not** enable it by hand (**Settings → Motion → Dynamic Background**; enabling it shows a severe warning again). The cover-blur background is an alternative.
-> Other platform builds are not affected.
-
----
 
 ## Start here
 

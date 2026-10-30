@@ -563,7 +563,6 @@ fn main() {
             settings_cmd::set_bypass_proxy,
             settings_cmd::get_build_info,
             settings_cmd::get_linux_graphics_compat,
-            settings_cmd::claim_linux_first_run_notice,
             settings_cmd::get_system_accent_color,
             settings_cmd::probe_platform_connectivity,
             debug_cmd::get_recent_logs,

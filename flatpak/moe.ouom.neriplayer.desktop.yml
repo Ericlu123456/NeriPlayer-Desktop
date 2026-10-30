@@ -14,7 +14,7 @@
 
 app-id: moe.ouom.neriplayer.desktop
 runtime: org.gnome.Platform
-runtime-version: '49'
+runtime-version: '48'
 sdk: org.gnome.Sdk
 command: neri-player-desktop
 
@@ -22,6 +22,8 @@ sdk-extensions:
   # 不要在这里写 //分支：SDK 用通用扩展点 `org.freedesktop.Sdk.Extension`
   # （GNOME 49 里声明的 version = 25.08）来解析子扩展，写上 //25.08 反而会被
   # 当成 id 的一部分，去找 .../rust-stable//25.08/x86_64/49 这种不存在的 ref喵
+  # 不写 //分支：SDK 的通用扩展点声明了 version = 24.08，flatpak-builder 会自己解析；
+  # 写上 //24.08 反而被当成 id 的一部分去找不存在的 ref喵
   - org.freedesktop.Sdk.Extension.rust-stable
   - org.freedesktop.Sdk.Extension.node22
 
