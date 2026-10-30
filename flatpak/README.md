@@ -84,7 +84,7 @@ RUNTIME_BRANCH=48 scripts/build-flatpak.sh
 | 分支 | WebKitGTK | 动态背景 / 切页闪烁 |
 | --- | --- | --- |
 | 48 | `libwebkit2gtk-4.1.so.0.19.9`（2.46/2.48） | 实测不闪（动画、动态背景都正常） |
-| 49 | `libwebkit2gtk-4.1.so.0.24.3`（2.54 一代） | 会闪，上游 [WebKit 327524](https://bugs.webkit.org/show_bug.cgi?id=327524)，2.54.2 未修 |
+| 49 | `libwebkit2gtk-4.1.so.0.24.3`（2.54 一代） | 会闪，上游 [327524](https://bugs.webkit.org/show_bug.cgi?id=327524) / [326841](https://bugs.webkit.org/show_bug.cgi?id=326841)（Skia 图层合成器），2.54.2 未修 |
 
 升级分支前先确认里面的 WebKit 版本，否则会把闪烁带回来：
 

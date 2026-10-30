@@ -411,9 +411,12 @@ reuse `fsutil.rs` and existing atomic replacement procedures for file writes.
 Rendering on Linux runs entirely on the WebKitGTK shipped by the distro (or the Flatpak runtime), so
 **behaviour follows the WebKitGTK version**, not the GPU vendor:
 
-- **2.54 and newer**: after the compositor moved to Skia and damage-aware compositing became the default,
-  the dynamic background and page switches flicker intermittently (upstream
-  [WebKit bug 327524](https://bugs.webkit.org/show_bug.cgi?id=327524), still unfixed in 2.54.2).
+- **2.54 and newer**: after the compositor moved to Skia, the dynamic background and page switches flicker
+  intermittently (upstream [WebKit 327524](https://bugs.webkit.org/show_bug.cgi?id=327524), same root cause as
+  [326841](https://bugs.webkit.org/show_bug.cgi?id=326841), still unfixed in 2.54.2). Upstream has ruled out damage
+  tracking — disabling `UseDamagingInformationForCompositing` does not help, while
+  `WEBKIT_USE_SKIA_FOR_COMPOSITION=0` removes the flicker and keeps GPU acceleration, so the Skia layer compositor
+  is the culprit.
   The app has no reliable workaround, so the Flatpak build pins runtime 48.
 - **2.46 / 2.48**: measured flicker-free; animation and the dynamic background behave normally.
 

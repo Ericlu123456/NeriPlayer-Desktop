@@ -375,9 +375,12 @@ macOS 使用 ad-hoc 签名，未经 Apple 公证。Release 检查 dylib 架构�
 Linux 端的渲染完全跑在发行版（或 Flatpak runtime）提供的 WebKitGTK 上，所以**行为由
 WebKitGTK 版本决定**，不是由显卡厂商决定：
 
-- **2.54 及更新**：合成器换成 Skia 实现并把 damage-aware compositing 设为默认后，
-  动态背景与页面切换会出现间歇性闪烁（上游 [WebKit bug 327524](https://bugs.webkit.org/show_bug.cgi?id=327524)，
-  2.54.2 仍未修复）。应用侧没有可靠规避手段，因此 Flatpak 构建固定使用运行时 48。
+- **2.54 及更新**：合成器换成 Skia 实现后，动态背景与页面切换会出现间歇性闪烁
+  （上游 [WebKit 327524](https://bugs.webkit.org/show_bug.cgi?id=327524)，与
+  [326841](https://bugs.webkit.org/show_bug.cgi?id=326841) 同源；2.54.2 仍未修复）。上游排查已经排除
+  damage tracking——`UseDamagingInformationForCompositing` 关掉照旧闪，而
+  `WEBKIT_USE_SKIA_FOR_COMPOSITION=0` 能消除闪烁且保留 GPU 加速，所以问题在 Skia 图层合成器喵。
+  应用侧没有可靠的规避手段（那个变量等于放弃 Skia 合成），因此 Flatpak 构建固定使用运行时 48。
 - **2.46 / 2.48**：实测无此回归，动画与动态背景都正常。
 
 唯一保留的兼容开关是 **NVIDIA explicit sync**：严格同步的合成器（KDE Plasma/KWin 等）

@@ -521,7 +521,9 @@ do not attach full configuration exports or databases.
   Complete timing or translations cannot be generated when the corresponding content is absent.
 - **System integration**: tray behavior, click-through, global shortcuts, and media sessions depend on the OS and desktop environment.
   Shortcuts may conflict with other applications.
-- **Linux rendering**: the Linux build is a test environment and rendering depends on WebKitGTK. Since 2.54 replaced its compositor with a Skia one, the dynamic background and page switches flicker intermittently (upstream WebKit bug 327524). **The Flatpak build pins runtime 48** (WebKitGTK 2.46/2.48), which does not flicker; deb/rpm follow the distro's 2.54 and may still hit it, so Flatpak is recommended.
+- **Linux rendering**: the Linux build is a test environment and rendering depends on WebKitGTK. Since 2.54 replaced its compositor with a Skia one, the dynamic background and page switches flicker intermittently (upstream [WebKit 327524](https://bugs.webkit.org/show_bug.cgi?id=327524), same root cause as
+  [326841](https://bugs.webkit.org/show_bug.cgi?id=326841); `WEBKIT_USE_SKIA_FOR_COMPOSITION=0` avoids it but loses
+  Skia composition). **The Flatpak build pins runtime 48** (WebKitGTK 2.46/2.48), which does not flicker; deb/rpm follow the distro's 2.54 and may still hit it, so Flatpak is recommended.
 - **Sync boundary**: remote sync transfers metadata only. Prepare local audio, downloads, device paths, and account authorization separately.
   Back up and confirm client compatibility before V4 upgrades or concurrent multi-device use.
 

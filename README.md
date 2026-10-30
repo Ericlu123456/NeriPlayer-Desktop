@@ -494,7 +494,9 @@ WebDAV 远端同样不是端到端加密备份，用户名、密码与配置导�
 - **系统集成**：托盘、点击穿透、全局快捷键与媒体会话受操作系统和桌面环境影响；
   快捷键可能与其它应用冲突。
 - **Linux 渲染**：Linux 端整体属于测试环境，渲染依赖 WebKitGTK。WebKitGTK 2.54 把合成器换成 Skia 实现后，
-  动态背景与页面切换会出现间歇性闪烁（上游 WebKit bug 327524）；**Flatpak 分支固定使用运行时 48**
+  动态背景与页面切换会出现间歇性闪烁（上游 [WebKit bug 327524](https://bugs.webkit.org/show_bug.cgi?id=327524)，
+  与 [326841](https://bugs.webkit.org/show_bug.cgi?id=326841) 同源，定位在 Skia 图层合成器，`WEBKIT_USE_SKIA_FOR_COMPOSITION=0`
+  可临时规避但会失去 Skia 合成）；**Flatpak 分支固定使用运行时 48**
   （WebKitGTK 2.46/2.48），实测不闪，deb/rpm 若跟随发行版的 2.54 仍可能遇到，建议改用 Flatpak。
 - **同步边界**：远端只同步元数据；本地音频、下载、设备路径和账号授权需另行准备。
   V4 升级和多设备并发仍应先备份并确认客户端兼容。

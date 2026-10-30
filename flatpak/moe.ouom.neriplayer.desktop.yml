@@ -6,7 +6,7 @@
 #
 # runtime 分支就是这条链上最关键的开关喵：
 #   48 → libwebkit2gtk-4.1.so.0.19.9（2.46/2.48），实测不闪，动画与动态背景都正常
-#   49 → libwebkit2gtk-4.1.so.0.24.3（2.54 一代），上游 327524 的闪烁回归
+#   49 → libwebkit2gtk-4.1.so.0.24.3（2.54 一代），Skia 图层合成器的闪烁回归（上游 327524 / 326841）
 # 所以固定 48；升级前先跑
 #   flatpak run --command=sh org.gnome.Platform//48 -c \
 #     'ls /usr/lib/x86_64-linux-gnu/libwebkit2gtk-4.1.so.0.*'
