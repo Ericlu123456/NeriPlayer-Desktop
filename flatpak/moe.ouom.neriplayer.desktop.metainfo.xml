@@ -31,12 +31,6 @@
       注意：Linux 版本目前属于测试环境，渲染依赖 WebKitGTK，稳定性与性能弱于其他平台。
     </p>
   </description>
-  <screenshots>
-    <screenshot type="default">
-      <image>https://raw.githubusercontent.com/cwuom/NeriPlayer-Desktop/main/docs/screenshots/library-interactions.png</image>
-      <caption>曲库与播放界面</caption>
-    </screenshot>
-  </screenshots>
   <releases>
     <release version="1.0.0" date="2026-10-29">
       <description>

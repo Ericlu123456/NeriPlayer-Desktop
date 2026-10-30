@@ -73,7 +73,7 @@ modules:
         - --share=network
       # SDK 48 的 rust-stable 扩展只到 1.89，而仓库依赖（muda）要求 >= 1.90，
       # 所以构建期用 rustup 拉仓库钉住的 1.95.0 工具链（原型阶段允许联网）喵
-      prepend-path: /run/build/neriplayer/.cargo/bin
+      prepend-path: /run/build/neriplayer/.cargo/bin:/run/build/neriplayer/.corepack-bin
       append-path: /usr/lib/sdk/rust-stable/bin:/usr/lib/sdk/node22/bin
       env:
         CARGO_HOME: /run/build/neriplayer/.cargo
@@ -90,7 +90,9 @@ modules:
       - mkdir -p src-tauri/.cargo
       - printf '[source.crates-io]\nreplace-with = "vendored-sources"\n\n[source.vendored-sources]\ndirectory = "../flatpak/cargo-vendor"\n' > src-tauri/.cargo/config.toml
       # pnpm 版本由 package.json 的 packageManager 钉住，corepack 负责拉取喵
-      - corepack enable --install-directory /app/bin
+      # 装到构建目录内部，别污染 /app/bin：否则 build-finish 会把 command 认成 pnpm喵
+      - install -d /run/build/neriplayer/.corepack-bin
+      - corepack enable --install-directory /run/build/neriplayer/.corepack-bin
       - corepack prepare --activate
       - pnpm install --frozen-lockfile
       # 走 scripts/run-tauri.mjs 以保留 <gitsha>.<MMddHHmm> 版本格式喵
