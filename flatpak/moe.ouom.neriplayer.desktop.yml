@@ -73,27 +73,31 @@ modules:
         - --share=network
       # SDK 48 的 rust-stable 扩展只到 1.89，而仓库依赖（muda）要求 >= 1.90，
       # 所以构建期用 rustup 拉仓库钉住的 1.95.0 工具链（原型阶段允许联网）喵
-      prepend-path: /run/build/neriplayer/.cargo/bin:/run/build/neriplayer/.corepack-bin
+      prepend-path: /run/build/neriplayer/rust-toolchain/bin:/run/build/neriplayer/.corepack-bin
       append-path: /usr/lib/sdk/rust-stable/bin:/usr/lib/sdk/node22/bin
       env:
         CARGO_HOME: /run/build/neriplayer/.cargo
-        RUSTUP_HOME: /run/build/neriplayer/.rustup
         npm_config_cache: /run/build/neriplayer/.npm
+        # 官方 registry 在直连环境下会间歇 ECONNRESET；国内镜像稳定且快得多喵
+        npm_config_registry: https://registry.npmmirror.com
         COREPACK_HOME: /run/build/neriplayer/.corepack
     build-commands:
       # corepack 要求目标目录已存在，而构建沙箱里的 /app 是空的喵
       - install -d /app/bin
-      # 1.95.0 与 rust-toolchain.toml 保持一致喵
-      - sh -c 'curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain 1.95.0'
+      # 工具链由 flatpak/rust-toolchain（官方 rustup 产物 1.95.0，宿主预置）提供，
+      # 不再在构建里联网拉取：代理抖动时这一步能卡十分钟以上喵
+      - test -x /run/build/neriplayer/rust-toolchain/bin/cargo
       # crates 走本地 vendor：沙箱里拉 crates.io 索引经常超时（实测一次卡 10 分钟以上），
       # 而 vendor 目录由宿主 `cargo vendor --locked flatpak/cargo-vendor` 生成喵
       - mkdir -p src-tauri/.cargo
       - printf '[source.crates-io]\nreplace-with = "vendored-sources"\n\n[source.vendored-sources]\ndirectory = "../flatpak/cargo-vendor"\n' > src-tauri/.cargo/config.toml
-      # pnpm 版本由 package.json 的 packageManager 钉住，corepack 负责拉取喵
-      # 装到构建目录内部，别污染 /app/bin：否则 build-finish 会把 command 认成 pnpm喵
+      # pnpm 用本地 tarball 安装（版本与 package.json 的 packageManager 一致），不走
+      # corepack 联网下载：代理抖动时那一步经常直接失败喵
+      - install -d /run/build/neriplayer/pnpm
+      - tar -xzf pnpm-9.15.9.tgz -C /run/build/neriplayer/pnpm --strip-components=1
       - install -d /run/build/neriplayer/.corepack-bin
-      - corepack enable --install-directory /run/build/neriplayer/.corepack-bin
-      - corepack prepare --activate
+      - ln -sfn /run/build/neriplayer/pnpm/bin/pnpm.cjs /run/build/neriplayer/.corepack-bin/pnpm
+      - pnpm --version
       - pnpm install --frozen-lockfile
       # 走 scripts/run-tauri.mjs 以保留 <gitsha>.<MMddHHmm> 版本格式喵
       - pnpm tauri build --no-bundle
@@ -109,12 +113,22 @@ modules:
           echo "no prebuilt FFmpeg; the app will use its built-in decoder"
         fi
       - install -Dm644 flatpak/moe.ouom.neriplayer.desktop.desktop /app/share/applications/moe.ouom.neriplayer.desktop.desktop
-      - install -Dm644 flatpak/moe.ouom.neriplayer.desktop.metainfo.xml /app/share/metainfo/moe.ouom.neriplayer.desktop.metainfo.xml
+      # 暂不安装 metainfo：GNOME 48 SDK 的 appstreamcli 依赖一个没编 JPEG-XL 的 libvips，
+      # 合成时必报 media-worker-error 并让整个构建失败（filters-but-no-output 是它的连带错误）。
+      # 代价只是 `flatpak install` 打印一行 "No matching appdata"，软件中心元数据缺失；
+      # 修好 vips 或换分支后再打开这一行喵
+      # - install -Dm644 flatpak/moe.ouom.neriplayer.desktop.metainfo.xml /app/share/metainfo/moe.ouom.neriplayer.desktop.metainfo.xml
       - install -Dm644 src-tauri/icons/32x32.png /app/share/icons/hicolor/32x32/apps/moe.ouom.neriplayer.desktop.png
       - install -Dm644 src-tauri/icons/64x64.png /app/share/icons/hicolor/64x64/apps/moe.ouom.neriplayer.desktop.png
       - install -Dm644 src-tauri/icons/128x128.png /app/share/icons/hicolor/128x128/apps/moe.ouom.neriplayer.desktop.png
       - install -Dm644 src-tauri/icons/128x128@2x.png /app/share/icons/hicolor/256x256/apps/moe.ouom.neriplayer.desktop.png
     sources:
+      - type: file
+        path: pnpm-prebuilt/pnpm-9.15.9.tgz
+        dest-filename: pnpm-9.15.9.tgz
+      - type: dir
+        path: rust-toolchain
+        dest: rust-toolchain
       - type: dir
         path: ..
         # 构建树只需要源码：排除构建产物与缓存目录，否则 flatpak-builder 会整份复制。

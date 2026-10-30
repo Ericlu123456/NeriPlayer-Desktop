@@ -44,7 +44,14 @@ fi
 echo "==> 剩余空间 ${free_gib}G，开始构建喵"
 
 [[ -f "$manifest" ]] || die "manifest not found: $manifest"
-# cargo vendor 目录是构建必需品，但体积大、不入库：先生成再构建喵
+# 工具链与 crate 源都是构建必需品，体积大、不入库：先备好再构建喵
+if [[ ! -x "$repo_root/flatpak/rust-toolchain/bin/cargo" ]]; then
+  cat >&2 <<'EOF'
+error: 缺少 flatpak/rust-toolchain（离线构建用的 Rust 1.95.0 工具链）喵。先准备：
+  cp -a ~/.rustup/toolchains/1.95.0-x86_64-unknown-linux-gnu flatpak/rust-toolchain
+EOF
+  exit 1
+fi
 if [[ ! -d "$repo_root/flatpak/cargo-vendor" ]]; then
   cat >&2 <<'EOF'
 error: 缺少 flatpak/cargo-vendor（离线构建用的 crate 源）喵。先生成：
@@ -101,6 +108,8 @@ builder_args=(
   # 交互式构建里 rofiles-fuse 经常在中断后留下坏掉的挂载点，接着报 Permission denied；
   # 它只是加速用的，直接关掉更省事喵
   --disable-rofiles-fuse
+  # SDK 里的 libvips 没编 JPEG-XL，appstream 合成默认会碰它并报 media-worker-error喵
+  --compose-image-format=png
   --state-dir="$state_dir"
 )
 # 默认不存快照（体积大）；调试期间想复用中间结果就设 KEEP_CACHE=1喵

@@ -57,3 +57,9 @@ flatpak/cargo-vendor/
 
 # Flatpak 用的预编译 FFmpeg 动态库（CI 产物，体积大，不入库）
 flatpak/ffmpeg-prebuilt/
+
+# Flatpak 用的 Rust 工具链（官方 rustup 产物，离线构建用，不入库）
+flatpak/rust-toolchain/
+
+# Flatpak 用的 pnpm tarball（版本固定，离线安装）
+flatpak/pnpm-prebuilt/

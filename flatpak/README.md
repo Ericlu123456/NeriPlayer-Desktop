@@ -106,6 +106,15 @@ scripts/flatpak-migrate-data.sh link
 > 迁移前先退出应用；脚本会检查进程。缓存目录（封面、音频缓存）也在这份数据里，
 > 想省时间可以迁移后删掉 `cache/` 让它重建喵。
 
+## 已知的构建环境坑
+
+- **appstream 合成失败**：GNOME 48 SDK 的 `appstreamcli` 链接的 libvips 没编 JPEG-XL，合成时报
+  `media-worker-error` + `filters-but-no-output` 并让构建整体失败喵。当前先不安装 metainfo
+  （`flatpak install` 会打印一行 `No matching appdata`，软件中心元数据缺失，功能不受影响）喵。
+- **代理/网络**：构建容器走直连，`github.com` 与 `registry.npmjs.org` 会间歇性 `TLS unexpected eof` /
+  `ECONNRESET`；pnpm 已改用 `registry.npmmirror.com`，crates 与 Rust 工具链、pnpm 本体都已离线化喵。
+  剩下要联网的只有 `shared-modules` 里那几个 GitHub 仓库，中断后用 `KEEP_CACHE=1` 重跑即可续传喵。
+
 ## 数据目录与迁移
 
 Flatpak 默认把数据放在 `~/.var/app/moe.ouom.neriplayer.desktop/`，和 deb/rpm 用的
