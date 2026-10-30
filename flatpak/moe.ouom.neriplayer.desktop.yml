@@ -77,6 +77,8 @@ modules:
       append-path: /usr/lib/sdk/rust-stable/bin:/usr/lib/sdk/node22/bin
       env:
         CARGO_HOME: /run/build/neriplayer/.cargo
+        # rustc 默认按核心数并行，峰值内存把这台 15G 的机器压到 OOM（构建被 SIGKILL）喵
+        CARGO_BUILD_JOBS: '2'
         npm_config_cache: /run/build/neriplayer/.npm
         # 官方 registry 在直连环境下会间歇 ECONNRESET；国内镜像稳定且快得多喵
         npm_config_registry: https://registry.npmmirror.com
