@@ -29,7 +29,25 @@ cd src-tauri && cargo vendor --locked ../flatpak/cargo-vendor
 
 `scripts/build-flatpak.sh` 会先检查这个目录，缺失时直接给出上面这条命令喵。
 
-## 可选：随包带 FFmpeg
+## FFmpeg（必需）
+
+`org.gnome.Platform` 不自带 FFmpeg，Flathub 上也没有可用的 `ffmpeg-full` 扩展，所以清单会在构建时
+**就地编译** FFmpeg（`--disable-everything` + 只开需要的解码器/demuxer），装到 `/app/bin/ffmpeg`，
+也就是应用的第一搜索路径之一喵。
+
+源码树放在 `flatpak/ffmpeg-src/ffmpeg-9.0.2`（已 gitignore，约 114M），一次性准备：
+
+```bash
+mkdir -p flatpak/ffmpeg-src
+curl -fsSL -o /tmp/ffmpeg.tar.gz https://github.com/FFmpeg/FFmpeg/archive/refs/tags/n9.0.2.tar.gz
+tar -xzf /tmp/ffmpeg.tar.gz -C flatpak/ffmpeg-src
+mv flatpak/ffmpeg-src/FFmpeg-n9.0.2 flatpak/ffmpeg-src/ffmpeg-9.0.2
+```
+
+沙箱里没有 `nasm`，所以用 `FFMPEG_DISABLE_ASM=1` 关掉汇编优化（解码稍慢，格式覆盖完整）喵。
+`scripts/ffmpeg/build-ffmpeg.sh` 新增 `FFMPEG_SOURCE_DIR` 环境变量，就是为这条路准备的喵。
+
+## 可选：用预编译 FFmpeg 加速构建
 
 `org.gnome.Platform` 不自带 FFmpeg（Flathub 上也没有可用的 `ffmpeg-full` 扩展），所以默认会回退到
 内置解码器。要带完整解码链路，把 CI 的 FFmpeg 产物放到 `flatpak/ffmpeg-prebuilt/`（已 gitignore），

@@ -103,22 +103,29 @@ case "$target" in
     ;;
 esac
 
-tarball="$work/ffmpeg-${FFMPEG_VERSION}.tar.xz"
-if [[ ! -f "$tarball" ]]; then
-  curl -fsSL --retry 3 -o "$tarball.part" "$FFMPEG_URL"
-  mv "$tarball.part" "$tarball"
-fi
-actual_sha256="$(sha256 "$tarball")"
-if [[ "$actual_sha256" != "$FFMPEG_SHA256" ]]; then
-  echo "ffmpeg-${FFMPEG_VERSION}.tar.xz sha256 mismatch: $actual_sha256" >&2
-  exit 1
-fi
-
 source_dir="$work/ffmpeg-${FFMPEG_VERSION}"
+rm -rf "$source_dir"
+# 允许直接用已解压的源码树（离线构建/镜像下载困难时用）：
+# FFMPEG_SOURCE_DIR=<dir> 指向解压好的 ffmpeg-${VERSION}，跳过下载与校验喵
+if [[ -n "${FFMPEG_SOURCE_DIR:-}" ]]; then
+  [[ -d "$FFMPEG_SOURCE_DIR" ]] || { echo "FFMPEG_SOURCE_DIR not found: $FFMPEG_SOURCE_DIR" >&2; exit 1; }
+  cp -a "$FFMPEG_SOURCE_DIR" "$source_dir"
+else
+  tarball="$work/ffmpeg-${FFMPEG_VERSION}.tar.xz"
+  if [[ ! -f "$tarball" ]]; then
+    curl -fsSL --retry 3 -o "$tarball.part" "$FFMPEG_URL"
+    mv "$tarball.part" "$tarball"
+  fi
+  actual_sha256="$(sha256 "$tarball")"
+  if [[ "$actual_sha256" != "$FFMPEG_SHA256" ]]; then
+    echo "ffmpeg-${FFMPEG_VERSION}.tar.xz sha256 mismatch: $actual_sha256" >&2
+    exit 1
+  fi
+  tar -xJf "$tarball" -C "$work"
+fi
 build_dir="$work/build-$target"
 stage="$work/stage-$target"
-rm -rf "$source_dir" "$build_dir" "$stage"
-tar -xJf "$tarball" -C "$work"
+rm -rf "$build_dir" "$stage"
 mkdir -p "$build_dir"
 (cd "$build_dir" && "$source_dir/configure" --prefix="$stage" "${configure_flags[@]}")
 

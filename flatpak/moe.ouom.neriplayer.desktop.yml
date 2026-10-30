@@ -102,15 +102,19 @@ modules:
       # 走 scripts/run-tauri.mjs 以保留 <gitsha>.<MMddHHmm> 版本格式喵
       - pnpm tauri build --no-bundle
       - install -Dm755 src-tauri/target/release/neri-player-desktop /app/bin/neri-player-desktop
-      # 可选：把预编译的 FFmpeg 动态库放到 /app/bin/ffmpeg（应用的第一搜索路径之一）。
-      # 自建仓库/手工分发允许打包预编译二进制；提交 Flathub 时必须改成源码模块喵
+      # FFmpeg：优先用 flatpak/ffmpeg-prebuilt 的预编译库，否则就地用源码树编译。
+      # 源码树来自 flatpak/ffmpeg-src/ffmpeg-9.0.2（GitHub tag 快照），arm 沙箱里没有 nasm，
+      # 所以关掉汇编优化（FFMPEG_DISABLE_ASM=1），解码稍慢但格式覆盖完整喵
       - |
+        install -d /app/bin/ffmpeg
         if [ -d flatpak/ffmpeg-prebuilt ] && [ -n "$(ls -A flatpak/ffmpeg-prebuilt 2>/dev/null)" ]; then
-          install -d /app/bin/ffmpeg
           cp -a flatpak/ffmpeg-prebuilt/. /app/bin/ffmpeg/
-          echo "bundled prebuilt FFmpeg: $(ls /app/bin/ffmpeg | head -3 | tr '\n' ' ')"
+          echo "bundled prebuilt FFmpeg"
         else
-          echo "no prebuilt FFmpeg; the app will use its built-in decoder"
+          FFMPEG_DISABLE_ASM=1 FFMPEG_SOURCE_DIR="$PWD/flatpak/ffmpeg-src/ffmpeg-9.0.2" \
+            bash scripts/ffmpeg/build-ffmpeg.sh linux-x86_64
+          cp -a .cache/ffmpeg-build/linux-x86_64/. /app/bin/ffmpeg/
+          echo "built FFmpeg from source: $(ls /app/bin/ffmpeg | wc -l) files"
         fi
       - install -Dm644 flatpak/moe.ouom.neriplayer.desktop.desktop /app/share/applications/moe.ouom.neriplayer.desktop.desktop
       # 暂不安装 metainfo：GNOME 48 SDK 的 appstreamcli 依赖一个没编 JPEG-XL 的 libvips，

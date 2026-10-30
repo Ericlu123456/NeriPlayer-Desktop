@@ -63,3 +63,6 @@ flatpak/rust-toolchain/
 
 # Flatpak 用的 pnpm tarball（版本固定，离线安装）
 flatpak/pnpm-prebuilt/
+
+# Flatpak 用的 FFmpeg 源码（GitHub tag 快照，体积大，不入库）
+flatpak/ffmpeg-src/
