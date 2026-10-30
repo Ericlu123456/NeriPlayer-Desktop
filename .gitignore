@@ -46,3 +46,8 @@ docs-private/
 
 # Test build Direction
 /build/
+
+# Flatpak 构建产物（原型脚本本地生成）
+flatpak/build-dir/
+flatpak/repo/
+flatpak/.flatpak-builder/

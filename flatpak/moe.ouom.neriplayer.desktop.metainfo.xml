@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>moe.ouom.neriplayer.desktop</id>
+  <launchable type="desktop-id">moe.ouom.neriplayer.desktop.desktop</launchable>
+  <name>NeriPlayer</name>
+  <summary>Multi-source music player with word-timed lyrics</summary>
+  <developer id="moe.ouom">
+    <name>cwuom</name>
+  </developer>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+  <url type="homepage">https://github.com/cwuom/NeriPlayer-Desktop</url>
+  <url type="bugtracker">https://github.com/cwuom/NeriPlayer-Desktop/issues</url>
+  <content_rating type="oars-1.1">
+    <content_attribute id="social-info">mild</content_attribute>
+  </content_rating>
+  <supports>
+    <control>pointing</control>
+    <control>keyboard</control>
+  </supports>
+  <description>
+    <p>
+      NeriPlayer Desktop 是 NeriPlayer 的桌面移植版本，使用 Vue 3 与 Rust 构建，
+      通过 Tauri 2 接入桌面系统，整合网易云音乐、Bilibili、YouTube Music 与本地音频。
+    </p>
+    <p>
+      本地优先：歌单、收藏、历史、队列与播放统计默认保存在本机；音频由 Rust 解码输出，
+      界面负责逐字歌词与动态背景；可选 GitHub / WebDAV 元数据同步，协议与 Android 端保持兼容。
+    </p>
+    <p>
+      注意：Linux 版本目前属于测试环境，渲染依赖 WebKitGTK，稳定性与性能弱于其他平台。
+    </p>
+  </description>
+  <screenshots>
+    <screenshot type="default">
+      <image>https://raw.githubusercontent.com/cwuom/NeriPlayer-Desktop/main/docs/screenshots/library-interactions.png</image>
+      <caption>曲库与播放界面</caption>
+    </screenshot>
+  </screenshots>
+  <releases>
+    <release version="1.0.0" date="2026-10-29">
+      <description>
+        <p>Flatpak 打包原型，版本号跟随仓库构建元数据。</p>
+      </description>
+    </release>
+  </releases>
+</component>

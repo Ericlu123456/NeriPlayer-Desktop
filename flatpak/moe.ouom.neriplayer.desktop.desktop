@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=NeriPlayer
+GenericName=Music Player
+Comment=Multi-source music player with word-timed lyrics
+Exec=neri-player-desktop
+Icon=moe.ouom.neriplayer.desktop
+Terminal=false
+Categories=AudioVideo;Audio;Player;
+Keywords=music;player;lyrics;netease;bilibili;youtube;
+StartupWMClass=neri-player-desktop
+X-GNOME-UsesNotifications=true
