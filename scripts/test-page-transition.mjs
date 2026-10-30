@@ -34,14 +34,4 @@ for (const platform of ['windows', 'mac', 'linux']) {
   }
 }
 
-const nvidia = ['platform-linux', 'nvidia-compat']
-for (const state of ['fade-enter-from', 'fade-leave-to']) {
-  const style = transitionStyle(state, nvidia)
-  assert.equal(style.opacity, '1', 'NVIDIA compatibility keeps pages visible during an instant switch')
-  assert.equal(style.transform, 'none', 'NVIDIA compatibility avoids the full-page compositor transform')
-}
-for (const state of ['fade-enter-active', 'fade-leave-active', 'slide-up-enter-active', 'slide-up-leave-active']) {
-  assert.equal(transitionStyle(state, nvidia).transition, 'none', 'NVIDIA compatibility keeps the no-animation fallback')
-}
-
-console.log('page transition styles passed: original motion on three platforms and NVIDIA compatibility fallback')
+console.log('page transition styles passed: original motion on all three platforms')

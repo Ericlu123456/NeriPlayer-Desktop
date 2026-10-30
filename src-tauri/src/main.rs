@@ -63,14 +63,6 @@ fn main() {
     // 默认关闭 DMA-BUF atlas 并改用定时 vblank（仍走 DMA-BUF 硬件合成，不强制 SHM）；
     // 仍闪烁时用 NERI_WEBKIT_FORCE_SHM=1 退到共享内存合成，完全跳过本兼容层用
     // NERI_DISABLE_NVIDIA_QUIRK=1。显式设置的环境变量始终优先。
-    // Linux + NVIDIA proprietary: apply compatibility settings before GTK/WebKit init to
-    // stop page-switch flicker. By default this disables the DMA-BUF atlas and switches to
-    // the timer-based vblank (DMA-BUF hardware compositing stays on; SHM is not forced);
-    // set NERI_WEBKIT_FORCE_SHM=1 to fall back to shared-memory compositing, or
-    // NERI_DISABLE_NVIDIA_QUIRK=1 to skip this layer. Explicit env vars always win.
-    #[cfg(target_os = "linux")]
-    neri_player_desktop::linux_graphics::apply_nvidia_webkit_workarounds();
-
     // 在其余插件之前初始化统一日志：启动期直接读取持久化设置决定
     // 是否写文件与日志级别（此时尚无 app handle）
     let log_cfg = neri_player_desktop::logging::load_bootstrap_config();
@@ -96,17 +88,6 @@ fn main() {
             let handle = app.handle().clone();
             // 日志插件初始化时把 max_level 放到了 Trace，这里收回到设置的级别
             neri_player_desktop::logging::set_runtime_level(log_cfg.level);
-
-            #[cfg(target_os = "linux")]
-            if let Some(quirk) = neri_player_desktop::linux_graphics::apply_nvidia_webkit_workarounds() {
-                log::info!(
-                    target: "linux-graphics",
-                    "NVIDIA WebKitGTK workaround active: explicit_sync_disabled={}, frames_allowed={:?}, vsync_disabled={}, dmabuf_atlas_disabled={}, vblank_timer_forced={}, dmabuf_shm_forced={}, dmabuf_disabled={}, software_compositing={}",
-                    quirk.explicit_sync_disabled, quirk.frames_allowed, quirk.vsync_disabled,
-                    quirk.dmabuf_atlas_disabled, quirk.vblank_timer_forced, quirk.dmabuf_shm_forced,
-                    quirk.dmabuf_disabled, quirk.software_compositing,
-                );
-            }
 
             // 安装包把 FFmpeg 放在资源目录的 ffmpeg/ 下，各平台、各包格式的位置由 Tauri 给出
             match app.path().resource_dir() {
@@ -562,7 +543,6 @@ fn main() {
             settings_cmd::save_file_bytes,
             settings_cmd::set_bypass_proxy,
             settings_cmd::get_build_info,
-            settings_cmd::get_linux_graphics_compat,
             settings_cmd::get_system_accent_color,
             settings_cmd::probe_platform_connectivity,
             debug_cmd::get_recent_logs,
