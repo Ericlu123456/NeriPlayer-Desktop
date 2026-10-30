@@ -91,6 +91,33 @@ fn env_u32(name: &str) -> Option<u32> {
     std::env::var(name).ok()?.trim().parse::<u32>().ok()
 }
 
+/// WebKitGTK 的运行时版本（major, minor）。
+///
+/// 兼容层只在 2.54+ 上才有意义：那一代把 web 进程合成器换成了 Skia 实现并把
+/// damage-aware compositing 设为默认，才出现动态背景/切页闪烁；2.46/2.48 实测无此问题，
+/// 此时再设环境变量只会白白降低帧率（还会让前端关掉整页转场动画）。
+/// Runtime WebKitGTK version as (major, minor). The quirk only matters on 2.54+, whose
+/// Skia compositor introduced the flicker; on 2.46/2.48 the variables cost frames for
+/// nothing and make the frontend disable page transitions.
+fn webkit_runtime_version() -> Option<(u32, u32)> {
+    extern "C" {
+        fn webkit_get_major_version() -> std::os::raw::c_uint;
+        fn webkit_get_minor_version() -> std::os::raw::c_uint;
+    }
+    // SAFETY: 两个函数无参数、无副作用，只返回编译进库里的版本号喵
+    let (major, minor) = unsafe { (webkit_get_major_version(), webkit_get_minor_version()) };
+    (major > 0).then_some((major, minor))
+}
+
+/// 兼容层是否适用于当前运行时喵。
+fn webkit_needs_workarounds() -> bool {
+    match webkit_runtime_version() {
+        Some((major, minor)) => major > 2 || (major == 2 && minor >= 54),
+        // 读不到版本时按「需要」处理，保持旧行为喵
+        None => true,
+    }
+}
+
 /// 在 GTK/WebKit 初始化前应用 NVIDIA 兼容设置。
 /// Apply NVIDIA compatibility settings before GTK/WebKit initializes.
 ///
@@ -99,6 +126,16 @@ fn env_u32(name: &str) -> Option<u32> {
 pub fn apply_nvidia_webkit_workarounds() -> Option<AppliedNvidiaQuirk> {
     *APPLIED.get_or_init(|| {
         if !nvidia_proprietary_driver_loaded() {
+            return None;
+        }
+        // 2.46/2.48 不需要兼容层：实测不闪，设了反而掉帧并让前端关掉转场动画喵
+        if !webkit_needs_workarounds() {
+            if let Some((major, minor)) = webkit_runtime_version() {
+                eprintln!(
+                    "neri: WebKitGTK {major}.{minor} has no known flicker regression; \
+                     skipping NVIDIA WebKitGTK workarounds"
+                );
+            }
             return None;
         }
         // 用户明确要求跳过 / Explicit opt-out.
