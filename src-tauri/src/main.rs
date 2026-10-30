@@ -50,6 +50,31 @@ fn classify_playback_finish(
     }
 }
 
+/// 在 GTK/WebKit 初始化前关掉 NVIDIA 的 explicit sync。
+///
+/// 严格同步的合成器（KDE Plasma/KWin 等）会按 acquire point 校验 surface 提交，
+/// 而 WebKit 并不总是设置它，结果可能是启动阶段直接协议错误退出。这个开关交给驱动，
+/// 应用侧无法自行补齐 acquire point，所以只能在 NVIDIA 私有驱动存在时默认关闭；
+/// 需要原生 explicit sync 时用 `NERI_KEEP_NVIDIA_EXPLICIT_SYNC=1` 退出。
+/// Turn off NVIDIA explicit sync before GTK/WebKit initialises. Strict-sync compositors
+/// validate surface commits against an acquire point that WebKit does not always set, which
+/// can fail at startup; the app cannot supply it, so the driver switch is the only lever.
+#[cfg(target_os = "linux")]
+fn disable_nvidia_explicit_sync_if_needed() {
+    let nvidia_loaded = std::path::Path::new("/proc/driver/nvidia/version").exists()
+        || std::path::Path::new("/sys/module/nvidia").exists();
+    if !nvidia_loaded || std::env::var_os("__NV_DISABLE_EXPLICIT_SYNC").is_some() {
+        return;
+    }
+    if matches!(
+        std::env::var("NERI_KEEP_NVIDIA_EXPLICIT_SYNC").as_deref(),
+        Ok("1" | "true" | "TRUE" | "yes" | "YES")
+    ) {
+        return;
+    }
+    std::env::set_var("__NV_DISABLE_EXPLICIT_SYNC", "1");
+}
+
 fn main() {
     // 崩溃收集必须最早安装：之后任何线程 panic 都会把现场落盘
     neri_player_desktop::logging::install_panic_hook(env!("CARGO_PKG_VERSION"));
@@ -59,10 +84,12 @@ fn main() {
     std::env::set_var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
         "--enable-gpu --enable-gpu-rasterization --enable-zero-copy --enable-features=CanvasOopRasterization");
 
-    // Linux NVIDIA 私有驱动：在 GTK/WebKit 初始化前应用兼容设置，消除页面切换闪烁。
-    // 默认关闭 DMA-BUF atlas 并改用定时 vblank（仍走 DMA-BUF 硬件合成，不强制 SHM）；
-    // 仍闪烁时用 NERI_WEBKIT_FORCE_SHM=1 退到共享内存合成，完全跳过本兼容层用
-    // NERI_DISABLE_NVIDIA_QUIRK=1。显式设置的环境变量始终优先。
+    // Linux NVIDIA 私有驱动 + 严格同步的合成器（KWin 等）：WebKit 提交 surface 时不一定
+    // 设置 acquire point，可能被合成器判成协议错误而直接启动失败。这是唯一还保留的
+    // 兼容开关；帧率/合成相关的变量已经退役（Flatpak 固定运行时 48，没有那个回归）。
+    // 想保留驱动原生 explicit sync 就设 NERI_KEEP_NVIDIA_EXPLICIT_SYNC=1。
+    #[cfg(target_os = "linux")]
+    disable_nvidia_explicit_sync_if_needed();
     // 在其余插件之前初始化统一日志：启动期直接读取持久化设置决定
     // 是否写文件与日志级别（此时尚无 app handle）
     let log_cfg = neri_player_desktop::logging::load_bootstrap_config();

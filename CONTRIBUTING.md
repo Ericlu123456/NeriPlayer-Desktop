@@ -372,35 +372,29 @@ macOS 使用 ad-hoc 签名，未经 Apple 公证。Release 检查 dylib 架构�
 
 #### Linux WebKitGTK / NVIDIA
 
-`src-tauri/src/linux_graphics.rs` 在 GTK / WebKit 初始化前检测已经加载的 NVIDIA 私有驱动，
-通过 `/proc` 或 `/sys` 判断，不将仅存在 NVIDIA 硬件或 nouveau 等同于私有驱动。
-检测到后，默认禁用 NVIDIA explicit sync、将驱动在途帧上限设为 1、关闭 DMA-BUF atlas，
-并使用 SHM 共享内存合成。这里的在途帧上限不是帧率承诺，也不等于关闭整个 DMA-BUF renderer。
-前端会将整页路由切换、播放页滑动和遮罩动画降为即时切换，减少大图层重绘。
+Linux 端的渲染完全跑在发行版（或 Flatpak runtime）提供的 WebKitGTK 上，所以**行为由
+WebKitGTK 版本决定**，不是由显卡厂商决定：
 
-已经显式设置的 NVIDIA / WebKit 环境变量优先，兼容层不覆盖它们。
-例如显式设置 `WEBKIT_DISABLE_DMABUF_RENDERER` 时，不再叠加强制 SHM。
-可按问题逐项对照以下开关，修改后以新进程验证：
+- **2.54 及更新**：合成器换成 Skia 实现并把 damage-aware compositing 设为默认后，
+  动态背景与页面切换会出现间歇性闪烁（上游 [WebKit bug 327524](https://bugs.webkit.org/show_bug.cgi?id=327524)，
+  2.54.2 仍未修复）。应用侧没有可靠规避手段，因此 Flatpak 构建固定使用运行时 48。
+- **2.46 / 2.48**：实测无此回归，动画与动态背景都正常。
+
+唯一保留的兼容开关是 **NVIDIA explicit sync**：严格同步的合成器（KDE Plasma/KWin 等）
+会校验 surface 的 acquire point，而 WebKit 不总会设置它，可能导致启动时协议错误退出。
+应用侧无法补齐 acquire point，只能在检测到 NVIDIA 私有驱动时默认关闭
+（`__NV_DISABLE_EXPLICIT_SYNC=1`，通过 `/proc/driver/nvidia/version` 或 `/sys/module/nvidia` 判断）。
 
 | 环境变量 | 作用 |
 | --- | --- |
-| `NERI_DISABLE_NVIDIA_QUIRK=1` | 跳过整个兼容层，也不启用由该状态触发的前端转场降级 |
-| `NERI_WEBKIT_KEEP_DMABUF=1` | 不强制 SHM，保留 DMA-BUF 硬件合成；atlas 仍按独立规则处理 |
-| `NERI_WEBKIT_KEEP_DMABUF_ATLAS=1` | 不自动关闭 DMA-BUF atlas，不改变 SHM 的独立选择 |
-| `NERI_NVIDIA_FRAMES_ALLOWED=N` | 覆盖默认在途帧上限 1；`0` 表示不设置该上限 |
-| `NERI_NVIDIA_NO_VSYNC=1` | 显式关闭垂直同步，可能出现撕裂，默认不启用 |
-| `NERI_WEBKIT_DMABUF_NO_GBM=1` | 请求绕过 NVIDIA GBM 分配路径，默认不启用 |
-| `NERI_WEBKIT_FORCE_VBLANK_TIMER=1` | 请求使用定时 vblank，默认不启用 |
-| `NERI_WEBKIT_SOFTWARE_COMPOSITING=1` | 关闭加速合成，作为排障兜底，可能明显降低性能 |
+| `NERI_KEEP_NVIDIA_EXPLICIT_SYNC=1` | 保留驱动原生 explicit sync（不设置 `__NV_DISABLE_EXPLICIT_SYNC`） |
 
-在 Linux shell 中仅对本次开发启动设置变量，例如：
+窗口装饰：Linux 用 `src-tauri/tauri.linux.conf.json` 把 `decorations` 设为 `false`，标题栏完全由
+前端 `TitleBar.vue` 自绘（macOS 仍用原生红绿灯）。只在运行期调 `set_decorations(false)` 在 Wayland 上
+不够可靠，KWin 等合成器会保留服务端装饰，出现两条标题栏。
 
-```bash
-NERI_WEBKIT_KEEP_DMABUF=1 pnpm tauri dev
-```
-
-不需要为排障全局修改系统配置。记录驱动、桌面会话、WebKitGTK 版本、实际环境变量和
-`linux-graphics` 日志；这些兼容策略不能替代目标系统上的实际界面验证。
+排障时记录 WebKitGTK 版本、桌面会话与驱动版本，并优先比较不同 WebKitGTK 版本下的表现；
+把问题归因到"Linux 渲染"或"显卡"之前，先确认版本。这些结论不能替代目标系统上的实际界面验证。
 
 ---
 

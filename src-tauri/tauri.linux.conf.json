@@ -1,0 +1,24 @@
+{
+  "app": {
+    "windows": [
+      {
+        "title": "NeriPlayer",
+        "width": 1280,
+        "height": 800,
+        "minWidth": 960,
+        "minHeight": 720,
+        "decorations": false,
+        "titleBarStyle": "Overlay",
+        "trafficLightPosition": {
+          "x": 20,
+          "y": 20
+        },
+        "hiddenTitle": true,
+        "transparent": false,
+        "backgroundColor": "#141218",
+        "visible": false,
+        "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,IntensiveWakeUpThrottling --disable-background-timer-throttling"
+      }
+    ]
+  }
+}

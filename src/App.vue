@@ -88,9 +88,6 @@ const flipOverlayStyle = ref<Record<string, string> | null>(null)
 const flipTransitionMode = ref<'opening' | 'closing' | null>(null)
 const isFlipAnimating = ref(false)
 const nowPlayingMotionState = ref<'opening' | 'closing' | null>(null)
-// NVIDIA + WebKitGTK：整页滑入/滑出会重绘巨大图层并闪烁，改为瞬时切换
-// NVIDIA + WebKitGTK: sliding the full-screen layer repaints a huge area and
-// flickers, so switch instantly instead.
 const lastCoverSnapshot = ref<{ trackId: string; src: string } | null>(null)
 
 const hasMiniPlayer = computed(() => hasVisiblePlaybackSession(

@@ -408,37 +408,33 @@ reuse `fsutil.rs` and existing atomic replacement procedures for file writes.
 
 #### Linux WebKitGTK / NVIDIA
 
-`src-tauri/src/linux_graphics.rs` checks for a loaded NVIDIA proprietary driver through `/proc` or `/sys`
-before GTK / WebKit initialization. NVIDIA hardware alone, or nouveau, does not trigger it.
-When detected, defaults disable NVIDIA explicit sync, set the driver's in-flight frame limit to 1,
-disable the DMA-BUF atlas, and use SHM shared-memory compositing. An in-flight limit is not an FPS guarantee
-and does not disable the entire DMA-BUF renderer. The frontend also makes full-page route changes,
-now-playing slides, and scrim transitions instant to reduce large-layer repaints.
+Rendering on Linux runs entirely on the WebKitGTK shipped by the distro (or the Flatpak runtime), so
+**behaviour follows the WebKitGTK version**, not the GPU vendor:
 
-Explicitly set NVIDIA / WebKit environment variables take priority; the compatibility layer does not overwrite them.
-For example, an explicit `WEBKIT_DISABLE_DMABUF_RENDERER` prevents additional forced SHM.
-Compare one option at a time and verify changes in a new process:
+- **2.54 and newer**: after the compositor moved to Skia and damage-aware compositing became the default,
+  the dynamic background and page switches flicker intermittently (upstream
+  [WebKit bug 327524](https://bugs.webkit.org/show_bug.cgi?id=327524), still unfixed in 2.54.2).
+  The app has no reliable workaround, so the Flatpak build pins runtime 48.
+- **2.46 / 2.48**: measured flicker-free; animation and the dynamic background behave normally.
+
+The only compatibility switch left is **NVIDIA explicit sync**: strict-sync compositors (KDE Plasma/KWin
+and friends) validate the surface acquire point, which WebKit does not always set, so startup can fail with
+a protocol error. The app cannot supply the acquire point, so it turns the driver switch off by default when
+a proprietary NVIDIA driver is detected (`__NV_DISABLE_EXPLICIT_SYNC=1`, via `/proc/driver/nvidia/version`
+or `/sys/module/nvidia`).
 
 | Environment variable | Effect |
 | --- | --- |
-| `NERI_DISABLE_NVIDIA_QUIRK=1` | Skip the entire compatibility layer, including frontend transition fallback triggered by its state |
-| `NERI_WEBKIT_KEEP_DMABUF=1` | Keep DMA-BUF hardware compositing without forced SHM; atlas handling remains independent |
-| `NERI_WEBKIT_KEEP_DMABUF_ATLAS=1` | Do not automatically disable the DMA-BUF atlas; SHM selection remains independent |
-| `NERI_NVIDIA_FRAMES_ALLOWED=N` | Override the default in-flight frame limit of 1; `0` leaves it unset |
-| `NERI_NVIDIA_NO_VSYNC=1` | Explicitly disable vsync, potentially causing tearing; off by default |
-| `NERI_WEBKIT_DMABUF_NO_GBM=1` | Request bypassing NVIDIA GBM allocation; off by default |
-| `NERI_WEBKIT_FORCE_VBLANK_TIMER=1` | Request timer-based vblank; off by default |
-| `NERI_WEBKIT_SOFTWARE_COMPOSITING=1` | Disable accelerated compositing as a troubleshooting fallback, potentially reducing performance substantially |
+| `NERI_KEEP_NVIDIA_EXPLICIT_SYNC=1` | Keep the driver's native explicit sync (do not set `__NV_DISABLE_EXPLICIT_SYNC`) |
 
-In a Linux shell, set an option only for this development launch, for example:
+Window decorations: Linux sets `decorations` to `false` in `src-tauri/tauri.linux.conf.json`, so the title bar
+is drawn entirely by `TitleBar.vue` (macOS keeps its native traffic lights). Calling `set_decorations(false)`
+at runtime is not enough on Wayland — KWin and friends keep the server-side decoration, which shows up as a
+second title bar.
 
-```bash
-NERI_WEBKIT_KEEP_DMABUF=1 pnpm tauri dev
-```
-
-Troubleshooting does not require global system configuration changes. Record the driver, desktop session,
-WebKitGTK version, actual environment variables, and `linux-graphics` logs.
-These compatibility strategies do not replace runtime UI validation on the target system.
+When troubleshooting, record the WebKitGTK version, desktop session, and driver version, and compare across
+WebKitGTK versions first; confirm the version before attributing a problem to "Linux rendering" or the GPU.
+These findings cannot replace real UI verification on the target system.
 
 ---
 

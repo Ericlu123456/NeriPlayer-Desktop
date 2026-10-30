@@ -18,28 +18,42 @@ flatpak install flathub org.gnome.Platform//49 org.gnome.Sdk//49 \
   org.freedesktop.Sdk.Extension.node22//25.08
 ```
 
+## 前置：生成离线 crate 源
+
+沙箱里拉 crates.io 索引又慢又容易超时，所以构建走本地 vendor（体积约 1.5G，已 gitignore，
+不入库）；缺了它构建会在 `pnpm tauri build` 阶段失败：
+
+```bash
+cd src-tauri && cargo vendor --locked ../flatpak/cargo-vendor
+```
+
+`scripts/build-flatpak.sh` 会先检查这个目录，缺失时直接给出上面这条命令喵。
+
 ## 构建
 
 ```bash
 scripts/build-flatpak.sh              # 构建并装到当前用户
 scripts/build-flatpak.sh --no-install # 只构建
-RUNTIME_BRANCH=50 scripts/build-flatpak.sh
+RUNTIME_BRANCH=48 scripts/build-flatpak.sh
 ```
 
 脚本会先检查工具与运行时是否齐备，缺什么打印对应安装命令，不会自己调 `sudo`。
 
 ## 为什么选这个 runtime 分支
 
-`org.gnome.Platform` 自带 WebKitGTK，所以 runtime 分支直接决定 WebKit 版本。
-WebKitGTK 2.54 换了 web 进程合成器（Skia + damage-aware compositing），带进了一个
-透明度/背景刷新时的间歇闪烁回归（上游 [WebKit Bug 327524](https://bugs.webkit.org/show_bug.cgi?id=327524)，
-2.54.2 仍未修复）。选一个 WebKit < 2.54 的分支可以同时避开它。
+`org.gnome.Platform` 自带 WebKitGTK，所以 **runtime 分支直接决定 WebKit 版本**，而这就是本清单
+固定 48 的原因：
 
-先确认分支里到底是什么版本，再决定用哪个分支：
+| 分支 | WebKitGTK | 动态背景 / 切页闪烁 |
+| --- | --- | --- |
+| 48 | `libwebkit2gtk-4.1.so.0.19.9`（2.46/2.48） | 实测不闪（动画、动态背景都正常） |
+| 49 | `libwebkit2gtk-4.1.so.0.24.3`（2.54 一代） | 会闪，上游 [WebKit 327524](https://bugs.webkit.org/show_bug.cgi?id=327524)，2.54.2 未修 |
+
+升级分支前先确认里面的 WebKit 版本，否则会把闪烁带回来：
 
 ```bash
-flatpak run --command=sh org.gnome.Platform//49 -c \
-  'pkg-config --modversion webkit2gtk-4.1; ldd --version | head -1'
+flatpak run --command=sh org.gnome.Platform//48 -c \
+  'ls /usr/lib/x86_64-linux-gnu/libwebkit2gtk-4.1.so.0.*'
 ```
 
 ## 从 deb / rpm 迁移到 Flatpak

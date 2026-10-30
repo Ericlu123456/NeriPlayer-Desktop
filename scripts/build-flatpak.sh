@@ -7,7 +7,7 @@
 # 用法 / Usage:
 #   scripts/build-flatpak.sh            # 构建并安装到当前用户
 #   scripts/build-flatpak.sh --no-install
-#   RUNTIME_BRANCH=49 scripts/build-flatpak.sh   # 试别的 runtime 分支
+#   RUNTIME_BRANCH=49 scripts/build-flatpak.sh   # 试别的 runtime 分支（默认取清单里的值）
 #
 # 想验证 runtime 里实际是哪个 WebKitGTK / glibc 喵：
 #   flatpak run --command=sh org.gnome.Platform//49 -c \
@@ -17,7 +17,9 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 manifest="$repo_root/flatpak/moe.ouom.neriplayer.desktop.yml"
-runtime_branch="${RUNTIME_BRANCH:-49}"
+# runtime 分支以清单为准，避免脚本和 manifest 各说各话喵
+runtime_branch="${RUNTIME_BRANCH:-$(sed -n "s/^runtime-version: *'\([^']*\)'.*/\1/p" "$repo_root/flatpak/moe.ouom.neriplayer.desktop.yml" | head -1)}"
+runtime_branch="${runtime_branch:-48}"
 build_dir="${BUILD_DIR:-$repo_root/flatpak/build-dir}"
 state_dir="${STATE_DIR:-$repo_root/flatpak/.flatpak-builder}"
 install=1
@@ -42,6 +44,14 @@ fi
 echo "==> 剩余空间 ${free_gib}G，开始构建喵"
 
 [[ -f "$manifest" ]] || die "manifest not found: $manifest"
+# cargo vendor 目录是构建必需品，但体积大、不入库：先生成再构建喵
+if [[ ! -d "$repo_root/flatpak/cargo-vendor" ]]; then
+  cat >&2 <<'EOF'
+error: 缺少 flatpak/cargo-vendor（离线构建用的 crate 源）喵。先生成：
+  (cd src-tauri && cargo vendor --locked ../flatpak/cargo-vendor)
+EOF
+  exit 1
+fi
 
 command -v flatpak >/dev/null 2>&1 || die "flatpak 未安装（Arch: sudo pacman -S flatpak）"
 if ! command -v flatpak-builder >/dev/null 2>&1; then
@@ -65,8 +75,8 @@ require_ref() {
 }
 require_ref "org.gnome.Platform//$runtime_branch"
 require_ref "org.gnome.Sdk//$runtime_branch"
-# 扩展分支跟随 freedesktop-sdk，不跟随 GNOME 分支喵
-sdk_branch="${SDK_BRANCH:-25.08}"
+# 扩展分支跟随 freedesktop-sdk（GNOME 48 → 24.08），不跟随 GNOME 分支喵
+sdk_branch="${SDK_BRANCH:-24.08}"
 require_ref "org.freedesktop.Sdk.Extension.rust-stable//$sdk_branch"
 require_ref "org.freedesktop.Sdk.Extension.node22//$sdk_branch"
 

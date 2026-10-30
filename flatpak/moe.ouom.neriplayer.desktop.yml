@@ -1,16 +1,19 @@
-# NeriPlayer Desktop — Flatpak 构建清单（原型）
+# NeriPlayer Desktop — Flatpak 构建清单
 #
 # 目标：用固定 runtime 提供 glibc 与 WebKitGTK，解决两件事：
 #   1. 产物不再受构建机 glibc 限制（runtime 自带 glibc）；
 #   2. WebKitGTK 版本可复现（runtime 自带 libwebkit2gtk-4.1）。
 #
-# runtime 分支决定 WebKitGTK 版本：GNOME 48 大致是 2.48/2.50，可避开 2.54 合成器回归；
-# 升级分支前先跑 `flatpak run --command=sh org.gnome.Platform//49 -c
-# 'pkg-config --modversion webkit2gtk-4.1'` 确认实际版本。
+# runtime 分支就是这条链上最关键的开关喵：
+#   48 → libwebkit2gtk-4.1.so.0.19.9（2.46/2.48），实测不闪，动画与动态背景都正常
+#   49 → libwebkit2gtk-4.1.so.0.24.3（2.54 一代），上游 327524 的闪烁回归
+# 所以固定 48；升级前先跑
+#   flatpak run --command=sh org.gnome.Platform//48 -c \
+#     'ls /usr/lib/x86_64-linux-gnu/libwebkit2gtk-4.1.so.0.*'
+# 确认版本，否则会把闪烁带回来。
 #
-# 当前是原型：构建期允许联网，依赖 pnpm 现场安装。要提 Flathub 必须改成离线构建
-# （生成 node-sources.json / cargo-sources.json 并作为 sources 提交），见
-# flatpak/README.md。
+# 当前是原型：构建期允许联网（rustup/pnpm），crate 走本地 vendor；
+# 提 Flathub 前要把 node 依赖也离线化，见 flatpak/README.md。
 
 app-id: moe.ouom.neriplayer.desktop
 runtime: org.gnome.Platform
@@ -51,7 +54,7 @@ finish-args:
   # 系统集成：通知、托盘、媒体会话喵
   - --talk-name=org.freedesktop.Notifications
   - --talk-name=org.kde.StatusNotifierWatcher
-  - --own-name=org.mpris.MediaPlayer2.neriplayer
+  - --own-name=org.mpris.MediaPlayer2.neri_player
   # 文件选择器等 portal 喵
   - --talk-name=org.freedesktop.portal.Desktop
 
