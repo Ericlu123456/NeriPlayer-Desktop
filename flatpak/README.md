@@ -42,6 +42,37 @@ flatpak run --command=sh org.gnome.Platform//49 -c \
   'pkg-config --modversion webkit2gtk-4.1; ldd --version | head -1'
 ```
 
+## 从 deb / rpm 迁移到 Flatpak
+
+三种做法，按「要不要继续和旧安装共用一份数据」选喵：
+
+**A. 应用内备份（最稳，跨打包方式都适用）**
+
+旧版本里：**设置 → 备份** 导出配置；装好 Flatpak 后在同一位置导入喵。
+歌单、设置、统计都走这份导出，不依赖文件路径，是唯一推荐给普通用户的方式喵。
+
+**B. 复制数据目录（一次性迁移）**
+
+```bash
+sudo pacman -Rns neri-player-desktop   # 先卸掉旧包，避免两个版本抢单实例
+scripts/flatpak-migrate-data.sh        # 把 ~/.local/share/moe.ouom.neriplayer.desktop 复制进 Flatpak
+flatpak run moe.ouom.neriplayer.desktop
+```
+
+复制后两份数据各自独立，之后互不影响；想回滚只需重装 deb/rpm 喵。
+
+**C. 软链共用（两边同一份配置）**
+
+```bash
+scripts/flatpak-migrate-data.sh link
+```
+
+`~/.var/app/moe.ouom.neriplayer.desktop/.local/share/moe.ouom.neriplayer.desktop`
+会指向宿主目录，deb/rpm 与 Flatpak 读写同一份数据喵。**不要两边同时运行**，单实例锁不跨沙箱喵。
+
+> 迁移前先退出应用；脚本会检查进程。缓存目录（封面、音频缓存）也在这份数据里，
+> 想省时间可以迁移后删掉 `cache/` 让它重建喵。
+
 ## 数据目录与迁移
 
 Flatpak 默认把数据放在 `~/.var/app/moe.ouom.neriplayer.desktop/`，和 deb/rpm 用的

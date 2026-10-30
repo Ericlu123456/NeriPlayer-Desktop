@@ -68,14 +68,20 @@ modules:
       # 并把这一行删掉，否则审查会直接拒喵
       build-args:
         - --share=network
+      # SDK 48 的 rust-stable 扩展只到 1.89，而仓库依赖（muda）要求 >= 1.90，
+      # 所以构建期用 rustup 拉仓库钉住的 1.95.0 工具链（原型阶段允许联网）喵
+      prepend-path: /run/build/neriplayer/.cargo/bin
       append-path: /usr/lib/sdk/rust-stable/bin:/usr/lib/sdk/node22/bin
       env:
         CARGO_HOME: /run/build/neriplayer/.cargo
+        RUSTUP_HOME: /run/build/neriplayer/.rustup
         npm_config_cache: /run/build/neriplayer/.npm
         COREPACK_HOME: /run/build/neriplayer/.corepack
     build-commands:
       # corepack 要求目标目录已存在，而构建沙箱里的 /app 是空的喵
       - install -d /app/bin
+      # 1.95.0 与 rust-toolchain.toml 保持一致喵
+      - sh -c 'curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain 1.95.0'
       # pnpm 版本由 package.json 的 packageManager 钉住，corepack 负责拉取喵
       - corepack enable --install-directory /app/bin
       - corepack prepare --activate
