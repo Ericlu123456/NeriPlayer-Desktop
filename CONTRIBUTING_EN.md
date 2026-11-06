@@ -417,6 +417,11 @@ Rendering on Linux runs entirely on the WebKitGTK shipped by the distro (or the 
   tracking — disabling `UseDamagingInformationForCompositing` does not help, while
   `WEBKIT_USE_SKIA_FOR_COMPOSITION=0` removes the flicker and keeps GPU acceleration, so the Skia layer compositor
   is the culprit.
+
+  Measured here (KWin + Wayland + NVIDIA): on 2.54 with `WEBKIT_USE_SKIA_FOR_COMPOSITION=0`, ordinary layer
+  transitions stop flickering but the WebGL canvas of the dynamic background still flickers intermittently —
+  WebGL content takes a different compositing path and the variable only fixes the non-WebGL half. WebKitGTK
+  2.46/2.48 is currently the only version where neither flickers.
   The app has no reliable workaround, so the Flatpak build pins runtime 48.
 - **2.46 / 2.48**: measured flicker-free; animation and the dynamic background behave normally.
 

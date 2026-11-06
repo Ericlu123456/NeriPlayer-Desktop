@@ -380,7 +380,11 @@ WebKitGTK 版本决定**，不是由显卡厂商决定：
   [326841](https://bugs.webkit.org/show_bug.cgi?id=326841) 同源；2.54.2 仍未修复）。上游排查已经排除
   damage tracking——`UseDamagingInformationForCompositing` 关掉照旧闪，而
   `WEBKIT_USE_SKIA_FOR_COMPOSITION=0` 能消除闪烁且保留 GPU 加速，所以问题在 Skia 图层合成器喵。
-  应用侧没有可靠的规避手段（那个变量等于放弃 Skia 合成），因此 Flatpak 构建固定使用运行时 48。
+  应用侧没有可靠的规避手段（那个变量等于放弃 Skia 合成），因此 Flatpak 构建固定使用运行时 48喵。
+
+  实测补充（KWin + Wayland + NVIDIA）：在 2.54 上加 `WEBKIT_USE_SKIA_FOR_COMPOSITION=0` 后，
+  **普通图层过渡不再闪，但动态背景的 WebGL 画布仍会间歇闪烁**——也就是说 WebGL 内容走的是另一条
+  合成路径，这个变量只治好了非 WebGL 的部分喵。目前只有 WebKit 2.46/2.48 能让两者都不闪喵。
 - **2.46 / 2.48**：实测无此回归，动画与动态背景都正常。
 
 唯一保留的兼容开关是 **NVIDIA explicit sync**：严格同步的合成器（KDE Plasma/KWin 等）
